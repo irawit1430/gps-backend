@@ -76,7 +76,7 @@ async function simulateFleet(buses) {
   }));
 
   while (true) {
-    for (let state of busStates) {
+    await Promise.all(busStates.map(async (state) => {
       // Move them slightly to simulate driving
       state.lat += (Math.random() - 0.5) * 0.001;
       state.lng += (Math.random() - 0.5) * 0.001;
@@ -94,7 +94,7 @@ async function simulateFleet(buses) {
       } catch (error) {
         console.error(`[Error] Failed to send telemetry for ${state.deviceId}`);
       }
-    }
+    }));
     
     // Wait 5 seconds before next ping
     await sleep(5000);
