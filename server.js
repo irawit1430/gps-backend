@@ -34,6 +34,19 @@ app.post('/api/auth/login', async (req, res) => {
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
+
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Access denied' });
+
+  jwt.verify(token, process.env.JWT_SECRET || 'super-secret-fleet-key', (err, user) => {
+    if (err) return res.status(403).json({ error: 'Invalid token' });
+    req.user = user;
+    next();
+  });
+};
+
 // --- 1. HARDWARE / SIMULATION ---
 app.post('/api/telemetry', async (req, res) => {
   try {
@@ -66,8 +79,11 @@ app.get('/api/schools/:schoolId/buses', async (req, res) => {
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get('/api/schools/:schoolId/leaves/pending', async (req, res) => {
+app.get('/api/schools/:schoolId/leaves/pending', authenticateToken, async (req, res) => {
   try {
+    if (req.user.role !== 'SUPER_ADMIN' && req.user.schoolId !== req.params.schoolId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
     const leaves = await prisma.leaveApplication.findMany({
       where: { student: { schoolId: req.params.schoolId }, status: "PENDING" },
       include: { student: true }
