@@ -44,11 +44,21 @@ app.post('/api/auth/login', async (req, res) => {
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
+const busCache = new Map();
+
 // --- 1. HARDWARE / SIMULATION ---
 app.post('/api/telemetry', async (req, res) => {
   try {
     const { deviceId, lat, lng, speed, timestamp } = req.body;
-    const bus = await prisma.bus.findUnique({ where: { deviceId } });
+
+    let bus = busCache.get(deviceId);
+    if (!bus) {
+      bus = await prisma.bus.findUnique({ where: { deviceId } });
+      if (bus) {
+        busCache.set(deviceId, bus);
+      }
+    }
+
     if (!bus) return res.status(404).json({ error: 'Bus not found' });
 
     const log = await prisma.gpsLog.create({
