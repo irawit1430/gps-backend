@@ -63,7 +63,7 @@ async function seedDatabase() {
   return buses;
 }
 
-async function simulateFleet(buses) {
+async function simulateFleet(buses, maxIterations = Infinity) {
   console.log('\n--- Starting Live Fleet Simulation ---');
   console.log('Sending GPS pings every 5 seconds...\n');
 
@@ -75,7 +75,7 @@ async function simulateFleet(buses) {
     speed: 40
   }));
 
-  while (true) {
+  for (let i = 0; i < maxIterations; i++) {
     for (let state of busStates) {
       // Move them slightly to simulate driving
       state.lat += (Math.random() - 0.5) * 0.001;
@@ -124,4 +124,8 @@ async function main() {
   }
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = { simulateFleet, sleep };
