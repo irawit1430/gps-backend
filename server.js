@@ -11,6 +11,16 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 const prisma = new PrismaClient({ log: ['error'] });
+const { execSync } = require('child_process');
+
+try {
+  console.log('Ensuring SQLite database is initialized...');
+  execSync('npx prisma db push', { stdio: 'inherit' });
+  execSync('node seed-admin.js', { stdio: 'inherit' });
+  console.log('Database initialized successfully!');
+} catch (e) {
+  console.error('Failed to initialize database on boot:', e.message);
+}
 
 app.use(cors());
 app.use(express.json());
