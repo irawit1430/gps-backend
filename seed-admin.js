@@ -1,11 +1,22 @@
 const { PrismaClient } = require('@prisma/client');
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 
 const prisma = new PrismaClient({ log: ['error'] });
 
 async function seedAdmin() {
   try {
-    const hashedPassword = await bcrypt.hash('password123', 10);
+    let password = process.env.ADMIN_PASSWORD;
+    if (!password) {
+      password = crypto.randomBytes(16).toString('hex');
+      console.warn('====================================================');
+      console.warn('WARNING: No ADMIN_PASSWORD provided in environment.');
+      console.warn(`Generated random password for seeded users: ${password}`);
+      console.warn('Please save this password or set ADMIN_PASSWORD.');
+      console.warn('====================================================');
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
     
     // 1. Create Super Admin
     const existingAdmin = await prisma.user.findUnique({ where: { email: 'admin@fleet.com' } });
