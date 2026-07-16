@@ -124,4 +124,5 @@ async function main() {
   }
 }
 
-main();
+if (require.main === module) { main(); }
+module.exports = { seedDatabase, prisma, TOTAL_BUSES, STUDENTS_PER_BUS };
