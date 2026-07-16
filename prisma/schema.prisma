@@ -1,0 +1,186 @@
+generator client {
+  provider = "prisma-client-js"
+  engineType = "library"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                   String         @id @default(uuid())
+  email                String         @unique
+  password             String
+  role                 String         // "SUPER_ADMIN", "SCHOOL_ADMIN", "DRIVER", "PARENT"
+  name                 String
+  photoUrl             String?
+  notificationSettings String?        // JSON string storing toggle states
+  schoolId             String?
+  school               School?        @relation(fields: [schoolId], references: [id])
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+  
+  // Relations for specific roles
+  parentStudents Student[]      @relation("ParentStudents")
+  driverTrips    Trip[]         @relation("DriverTrips")
+  notifications  Notification[]
+}
+
+model School {
+  id        String   @id @default(uuid())
+  name      String
+  address   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  users     User[]
+  buses     Bus[]
+  routes    Route[]
+  students  Student[]
+}
+
+model Bus {
+  id           String   @id @default(uuid())
+  schoolId     String
+  school       School   @relation(fields: [schoolId], references: [id])
+  licensePlate String   @unique
+  capacity     Int
+  deviceId     String   @unique // IMEI of TM-100
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  
+  trips        Trip[]
+  gpsLogs      GpsLog[]
+}
+
+model Route {
+  id                String   @id @default(uuid())
+  schoolId          String
+  school            School   @relation(fields: [schoolId], references: [id])
+  name              String
+  estimatedDuration Int?     // In minutes
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  stops     RouteStop[]
+  trips     Trip[]
+}
+
+model RouteStop {
+  id        String   @id @default(uuid())
+  routeId   String
+  route     Route    @relation(fields: [routeId], references: [id])
+  name      String
+  lat       Float
+  lng       Float
+  orderIdx  Int
+  createdAt DateTime @default(now())
+  
+  studentMappings StudentRouteMapping[]
+}
+
+model Student {
+  id        String   @id @default(uuid())
+  schoolId  String
+  school    School   @relation(fields: [schoolId], references: [id])
+  rfidTag   String   @unique
+  name      String
+  grade     String?
+  photoUrl  String?
+  parentId  String?
+  parent    User?    @relation("ParentStudents", fields: [parentId], references: [id])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  routeMappings    StudentRouteMapping[]
+  attendanceLogs   AttendanceLog[]
+  leaveApplications LeaveApplication[]
+}
+
+model StudentRouteMapping {
+  id          String    @id @default(uuid())
+  studentId   String
+  student     Student   @relation(fields: [studentId], references: [id])
+  routeStopId String
+  routeStop   RouteStop @relation(fields: [routeStopId], references: [id])
+  
+  @@unique([studentId, routeStopId])
+}
+
+model Trip {
+  id                String   @id @default(uuid())
+  routeId           String
+  route             Route    @relation(fields: [routeId], references: [id])
+  busId             String
+  bus               Bus      @relation(fields: [busId], references: [id])
+  driverId          String
+  driver            User     @relation("DriverTrips", fields: [driverId], references: [id])
+  status            String   @default("PLANNED") // "PLANNED", "ON_SCHEDULE", "DELAYED", "COMPLETED"
+  progressPercent   Int      @default(0)
+  delayMinutes      Int      @default(0)
+  currentEtaMessage String?
+  startTime         DateTime?
+  endTime           DateTime?
+  createdAt         DateTime @default(now())
+  
+  gpsLogs        GpsLog[]
+  attendanceLogs AttendanceLog[]
+}
+
+model GpsLog {
+  id        String   @id @default(uuid())
+  busId     String
+  bus       Bus      @relation(fields: [busId], references: [id])
+  tripId    String?
+  trip      Trip?    @relation(fields: [tripId], references: [id])
+  lat       Float
+  lng       Float
+  speed     Float    @default(0)
+  timestamp DateTime @default(now())
+}
+
+model AttendanceLog {
+  id        String   @id @default(uuid())
+  studentId String
+  student   Student  @relation(fields: [studentId], references: [id])
+  tripId    String
+  trip      Trip     @relation(fields: [tripId], references: [id])
+  type      String   // "BOARDED", "ALIGHTED"
+  timestamp DateTime @default(now())
+}
+
+model LeaveApplication {
+  id          String   @id @default(uuid())
+  studentId   String
+  student     Student  @relation(fields: [studentId], references: [id])
+  startDate   DateTime 
+  endDate     DateTime 
+  reason      String
+  notes       String?  // Optional text from parent
+  status      String   @default("PENDING") // PENDING, APPROVED, REJECTED
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model EmergencyAlert {
+  id        String   @id @default(uuid())
+  schoolId  String
+  type      String   // "DRIVER_SOS", "ADMIN_BROADCAST"
+  message   String?  
+  senderId  String   
+  tripId    String?  
+  status    String   @default("ACTIVE") // ACTIVE, RESOLVED
+  createdAt DateTime @default(now())
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String   // Parent ID
+  user      User     @relation(fields: [userId], references: [id])
+  title     String
+  message   String
+  type      String   // "ARRIVAL", "BOARDING", "DELAY", "SYSTEM"
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
