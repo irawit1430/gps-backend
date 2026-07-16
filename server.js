@@ -15,6 +15,19 @@ const prisma = new PrismaClient({ log: ['error'] });
 app.use(cors());
 app.use(express.json());
 
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Access denied' });
+
+  jwt.verify(token, process.env.JWT_SECRET || 'super-secret-fleet-key', (err, user) => {
+    if (err) return res.status(403).json({ error: 'Invalid token' });
+    req.user = user;
+    next();
+  });
+};
+
+
 app.get('/', (req, res) => res.send('Fleet API is running perfectly!'));
 
 // --- 0. AUTHENTICATION ---
@@ -77,8 +90,13 @@ app.get('/api/schools/:schoolId/leaves/pending', async (req, res) => {
 });
 
 // --- 3. PARENT APP ---
-app.get('/api/parents/:parentId/students', async (req, res) => {
+app.get('/api/parents/:parentId/students', authenticateToken, async (req, res) => {
   try {
+    // Authorization: User must be requesting their own data OR be an admin
+    if (req.user.id !== req.params.parentId && !['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(req.user.role)) {
+      return res.status(403).json({ error: 'Unauthorized access to parent data' });
+    }
+
     const students = await prisma.student.findMany({
       where: { parentId: req.params.parentId },
       include: { routeMappings: { include: { routeStop: true } } }
