@@ -129,6 +129,33 @@ app.get('/api/admin/stats', async (req, res) => {
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
+// --- 6. SUPER ADMIN DATA ---
+app.get('/api/schools', async (req, res) => {
+  try {
+    const schools = await prisma.school.findMany({ orderBy: { createdAt: 'desc' } });
+    res.json(schools);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/schools', async (req, res) => {
+  try {
+    const { name, address } = req.body;
+    const school = await prisma.school.create({ data: { name, address } });
+    res.json(school);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/devices', async (req, res) => {
+  try {
+    // In our schema, TM-100 devices are attached to Buses
+    const devices = await prisma.bus.findMany({
+      include: { school: { select: { name: true } } },
+      orderBy: { licensePlate: 'asc' }
+    });
+    res.json(devices);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
 io.on('connection', (socket) => {
   console.log('New Client Connected:', socket.id);
 });
