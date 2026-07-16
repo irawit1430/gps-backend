@@ -28,7 +28,7 @@ app.post('/api/auth/login', async (req, res) => {
     const isValid = await bcrypt.compare(password, user.password);
     if (!isValid) return res.status(401).json({ error: 'Invalid credentials' });
     
-    const token = jwt.sign({ id: user.id, role: user.role, schoolId: user.schoolId }, process.env.JWT_SECRET || 'super-secret-fleet-key', { expiresIn: '7d' });
+    const token = jwt.sign({ id: user.id, role: user.role, schoolId: user.schoolId }, process.env.JWT_SECRET, { expiresIn: '7d' });
     
     res.json({ token, user: { id: user.id, role: user.role, name: user.name, email: user.email, schoolId: user.schoolId } });
   } catch(err) { res.status(500).json({ error: err.message }); }
@@ -55,11 +55,29 @@ app.post('/api/telemetry', async (req, res) => {
   }
 });
 
+
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Access denied. No token provided.' });
+
+  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+    if (err) return res.status(403).json({ error: 'Invalid token' });
+    req.user = user;
+    next();
+  });
+};
+
 // --- 2. ADMIN DASHBOARD ---
-app.get('/api/schools/:schoolId/buses', async (req, res) => {
+app.get('/api/schools/:schoolId/buses', authenticateToken, async (req, res) => {
   try {
+    const requestedSchoolId = req.params.schoolId;
+    if (req.user.role !== 'SUPER_ADMIN' && req.user.schoolId !== requestedSchoolId) {
+      return res.status(403).json({ error: 'Forbidden. Unauthorized access to school data.' });
+    }
+
     const buses = await prisma.bus.findMany({
-      where: { schoolId: req.params.schoolId },
+      where: { schoolId: requestedSchoolId },
       include: { gpsLogs: { orderBy: { timestamp: 'desc' }, take: 1 } } // Gets latest live location
     });
     res.json(buses);
