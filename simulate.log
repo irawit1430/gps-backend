@@ -1,0 +1,58 @@
+Seeding Database...
+Created School: 7fe51a3f-f1bb-4e77-bdf2-dabc9b5cc6fa
+Created 10 Buses
+Created 400 Students
+
+--- Starting Live Fleet Simulation ---
+Sending GPS pings every 5 seconds...
+
+[Sent] Device: TM100-SIM-1 | Lat: 18.5459 | Lng: 73.8672
+[Sent] Device: TM100-SIM-2 | Lat: 18.5534 | Lng: 73.8988
+[Sent] Device: TM100-SIM-3 | Lat: 18.5556 | Lng: 73.8854
+[Sent] Device: TM100-SIM-4 | Lat: 18.5308 | Lng: 73.8812
+[Sent] Device: TM100-SIM-5 | Lat: 18.5652 | Lng: 73.8602
+[Sent] Device: TM100-SIM-6 | Lat: 18.5339 | Lng: 73.8906
+[Sent] Device: TM100-SIM-7 | Lat: 18.5573 | Lng: 73.8749
+[Sent] Device: TM100-SIM-8 | Lat: 18.5640 | Lng: 73.8745
+[Sent] Device: TM100-SIM-9 | Lat: 18.5554 | Lng: 73.8985
+[Sent] Device: TM100-SIM-10 | Lat: 18.5226 | Lng: 73.8962
+[Sent] Device: TM100-SIM-1 | Lat: 18.5458 | Lng: 73.8673
+[Sent] Device: TM100-SIM-2 | Lat: 18.5531 | Lng: 73.8984
+[Sent] Device: TM100-SIM-3 | Lat: 18.5561 | Lng: 73.8852
+[Sent] Device: TM100-SIM-4 | Lat: 18.5311 | Lng: 73.8811
+[Sent] Device: TM100-SIM-5 | Lat: 18.5650 | Lng: 73.8605
+[Sent] Device: TM100-SIM-6 | Lat: 18.5342 | Lng: 73.8905
+[Sent] Device: TM100-SIM-7 | Lat: 18.5569 | Lng: 73.8751
+[Sent] Device: TM100-SIM-8 | Lat: 18.5643 | Lng: 73.8741
+[Sent] Device: TM100-SIM-9 | Lat: 18.5553 | Lng: 73.8983
+[Sent] Device: TM100-SIM-10 | Lat: 18.5227 | Lng: 73.8962
+[Sent] Device: TM100-SIM-1 | Lat: 18.5456 | Lng: 73.8669
+[Sent] Device: TM100-SIM-2 | Lat: 18.5535 | Lng: 73.8986
+[Sent] Device: TM100-SIM-3 | Lat: 18.5557 | Lng: 73.8851
+[Sent] Device: TM100-SIM-4 | Lat: 18.5314 | Lng: 73.8812
+[Sent] Device: TM100-SIM-5 | Lat: 18.5653 | Lng: 73.8607
+[Sent] Device: TM100-SIM-6 | Lat: 18.5341 | Lng: 73.8904
+[Sent] Device: TM100-SIM-7 | Lat: 18.5570 | Lng: 73.8748
+[Sent] Device: TM100-SIM-8 | Lat: 18.5642 | Lng: 73.8742
+[Sent] Device: TM100-SIM-9 | Lat: 18.5551 | Lng: 73.8979
+[Sent] Device: TM100-SIM-10 | Lat: 18.5226 | Lng: 73.8963
+[Sent] Device: TM100-SIM-1 | Lat: 18.5459 | Lng: 73.8665
+[Sent] Device: TM100-SIM-2 | Lat: 18.5537 | Lng: 73.8981
+[Sent] Device: TM100-SIM-3 | Lat: 18.5559 | Lng: 73.8853
+[Sent] Device: TM100-SIM-4 | Lat: 18.5317 | Lng: 73.8811
+[Sent] Device: TM100-SIM-5 | Lat: 18.5656 | Lng: 73.8608
+[Sent] Device: TM100-SIM-6 | Lat: 18.5338 | Lng: 73.8906
+[Sent] Device: TM100-SIM-7 | Lat: 18.5566 | Lng: 73.8743
+[Sent] Device: TM100-SIM-8 | Lat: 18.5640 | Lng: 73.8739
+[Sent] Device: TM100-SIM-9 | Lat: 18.5548 | Lng: 73.8975
+[Sent] Device: TM100-SIM-10 | Lat: 18.5222 | Lng: 73.8963
+[Sent] Device: TM100-SIM-1 | Lat: 18.5460 | Lng: 73.8660
+[Sent] Device: TM100-SIM-2 | Lat: 18.5533 | Lng: 73.8982
+[Sent] Device: TM100-SIM-3 | Lat: 18.5559 | Lng: 73.8854
+[Sent] Device: TM100-SIM-4 | Lat: 18.5320 | Lng: 73.8812
+[Sent] Device: TM100-SIM-5 | Lat: 18.5652 | Lng: 73.8606
+[Sent] Device: TM100-SIM-6 | Lat: 18.5337 | Lng: 73.8901
+[Sent] Device: TM100-SIM-7 | Lat: 18.5569 | Lng: 73.8748
+[Sent] Device: TM100-SIM-8 | Lat: 18.5642 | Lng: 73.8735
+[Sent] Device: TM100-SIM-9 | Lat: 18.5543 | Lng: 73.8976
+[Sent] Device: TM100-SIM-10 | Lat: 18.5221 | Lng: 73.8962
