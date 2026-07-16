@@ -13,14 +13,17 @@ const io = new Server(server, { cors: { origin: "*" } });
 const prisma = new PrismaClient({ log: ['error'] });
 const { execSync } = require('child_process');
 
-try {
-  console.log('Ensuring SQLite database is initialized...');
-  execSync('npx prisma db push', { stdio: 'inherit' });
-  execSync('node seed-admin.js', { stdio: 'inherit' });
-  console.log('Database initialized successfully!');
-} catch (e) {
-  console.error('Failed to initialize database on boot:', e.message);
+if (require.main === module) {
+  try {
+    console.log("Ensuring SQLite database is initialized...");
+    execSync("npx prisma db push", { stdio: "inherit" });
+    execSync("node seed-admin.js", { stdio: "inherit" });
+    console.log("Database initialized successfully!");
+  } catch (e) {
+    console.error("Failed to initialize database on boot:", e.message);
+  }
 }
+
 
 app.use(cors());
 app.use(express.json());
@@ -188,4 +191,8 @@ io.on('connection', (socket) => {
   console.log('New Client Connected:', socket.id);
 });
 
-server.listen(3000, () => console.log('Server running on port 3000'));
+if (require.main === module) {
+  server.listen(3000, () => console.log("Server running on port 3000"));
+}
+
+module.exports = { app, prisma };
