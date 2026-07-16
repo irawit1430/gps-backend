@@ -4,8 +4,8 @@
   "description": "",
   "main": "server.js",
   "scripts": {
-    "start": "npx prisma db push && node seed-admin.js && node server.js",
-    "build": "npx prisma generate",
+    "start": "node server.js",
+    "build": "npx prisma generate && npx prisma db push && node seed-admin.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
