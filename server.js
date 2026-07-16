@@ -110,6 +110,24 @@ app.post('/api/alerts/sos', async (req, res) => {
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
+// --- 5. SUPER ADMIN STATS ---
+app.get('/api/admin/stats', async (req, res) => {
+  try {
+    const totalSchools = await prisma.school.count();
+    const totalBuses = await prisma.bus.count();
+    const totalStudents = await prisma.student.count();
+    
+    // For offline devices, we return a placeholder until hardware heartbeats are implemented in schema
+    const offlineDevices = 18; // Placeholder matching your UI
+
+    res.json({
+      totalSchools,
+      totalBuses,
+      offlineDevices,
+      totalStudents
+    });
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
 
 io.on('connection', (socket) => {
   console.log('New Client Connected:', socket.id);
