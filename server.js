@@ -170,4 +170,5 @@ io.on('connection', (socket) => {
   console.log('New Client Connected:', socket.id);
 });
 
-server.listen(3000, () => console.log('Server running on port 3000'));
+if (require.main === module) { server.listen(3000, () => console.log('Server running on port 3000')); }
+module.exports = { app, server };
