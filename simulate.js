@@ -37,7 +37,7 @@ async function seedDatabase() {
   console.log(`Created ${buses.length} Buses`);
 
   // 3. Create Route (Mock route for simulation)
-  const route = await prisma.route.create({
+  await prisma.route.create({
     data: {
       schoolId: school.id,
       name: 'Morning Simulation Route'
