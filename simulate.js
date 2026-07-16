@@ -1,5 +1,6 @@
 const { PrismaClient } = require('@prisma/client');
 const axios = require('axios');
+require('dotenv').config();
 
 const prisma = new PrismaClient();
 const API_URL = 'http://localhost:3000/api/telemetry';
@@ -89,6 +90,10 @@ async function simulateFleet(buses) {
           lng: state.lng,
           speed: state.speed,
           timestamp: new Date().toISOString()
+        }, {
+          headers: {
+            'x-api-key': process.env.TELEMETRY_API_KEY
+          }
         });
         console.log(`[Sent] Device: ${state.deviceId} | Lat: ${state.lat.toFixed(4)} | Lng: ${state.lng.toFixed(4)}`);
       } catch (error) {

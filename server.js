@@ -35,7 +35,24 @@ app.post('/api/auth/login', async (req, res) => {
 });
 
 // --- 1. HARDWARE / SIMULATION ---
+const crypto = require('crypto');
+
 app.post('/api/telemetry', async (req, res) => {
+  const providedApiKey = req.headers['x-api-key'];
+  const expectedApiKey = process.env.TELEMETRY_API_KEY;
+
+  if (!providedApiKey || !expectedApiKey) {
+    return res.status(401).json({ error: 'Unauthorized: Invalid or missing API key' });
+  }
+
+  const expectedBuffer = Buffer.from(expectedApiKey);
+  const providedBuffer = Buffer.from(providedApiKey);
+
+  // Use timingSafeEqual to prevent timing attacks, and check length first to prevent error
+  if (expectedBuffer.length !== providedBuffer.length || !crypto.timingSafeEqual(expectedBuffer, providedBuffer)) {
+    return res.status(401).json({ error: 'Unauthorized: Invalid or missing API key' });
+  }
+
   try {
     const { deviceId, lat, lng, speed, timestamp } = req.body;
     const bus = await prisma.bus.findUnique({ where: { deviceId } });
