@@ -6,7 +6,7 @@
   "scripts": {
     "start": "npx prisma db push && node seed-admin.js && node server.js",
     "build": "npx prisma generate",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "jest"
   },
   "keywords": [],
   "author": "",
@@ -16,15 +16,19 @@
     "@prisma/client": "^5.22.0",
     "axios": "^1.18.1",
     "bcryptjs": "^3.0.3",
+    "child_process": "^1.0.2",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "http": "^0.0.1-security",
     "jsonwebtoken": "^9.0.3",
     "localtunnel": "^2.0.2",
     "socket.io": "^4.8.3"
   },
   "devDependencies": {
+    "jest": "^30.4.2",
     "nodemon": "^3.1.14",
-    "prisma": "^5.22.0"
+    "prisma": "^5.22.0",
+    "supertest": "^7.2.2"
   }
 }
