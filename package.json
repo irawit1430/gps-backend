@@ -4,7 +4,7 @@
   "description": "",
   "main": "server.js",
   "scripts": {
-    "start": "npx prisma db push && node seed-admin.js && node server.js",
+    "start": "node index.js",
     "build": "npx prisma generate",
     "test": "jest"
   },
