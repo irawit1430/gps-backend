@@ -5,7 +5,7 @@ const { server } = require('./server.js');
 
 try {
   console.log('Ensuring SQLite database is initialized from index.js...');
-  execSync('npx prisma db push', { stdio: 'inherit' });
+  execSync('npx prisma db push --accept-data-loss --skip-generate', { stdio: 'inherit' });
   execSync('node seed-admin.js', { stdio: 'inherit' });
   console.log('Database initialized successfully!');
 } catch (e) {
