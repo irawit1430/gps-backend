@@ -5,7 +5,14 @@ const cors = require('cors');
 const { PrismaClient } = require('@prisma/client');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
+
 require('dotenv').config();
+
+if (!process.env.JWT_SECRET) {
+  console.error('CRITICAL: JWT_SECRET environment variable is missing.');
+  process.exit(1);
+}
+
 
 const app = express();
 const server = http.createServer(app);
@@ -38,10 +45,13 @@ app.post('/api/auth/login', async (req, res) => {
     const isValid = await bcrypt.compare(password, user.password);
     if (!isValid) return res.status(401).json({ error: 'Invalid credentials' });
     
-    const token = jwt.sign({ id: user.id, role: user.role, schoolId: user.schoolId }, process.env.JWT_SECRET || 'super-secret-fleet-key', { expiresIn: '7d' });
+    const token = jwt.sign({ id: user.id, role: user.role, schoolId: user.schoolId }, process.env.JWT_SECRET, { expiresIn: '7d' });
     
     res.json({ token, user: { id: user.id, role: user.role, name: user.name, email: user.email, schoolId: user.schoolId } });
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch(err) {
+    console.error('Login error:', err);
+    res.status(500).json({ error: 'An internal error occurred during login' });
+  }
 });
 
 // --- 1. HARDWARE / SIMULATION ---
