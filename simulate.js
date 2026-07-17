@@ -22,17 +22,28 @@ async function seedDatabase() {
   console.log(`Created School: ${school.id}`);
 
   // 2. Create Buses
-  const buses = [];
+  const busData = [];
   for (let i = 1; i <= TOTAL_BUSES; i++) {
-    const bus = await prisma.bus.create({
-      data: {
-        schoolId: school.id,
-        licensePlate: `MH-12-AB-${1000 + i}`,
-        capacity: STUDENTS_PER_BUS,
-        deviceId: `TM100-SIM-${i}`
-      }
+    busData.push({
+      schoolId: school.id,
+      licensePlate: `MH-12-AB-${1000 + i}`,
+      capacity: STUDENTS_PER_BUS,
+      deviceId: `TM100-SIM-${i}`
     });
-    buses.push(bus);
+  }
+
+  let buses;
+  if (prisma.bus.createManyAndReturn) {
+    buses = await prisma.bus.createManyAndReturn({
+      data: busData
+    });
+  } else {
+    await prisma.bus.createMany({
+      data: busData
+    });
+    buses = await prisma.bus.findMany({
+      where: { schoolId: school.id }
+    });
   }
   console.log(`Created ${buses.length} Buses`);
 
