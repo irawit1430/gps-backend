@@ -35,7 +35,36 @@ if (require.main === module) {
 app.use(cors());
 app.use(express.json());
 
+// Authentication Middleware
+const authenticate = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Unauthorized: Missing or invalid token' });
+  }
+  const token = authHeader.split(' ')[1];
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Unauthorized: Invalid token' });
+  }
+};
+
+app.use('/api', (req, res, next) => {
+  if (req.path === '/auth/login' || req.path === '/telemetry') return next();
+  return authenticate(req, res, next);
+});
+
+
+
 app.get('/', (req, res) => res.send('Fleet API is running perfectly!'));
+
+
+if (!process.env.JWT_SECRET) {
+  console.error('FATAL: process.env.JWT_SECRET is required');
+  process.exit(1);
+}
 
 // --- 0. AUTHENTICATION ---
 app.post('/api/auth/login', async (req, res) => {
@@ -48,7 +77,7 @@ app.post('/api/auth/login', async (req, res) => {
     const isValid = await bcrypt.compare(password, user.password);
     if (!isValid) return res.status(401).json({ error: 'Invalid credentials' });
     
-    const token = jwt.sign({ id: user.id, role: user.role, schoolId: user.schoolId }, process.env.JWT_SECRET || 'super-secret-fleet-key', { expiresIn: '7d' });
+    const token = jwt.sign({ id: user.id, role: user.role, schoolId: user.schoolId }, process.env.JWT_SECRET, { expiresIn: '7d' });
     
     const preferences = user.notificationSettings ? JSON.parse(user.notificationSettings) : {};
     res.json({ token, user: { id: user.id, role: user.role, name: user.name, email: user.email, schoolId: user.schoolId, preferences } });
@@ -192,8 +221,9 @@ app.post('/api/schools/:schoolId/routes', async (req, res) => {
 
 app.put('/api/routes/:id', async (req, res) => {
   try {
+    const { name, estimatedDuration } = req.body;
     const route = await prisma.route.update({
-      where: { id: req.params.id }, data: req.body
+      where: { id: req.params.id }, data: { name, estimatedDuration }
     });
     res.json(route);
   } catch (err) {
@@ -216,7 +246,16 @@ app.get('/api/schools/:schoolId/drivers', async (req, res) => {
   try {
     const drivers = await prisma.user.findMany({
       where: { schoolId: req.params.schoolId, role: "DRIVER" },
-      include: {
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        photoUrl: true,
+        notificationSettings: true,
+        schoolId: true,
+        createdAt: true,
+        updatedAt: true,
         driverTrips: {
           where: { status: { in: ["PLANNED", "ON_SCHEDULE"] } },
           include: { bus: true, route: true }
@@ -617,8 +656,9 @@ app.post('/api/schools', async (req, res) => {
 
 app.put('/api/schools/:id', async (req, res) => {
   try {
+    const { name, address } = req.body;
     const school = await prisma.school.update({
-      where: { id: req.params.id }, data: req.body
+      where: { id: req.params.id }, data: { name, address }
     });
     res.json(school);
   } catch (err) {
@@ -688,8 +728,9 @@ app.post('/api/devices', async (req, res) => {
 
 app.put('/api/devices/:id', async (req, res) => {
   try {
+    const { deviceId, licensePlate, capacity, schoolId } = req.body;
     const device = await prisma.bus.update({
-      where: { id: req.params.id }, data: req.body
+      where: { id: req.params.id }, data: { deviceId, licensePlate, capacity, schoolId }
     });
     io.emit('device_status_change', { deviceId: device.id, status: 'ONLINE', message: 'Device updated' });
     res.json(device);
@@ -795,8 +836,15 @@ app.post('/api/admins', async (req, res) => {
 
 app.put('/api/admins/:id', async (req, res) => {
   try {
-    const { password, ...updateData } = req.body;
-    if (password) updateData.password = await bcrypt.hash(password, 10);
+    const updateData = {
+      name: req.body.name,
+      email: req.body.email,
+      role: req.body.role,
+      schoolId: req.body.schoolId
+    };
+    if (req.body.password) {
+      updateData.password = await bcrypt.hash(req.body.password, 10);
+    }
     
     const admin = await prisma.user.update({
       where: { id: req.params.id }, 
@@ -836,10 +884,12 @@ app.get('/api/settings', async (req, res) => {
 
 app.put('/api/settings', async (req, res) => {
   try {
+    const { maintenanceMode, mapCenterLat, mapCenterLng } = req.body;
+    const settingsData = { maintenanceMode, mapCenterLat, mapCenterLng };
     const settings = await prisma.globalSettings.upsert({
       where: { id: "global" },
-      update: req.body,
-      create: { id: "global", ...req.body }
+      update: settingsData,
+      create: { id: "global", ...settingsData }
     });
     res.json(settings);
   } catch (err) {

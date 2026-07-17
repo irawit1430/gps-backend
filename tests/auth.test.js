@@ -78,6 +78,7 @@ describe('POST /api/auth/login', () => {
       name: 'Test User',
       email: 'user@test.com',
       schoolId: 10,
+      preferences: {}
     });
 
     // verify the token payload
@@ -97,6 +98,6 @@ describe('POST /api/auth/login', () => {
       .send({ email: 'user@test.com', password: 'password123' });
 
     expect(res.status).toBe(500);
-    expect(res.body).toEqual({ error: 'Database error' });
+    expect(res.body).toEqual({ error: 'Internal server error' });
   });
 });
