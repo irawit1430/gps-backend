@@ -432,6 +432,72 @@ app.get('/api/admin/logs', async (req, res) => {
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
+// Admins Management
+app.get('/api/admins', async (req, res) => {
+  try {
+    const admins = await prisma.user.findMany({
+      where: { role: { in: ['SUPER_ADMIN', 'SCHOOL_ADMIN'] } },
+      select: { id: true, name: true, email: true, role: true, schoolId: true, createdAt: true }
+    });
+    res.json(admins);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/admins', async (req, res) => {
+  try {
+    const { name, email, password, role, schoolId } = req.body;
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const admin = await prisma.user.create({
+      data: { name, email, password: hashedPassword, role, schoolId },
+      select: { id: true, name: true, email: true, role: true }
+    });
+    res.json(admin);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/admins/:id', async (req, res) => {
+  try {
+    const { password, ...updateData } = req.body;
+    if (password) updateData.password = await bcrypt.hash(password, 10);
+    
+    const admin = await prisma.user.update({
+      where: { id: req.params.id }, 
+      data: updateData,
+      select: { id: true, name: true, email: true, role: true }
+    });
+    res.json(admin);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/admins/:id', async (req, res) => {
+  try {
+    await prisma.user.delete({ where: { id: req.params.id } });
+    res.json({ success: true });
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+// Settings Management
+app.get('/api/settings', async (req, res) => {
+  try {
+    let settings = await prisma.globalSettings.findUnique({ where: { id: "global" } });
+    if (!settings) {
+      settings = await prisma.globalSettings.create({ data: { id: "global" } });
+    }
+    res.json(settings);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/settings', async (req, res) => {
+  try {
+    const settings = await prisma.globalSettings.upsert({
+      where: { id: "global" },
+      update: req.body,
+      create: { id: "global", ...req.body }
+    });
+    res.json(settings);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
 io.on('connection', (socket) => {
   console.log('New Client Connected:', socket.id);
 });

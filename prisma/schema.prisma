@@ -184,3 +184,12 @@ model Notification {
   isRead    Boolean  @default(false)
   createdAt DateTime @default(now())
 }
+
+model GlobalSettings {
+  id              String   @id @default("global")
+  maintenanceMode Boolean  @default(false)
+  mapCenterLat    Float    @default(28.7041)
+  mapCenterLng    Float    @default(77.1025)
+  updatedAt       DateTime @updatedAt
+}
+
