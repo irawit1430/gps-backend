@@ -25,6 +25,20 @@ async function seedAdmin() {
       data: { name: 'Delhi Public School', address: 'New Delhi, India' }
     });
 
+    // 2.5 Create School Admin (Principal)
+    const existingSchoolAdmin = await prisma.user.findUnique({ where: { email: 'principal@example.com' } });
+    if (!existingSchoolAdmin) {
+      await prisma.user.create({
+        data: {
+          name: 'Principal Sharma',
+          email: 'principal@example.com',
+          password: hashedPassword,
+          role: 'SCHOOL_ADMIN',
+          schoolId: school.id
+        }
+      });
+    }
+
     // 3. Create Dummy Parent
     const existingParent = await prisma.user.findUnique({ where: { email: 'parent@example.com' } });
     let parent = existingParent;
