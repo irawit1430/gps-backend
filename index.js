@@ -1,7 +1,7 @@
 // Render by default sometimes looks for index.js
 // Forwarding the execution to our actual main server file
+require('dotenv').config();
 const { execSync } = require('child_process');
-const { server } = require('./server.js');
 
 try {
   console.log('Ensuring SQLite database is initialized from index.js...');
@@ -12,6 +12,7 @@ try {
   console.error('Failed to initialize database on boot:', e.message);
 }
 
+const { server } = require('./server.js');
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
