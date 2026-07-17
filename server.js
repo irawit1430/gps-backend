@@ -275,7 +275,23 @@ app.get('/api/schools/:schoolId/students', async (req, res) => {
       where: { schoolId: req.params.schoolId },
       include: { routeMappings: { include: { routeStop: { include: { route: true } } } } }
     });
-    res.json(students);
+
+    const formattedStudents = students.map(student => {
+      const mapping = student.routeMappings[0];
+      return {
+        id: student.id,
+        rfidTag: student.rfidTag,
+        name: student.name,
+        grade: student.grade,
+        photoUrl: student.photoUrl,
+        assignedRoute: mapping?.routeStop?.route?.name || "Unassigned",
+        routeStopName: mapping?.routeStop?.name || "Unassigned",
+        boardingStatus: "Absent",
+        lastCheckIn: "--:--"
+      };
+    });
+
+    res.json(formattedStudents);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Internal server error' });
