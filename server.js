@@ -423,7 +423,7 @@ app.get('/api/parents/:parentId/students', async (req, res) => {
                 route: {
                   include: {
                     trips: {
-                      where: { status: { in: ["ON_SCHEDULE", "DELAYED"] } },
+                      where: { status: { in: ["PLANNED", "ON_SCHEDULE", "DELAYED"] } },
                       include: {
                         driver: { select: { name: true } },
                         bus: { select: { licensePlate: true, deviceId: true } }
