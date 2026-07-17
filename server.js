@@ -1,3 +1,11 @@
+/* 
+ * @jules 👀
+ * SECURITY FIXES REQUIRED IN THIS FILE (Phase A):
+ * 1. Add `authenticate` middleware to ALL routes to prevent unauthorized access.
+ * 2. At Line 43: If `process.env.JWT_SECRET` is missing, call `process.exit(1)` instead of using a fallback hardcoded secret.
+ * 3. PUT/POST endpoints (e.g., /api/routes, /api/buses) are passing `req.body` directly to Prisma. Please whitelist only allowed fields to prevent Mass Assignment.
+ * 4. Remove password hashes from being returned in the GET /api/schools/:schoolId/drivers response (use Prisma `select`).
+ */
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
