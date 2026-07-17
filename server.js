@@ -246,8 +246,9 @@ app.get('/api/schools/:schoolId/stats', async (req, res) => {
     const totalRoutes = await prisma.route.count({ where: { schoolId } });
     const activeTrips = await prisma.trip.count({ where: { route: { schoolId }, status: "ON_SCHEDULE" } });
     const totalBoarded = await prisma.attendanceLog.count({ where: { student: { schoolId }, type: "BOARDED", timestamp: { gte: today } } });
+    const pendingLeaves = await prisma.leaveApplication.count({ where: { student: { schoolId }, status: "PENDING" } });
 
-    res.json({ totalStudents, totalRoutes, activeTrips, totalBoarded });
+    res.json({ totalStudents, totalRoutes, activeTrips, totalBoarded, pendingLeaves });
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
