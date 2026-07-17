@@ -46,18 +46,21 @@ async function seedDatabase() {
 
   // 4. Create Students (400 total)
   let studentCount = 0;
+  const studentData = [];
   for (const bus of buses) {
     for (let j = 1; j <= STUDENTS_PER_BUS; j++) {
       studentCount++;
-      await prisma.student.create({
-        data: {
-          schoolId: school.id,
-          name: `Simulated Student ${studentCount}`,
-          rfidTag: `RFID-${bus.id}-${j}`
-        }
+      studentData.push({
+        schoolId: school.id,
+        name: `Simulated Student ${studentCount}`,
+        rfidTag: `RFID-${bus.id}-${j}`
       });
     }
   }
+
+  await prisma.student.createMany({
+    data: studentData
+  });
   console.log(`Created ${studentCount} Students`);
 
   return buses;
