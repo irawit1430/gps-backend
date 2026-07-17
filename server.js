@@ -66,16 +66,18 @@ app.post('/api/telemetry', async (req, res) => {
 });
 
 // --- 2. ADMIN DASHBOARD ---
+// Buses
 app.get('/api/schools/:schoolId/buses', async (req, res) => {
   try {
     const buses = await prisma.bus.findMany({
       where: { schoolId: req.params.schoolId },
-      include: { gpsLogs: { orderBy: { timestamp: 'desc' }, take: 1 } } // Gets latest live location
+      include: { gpsLogs: { orderBy: { timestamp: 'desc' }, take: 1 } } 
     });
     res.json(buses);
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
+// Leave Management
 app.get('/api/schools/:schoolId/leaves/pending', async (req, res) => {
   try {
     const leaves = await prisma.leaveApplication.findMany({
@@ -83,6 +85,110 @@ app.get('/api/schools/:schoolId/leaves/pending', async (req, res) => {
       include: { student: true }
     });
     res.json(leaves);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/leaves/:id/approve', async (req, res) => {
+  try {
+    const leave = await prisma.leaveApplication.update({
+      where: { id: req.params.id }, data: { status: "APPROVED" }
+    });
+    res.json(leave);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/leaves/:id/reject', async (req, res) => {
+  try {
+    const leave = await prisma.leaveApplication.update({
+      where: { id: req.params.id }, data: { status: "REJECTED" }
+    });
+    res.json(leave);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+// Route Management
+app.get('/api/schools/:schoolId/routes', async (req, res) => {
+  try {
+    const routes = await prisma.route.findMany({
+      where: { schoolId: req.params.schoolId },
+      include: { stops: { orderBy: { orderIdx: 'asc' } }, trips: { take: 1, orderBy: { createdAt: 'desc' } } }
+    });
+    res.json(routes);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/schools/:schoolId/routes', async (req, res) => {
+  try {
+    const { name, estimatedDuration } = req.body;
+    const route = await prisma.route.create({
+      data: { schoolId: req.params.schoolId, name, estimatedDuration }
+    });
+    res.json(route);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/routes/:id', async (req, res) => {
+  try {
+    const route = await prisma.route.update({
+      where: { id: req.params.id }, data: req.body
+    });
+    res.json(route);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/routes/:id', async (req, res) => {
+  try {
+    await prisma.route.delete({ where: { id: req.params.id } });
+    res.json({ success: true });
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+// Students & Attendance
+app.get('/api/schools/:schoolId/students', async (req, res) => {
+  try {
+    const students = await prisma.student.findMany({
+      where: { schoolId: req.params.schoolId },
+      include: { routeMappings: { include: { routeStop: { include: { route: true } } } } }
+    });
+    res.json(students);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/schools/:schoolId/students', async (req, res) => {
+  try {
+    const { rfidTag, name, grade, parentId } = req.body;
+    const student = await prisma.student.create({
+      data: { schoolId: req.params.schoolId, rfidTag, name, grade, parentId }
+    });
+    res.json(student);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/schools/:schoolId/attendance/today', async (req, res) => {
+  try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const logs = await prisma.attendanceLog.findMany({
+      where: { student: { schoolId: req.params.schoolId }, timestamp: { gte: today } },
+      include: { student: true, trip: { include: { route: true } } }
+    });
+    res.json(logs);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+// School Dashboard Metrics
+app.get('/api/schools/:schoolId/stats', async (req, res) => {
+  try {
+    const schoolId = req.params.schoolId;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    const totalStudents = await prisma.student.count({ where: { schoolId } });
+    const totalRoutes = await prisma.route.count({ where: { schoolId } });
+    const activeTrips = await prisma.trip.count({ where: { route: { schoolId }, status: "ON_SCHEDULE" } });
+    const totalBoarded = await prisma.attendanceLog.count({ where: { student: { schoolId }, type: "BOARDED", timestamp: { gte: today } } });
+
+    res.json({ totalStudents, totalRoutes, activeTrips, totalBoarded });
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
