@@ -48,7 +48,10 @@ app.post('/api/auth/login', async (req, res) => {
 app.post('/api/telemetry', async (req, res) => {
   try {
     const { deviceId, lat, lng, speed, timestamp } = req.body;
-    const bus = await prisma.bus.findUnique({ where: { deviceId } });
+    const bus = await prisma.bus.findUnique({ 
+      where: { deviceId },
+      include: { trips: { where: { status: "ON_SCHEDULE" }, include: { driver: { select: { name: true } }, route: { select: { name: true } } } } }
+    });
     if (!bus) return res.status(404).json({ error: 'Bus not found' });
 
     const log = await prisma.gpsLog.create({
@@ -56,8 +59,14 @@ app.post('/api/telemetry', async (req, res) => {
     });
 
     // Push real-time event
+    const activeTrip = bus.trips[0];
     io.emit('location_update', {
-      busId: bus.id, licensePlate: bus.licensePlate, lat, lng, speed, timestamp: log.timestamp
+      busId: bus.id, 
+      licensePlate: bus.licensePlate, 
+      capacity: bus.capacity,
+      driverName: activeTrip?.driver?.name || "Unassigned",
+      routeName: activeTrip?.route?.name || "Off-Route",
+      lat, lng, speed, timestamp: log.timestamp
     });
     res.status(200).json({ success: true });
   } catch (err) {
@@ -71,18 +80,39 @@ app.get('/api/schools/:schoolId/buses', async (req, res) => {
   try {
     const buses = await prisma.bus.findMany({
       where: { schoolId: req.params.schoolId },
-      include: { gpsLogs: { orderBy: { timestamp: 'desc' }, take: 1 } } 
+      include: { 
+        gpsLogs: { orderBy: { timestamp: 'desc' }, take: 1 },
+        trips: { where: { status: { in: ["ON_SCHEDULE", "DELAYED"] } }, include: { driver: { select: { name: true } }, route: { select: { name: true } } } }
+      } 
     });
-    res.json(buses);
+    
+    // Map response to surface active trip info directly for frontend convenience
+    const formattedBuses = buses.map(bus => {
+      const activeTrip = bus.trips[0];
+      return {
+        ...bus,
+        driverName: activeTrip?.driver?.name || "Unassigned",
+        routeName: activeTrip?.route?.name || "Off-Route"
+      };
+    });
+    
+    res.json(formattedBuses);
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
 // Leave Management
-app.get('/api/schools/:schoolId/leaves/pending', async (req, res) => {
+app.get('/api/schools/:schoolId/leaves', async (req, res) => {
   try {
+    const { status } = req.query;
+    let whereClause = { student: { schoolId: req.params.schoolId } };
+    if (status && status !== 'all') {
+      whereClause.status = status.toUpperCase();
+    }
+    
     const leaves = await prisma.leaveApplication.findMany({
-      where: { student: { schoolId: req.params.schoolId }, status: "PENDING" },
-      include: { student: true }
+      where: whereClause,
+      include: { student: true },
+      orderBy: { createdAt: 'desc' }
     });
     res.json(leaves);
   } catch(err) { res.status(500).json({ error: err.message }); }
