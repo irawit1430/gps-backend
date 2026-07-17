@@ -237,7 +237,7 @@ app.get('/api/parents/:parentId/students', async (req, res) => {
                     trips: {
                       where: { status: { in: ["ON_SCHEDULE", "DELAYED"] } },
                       include: {
-                        driver: { select: { name: true, phone: true } },
+                        driver: { select: { name: true } },
                         bus: { select: { licensePlate: true, deviceId: true } }
                       }
                     }
