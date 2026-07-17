@@ -355,6 +355,52 @@ app.post('/api/alerts/sos', async (req, res) => {
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
+app.get('/api/drivers/:driverId/trips', async (req, res) => {
+  try {
+    const trips = await prisma.trip.findMany({
+      where: { driverId: req.params.driverId, status: { in: ["PLANNED", "ON_SCHEDULE", "DELAYED"] } },
+      include: {
+        route: {
+          include: {
+            stops: {
+              orderBy: { orderIdx: 'asc' },
+              include: { studentMappings: { include: { student: true } } }
+            }
+          }
+        },
+        bus: true
+      },
+      orderBy: { createdAt: 'asc' }
+    });
+    res.json(trips);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.patch('/api/trips/:tripId/status', async (req, res) => {
+  try {
+    const { status } = req.body;
+    const data = { status };
+    if (status === "ON_SCHEDULE") data.startTime = new Date();
+    if (status === "COMPLETED") data.endTime = new Date();
+
+    const trip = await prisma.trip.update({
+      where: { id: req.params.tripId },
+      data
+    });
+    res.json(trip);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/attendance', async (req, res) => {
+  try {
+    const { studentId, tripId, type } = req.body;
+    const log = await prisma.attendanceLog.create({
+      data: { studentId, tripId, type }
+    });
+    res.json(log);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
 // --- 5. SUPER ADMIN STATS ---
 app.get('/api/admin/stats', async (req, res) => {
   try {
