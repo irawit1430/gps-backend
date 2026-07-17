@@ -173,6 +173,43 @@ app.delete('/api/routes/:id', async (req, res) => {
     res.json({ success: true });
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
+// Drivers
+app.get('/api/schools/:schoolId/drivers', async (req, res) => {
+  try {
+    const drivers = await prisma.user.findMany({
+      where: { schoolId: req.params.schoolId, role: "DRIVER" },
+      include: {
+        driverTrips: {
+          where: { status: { in: ["PLANNED", "ON_SCHEDULE"] } },
+          include: { bus: true, route: true }
+        }
+      }
+    });
+    res.json(drivers);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/schools/:schoolId/drivers', async (req, res) => {
+  try {
+    const { name, email } = req.body;
+    // For MVP, auto-generate a temporary password for the driver
+    const tempPassword = Math.random().toString(36).slice(-8);
+    const hashedPassword = await bcrypt.hash(tempPassword, 10);
+    
+    const driver = await prisma.user.create({
+      data: {
+        schoolId: req.params.schoolId,
+        name,
+        email,
+        password: hashedPassword,
+        role: "DRIVER"
+      }
+    });
+    
+    res.json({ driver, tempPassword });
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
 // Trips
 app.post('/api/schools/:schoolId/trips', async (req, res) => {
   try {
