@@ -42,8 +42,8 @@ model School {
 
 model Bus {
   id           String   @id @default(uuid())
-  schoolId     String
-  school       School   @relation(fields: [schoolId], references: [id])
+  schoolId     String?
+  school       School?  @relation(fields: [schoolId], references: [id])
   licensePlate String   @unique
   capacity     Int
   deviceId     String   @unique // IMEI of TM-100

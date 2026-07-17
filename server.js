@@ -246,10 +246,26 @@ app.get('/api/admin/stats', async (req, res) => {
 });
 
 // --- 6. SUPER ADMIN DATA ---
+// School Management
 app.get('/api/schools', async (req, res) => {
   try {
-    const schools = await prisma.school.findMany({ orderBy: { createdAt: 'desc' } });
-    res.json(schools);
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const search = req.query.search || '';
+    
+    const where = search ? { name: { contains: search } } : {};
+    
+    const [schools, total] = await Promise.all([
+      prisma.school.findMany({
+        where,
+        skip: (page - 1) * limit,
+        take: limit,
+        orderBy: { createdAt: 'desc' }
+      }),
+      prisma.school.count({ where })
+    ]);
+    
+    res.json({ data: schools, total, page, limit });
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -261,14 +277,128 @@ app.post('/api/schools', async (req, res) => {
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
+app.put('/api/schools/:id', async (req, res) => {
+  try {
+    const school = await prisma.school.update({
+      where: { id: req.params.id }, data: req.body
+    });
+    res.json(school);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/schools/:id', async (req, res) => {
+  try {
+    // Delete related entities first due to foreign keys, or rely on Prisma cascade if configured.
+    // Assuming simple delete for now, if it fails, cascading needs to be explicitly handled.
+    await prisma.school.delete({ where: { id: req.params.id } });
+    res.json({ success: true });
+  } catch(err) { res.status(500).json({ error: "Cannot delete school with active associations. Please remove devices and routes first." }); }
+});
+
+// Device Provisioning
 app.get('/api/devices', async (req, res) => {
   try {
-    // In our schema, TM-100 devices are attached to Buses
-    const devices = await prisma.bus.findMany({
-      include: { school: { select: { name: true } } },
-      orderBy: { licensePlate: 'asc' }
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const search = req.query.search || '';
+    
+    const where = search ? {
+      OR: [
+        { licensePlate: { contains: search } },
+        { deviceId: { contains: search } }
+      ]
+    } : {};
+
+    const [devices, total] = await Promise.all([
+      prisma.bus.findMany({
+        where,
+        include: { school: { select: { name: true } } },
+        skip: (page - 1) * limit,
+        take: limit,
+        orderBy: { licensePlate: 'asc' }
+      }),
+      prisma.bus.count({ where })
+    ]);
+    
+    res.json({ data: devices, total, page, limit });
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/devices', async (req, res) => {
+  try {
+    const { deviceId, licensePlate, capacity, schoolId } = req.body;
+    // Note: schoolId is now optional, so it can be unassigned (null)
+    const device = await prisma.bus.create({
+      data: { deviceId, licensePlate, capacity: capacity || 40, schoolId: schoolId || null }
     });
-    res.json(devices);
+    io.emit('device_status_change', { deviceId: device.id, status: 'ONLINE', message: 'New device provisioned' });
+    res.json(device);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/devices/:id', async (req, res) => {
+  try {
+    const device = await prisma.bus.update({
+      where: { id: req.params.id }, data: req.body
+    });
+    io.emit('device_status_change', { deviceId: device.id, status: 'ONLINE', message: 'Device updated' });
+    res.json(device);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/devices/:id', async (req, res) => {
+  try {
+    await prisma.bus.delete({ where: { id: req.params.id } });
+    io.emit('device_status_change', { deviceId: req.params.id, status: 'OFFLINE', message: 'Device decommissioned' });
+    res.json({ success: true });
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+// Initial Map State & Real-time Status
+app.get('/api/devices/locations', async (req, res) => {
+  try {
+    // Get the most recent GPS log for all buses
+    const buses = await prisma.bus.findMany({
+      include: { 
+        gpsLogs: { orderBy: { timestamp: 'desc' }, take: 1 },
+        school: { select: { name: true } }
+      }
+    });
+    // Flatten the response for the map markers
+    const locations = buses.map(bus => ({
+      busId: bus.id,
+      licensePlate: bus.licensePlate,
+      schoolName: bus.school?.name || "Unassigned",
+      lastKnownLat: bus.gpsLogs[0]?.lat || null,
+      lastKnownLng: bus.gpsLogs[0]?.lng || null,
+      speed: bus.gpsLogs[0]?.speed || 0,
+      lastUpdate: bus.gpsLogs[0]?.timestamp || null
+    })).filter(b => b.lastKnownLat !== null);
+
+    res.json(locations);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+// Advanced System Logs
+app.get('/api/admin/logs', async (req, res) => {
+  try {
+    const { busId, schoolId, startDate } = req.query;
+    
+    // Build filter
+    let where = {};
+    if (busId) where.busId = busId;
+    if (schoolId) where.bus = { schoolId };
+    if (startDate) where.timestamp = { gte: new Date(startDate) };
+    
+    // Fetch logs (limit 100 for performance)
+    const logs = await prisma.gpsLog.findMany({
+      where,
+      orderBy: { timestamp: 'desc' },
+      take: 100,
+      include: { bus: { select: { licensePlate: true } } }
+    });
+    
+    res.json(logs);
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
