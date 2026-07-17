@@ -173,6 +173,16 @@ app.delete('/api/routes/:id', async (req, res) => {
     res.json({ success: true });
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
+// Trips
+app.post('/api/schools/:schoolId/trips', async (req, res) => {
+  try {
+    const { routeId, busId, driverId } = req.body;
+    const trip = await prisma.trip.create({
+      data: { routeId, busId, driverId, status: "PLANNED" }
+    });
+    res.json(trip);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
 
 // Students & Attendance
 app.get('/api/schools/:schoolId/students', async (req, res) => {
