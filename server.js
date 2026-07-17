@@ -227,9 +227,44 @@ app.get('/api/parents/:parentId/students', async (req, res) => {
   try {
     const students = await prisma.student.findMany({
       where: { parentId: req.params.parentId },
-      include: { routeMappings: { include: { routeStop: true } } }
+      include: { 
+        routeMappings: { 
+          include: { 
+            routeStop: {
+              include: {
+                route: {
+                  include: {
+                    trips: {
+                      where: { status: { in: ["ON_SCHEDULE", "DELAYED"] } },
+                      include: {
+                        driver: { select: { name: true, phone: true } },
+                        bus: { select: { licensePlate: true, deviceId: true } }
+                      }
+                    }
+                  }
+                }
+              }
+            } 
+          } 
+        } 
+      }
     });
-    res.json(students);
+    
+    // Format the response to pull the active trip/driver up for the frontend
+    const formattedStudents = students.map(student => {
+      const activeTrip = student.routeMappings[0]?.routeStop?.route?.trips[0] || null;
+      return {
+        id: student.id,
+        name: student.name,
+        grade: student.grade,
+        photoUrl: student.photoUrl,
+        routeStopName: student.routeMappings[0]?.routeStop?.name || "Unassigned",
+        driverName: activeTrip?.driver?.name || "Unassigned",
+        licensePlate: activeTrip?.bus?.licensePlate || "Unassigned"
+      };
+    });
+    
+    res.json(formattedStudents);
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -240,6 +275,28 @@ app.post('/api/leaves', async (req, res) => {
       data: { studentId, startDate: new Date(startDate), endDate: new Date(endDate), reason, notes, status: "PENDING" }
     });
     res.json(leave);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/parents/:parentId/leaves', async (req, res) => {
+  try {
+    const leaves = await prisma.leaveApplication.findMany({
+      where: { student: { parentId: req.params.parentId } },
+      include: { student: { select: { name: true } } },
+      orderBy: { createdAt: 'desc' }
+    });
+    res.json(leaves);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/parents/:parentId/notifications', async (req, res) => {
+  try {
+    const notifications = await prisma.notification.findMany({
+      where: { userId: req.params.parentId },
+      orderBy: { createdAt: 'desc' },
+      take: 50
+    });
+    res.json(notifications);
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
