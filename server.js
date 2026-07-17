@@ -40,7 +40,8 @@ app.post('/api/auth/login', async (req, res) => {
     
     const token = jwt.sign({ id: user.id, role: user.role, schoolId: user.schoolId }, process.env.JWT_SECRET || 'super-secret-fleet-key', { expiresIn: '7d' });
     
-    res.json({ token, user: { id: user.id, role: user.role, name: user.name, email: user.email, schoolId: user.schoolId } });
+    const preferences = user.notificationSettings ? JSON.parse(user.notificationSettings) : {};
+    res.json({ token, user: { id: user.id, role: user.role, name: user.name, email: user.email, schoolId: user.schoolId, preferences } });
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -253,6 +254,17 @@ app.get('/api/schools/:schoolId/stats', async (req, res) => {
 });
 
 // --- 3. PARENT APP ---
+app.patch('/api/parents/:id/preferences', async (req, res) => {
+  try {
+    const preferences = JSON.stringify(req.body);
+    const user = await prisma.user.update({
+      where: { id: req.params.id },
+      data: { notificationSettings: preferences }
+    });
+    res.json({ preferences: JSON.parse(user.notificationSettings) });
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
 app.get('/api/parents/:parentId/students', async (req, res) => {
   try {
     const students = await prisma.student.findMany({
