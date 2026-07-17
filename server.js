@@ -186,11 +186,40 @@ app.get('/api/schools/:schoolId/students', async (req, res) => {
 
 app.post('/api/schools/:schoolId/students', async (req, res) => {
   try {
-    const { rfidTag, name, grade, parentId } = req.body;
+    const { rfidTag, name, grade, parentEmail, parentName } = req.body;
+    let parentId = null;
+    let generatedPassword = null;
+
+    // Auto-Invite Flow: Create parent if email is provided and doesn't exist
+    if (parentEmail) {
+      let parent = await prisma.user.findUnique({ where: { email: parentEmail } });
+      
+      if (!parent) {
+        generatedPassword = Math.random().toString(36).slice(-8); // Generate random 8-char password
+        const bcrypt = require('bcryptjs'); // Ensure bcrypt is available
+        const hashedPassword = await bcrypt.hash(generatedPassword, 10);
+        
+        parent = await prisma.user.create({
+          data: {
+            email: parentEmail,
+            password: hashedPassword,
+            role: "PARENT",
+            name: parentName || `Parent of ${name}`,
+            schoolId: req.params.schoolId
+          }
+        });
+      }
+      parentId = parent.id;
+    }
+
     const student = await prisma.student.create({
       data: { schoolId: req.params.schoolId, rfidTag, name, grade, parentId }
     });
-    res.json(student);
+
+    res.json({
+      student,
+      parentCredentials: generatedPassword ? { email: parentEmail, temporaryPassword: generatedPassword } : null
+    });
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
