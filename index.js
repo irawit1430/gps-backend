@@ -1,5 +1,17 @@
 // Render by default sometimes looks for index.js
 // Forwarding the execution to our actual main server file
+const { execSync } = require('child_process');
 const { server } = require('./server.js');
+
+try {
+  console.log('Ensuring SQLite database is initialized from index.js...');
+  execSync('npx prisma db push', { stdio: 'inherit' });
+  execSync('node seed-admin.js', { stdio: 'inherit' });
+  console.log('Database initialized successfully!');
+} catch (e) {
+  console.error('Failed to initialize database on boot:', e.message);
+}
+
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
