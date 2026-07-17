@@ -316,6 +316,27 @@ app.post('/api/schools/:schoolId/students', async (req, res) => {
   }
 });
 
+// Student to Bus Assignment (Route Stop Mapping)
+app.post('/api/student-route-mappings', async (req, res) => {
+  try {
+    const { studentId, routeStopId } = req.body;
+    if (!studentId || !routeStopId) {
+      return res.status(400).json({ error: 'studentId and routeStopId are required' });
+    }
+    // upsert: if mapping already exists, update it; otherwise create new
+    const mapping = await prisma.studentRouteMapping.upsert({
+      where: { studentId_routeStopId: { studentId, routeStopId } },
+      update: { routeStopId },
+      create: { studentId, routeStopId },
+      include: { student: true, routeStop: { include: { route: true } } }
+    });
+    res.json(mapping);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/schools/:schoolId/attendance/today', async (req, res) => {
   try {
     const today = new Date();
