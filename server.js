@@ -42,7 +42,10 @@ app.post('/api/auth/login', async (req, res) => {
     
     const preferences = user.notificationSettings ? JSON.parse(user.notificationSettings) : {};
     res.json({ token, user: { id: user.id, role: user.role, name: user.name, email: user.email, schoolId: user.schoolId, preferences } });
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // --- 1. HARDWARE / SIMULATION ---
@@ -71,7 +74,8 @@ app.post('/api/telemetry', async (req, res) => {
     });
     res.status(200).json({ success: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -98,7 +102,10 @@ app.get('/api/schools/:schoolId/buses', async (req, res) => {
     });
     
     res.json(formattedBuses);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // Leave Management
@@ -116,7 +123,10 @@ app.get('/api/schools/:schoolId/leaves', async (req, res) => {
       orderBy: { createdAt: 'desc' }
     });
     res.json(leaves);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.put('/api/leaves/:id/approve', async (req, res) => {
@@ -125,7 +135,10 @@ app.put('/api/leaves/:id/approve', async (req, res) => {
       where: { id: req.params.id }, data: { status: "APPROVED" }
     });
     res.json(leave);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.put('/api/leaves/:id/reject', async (req, res) => {
@@ -134,7 +147,10 @@ app.put('/api/leaves/:id/reject', async (req, res) => {
       where: { id: req.params.id }, data: { status: "REJECTED" }
     });
     res.json(leave);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // Route Management
@@ -145,7 +161,10 @@ app.get('/api/schools/:schoolId/routes', async (req, res) => {
       include: { stops: { orderBy: { orderIdx: 'asc' } }, trips: { take: 1, orderBy: { createdAt: 'desc' } } }
     });
     res.json(routes);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.post('/api/schools/:schoolId/routes', async (req, res) => {
@@ -155,7 +174,10 @@ app.post('/api/schools/:schoolId/routes', async (req, res) => {
       data: { schoolId: req.params.schoolId, name, estimatedDuration }
     });
     res.json(route);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.put('/api/routes/:id', async (req, res) => {
@@ -164,14 +186,20 @@ app.put('/api/routes/:id', async (req, res) => {
       where: { id: req.params.id }, data: req.body
     });
     res.json(route);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.delete('/api/routes/:id', async (req, res) => {
   try {
     await prisma.route.delete({ where: { id: req.params.id } });
     res.json({ success: true });
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 // Drivers
 app.get('/api/schools/:schoolId/drivers', async (req, res) => {
@@ -186,7 +214,10 @@ app.get('/api/schools/:schoolId/drivers', async (req, res) => {
       }
     });
     res.json(drivers);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.post('/api/schools/:schoolId/drivers', async (req, res) => {
@@ -207,7 +238,10 @@ app.post('/api/schools/:schoolId/drivers', async (req, res) => {
     });
     
     res.json({ driver, tempPassword });
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // Trips
@@ -218,7 +252,10 @@ app.post('/api/schools/:schoolId/trips', async (req, res) => {
       data: { routeId, busId, driverId, status: "PLANNED" }
     });
     res.json(trip);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // Students & Attendance
@@ -229,7 +266,10 @@ app.get('/api/schools/:schoolId/students', async (req, res) => {
       include: { routeMappings: { include: { routeStop: { include: { route: true } } } } }
     });
     res.json(students);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.post('/api/schools/:schoolId/students', async (req, res) => {
@@ -268,7 +308,10 @@ app.post('/api/schools/:schoolId/students', async (req, res) => {
       student,
       parentCredentials: generatedPassword ? { email: parentEmail, temporaryPassword: generatedPassword } : null
     });
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.get('/api/schools/:schoolId/attendance/today', async (req, res) => {
@@ -280,7 +323,10 @@ app.get('/api/schools/:schoolId/attendance/today', async (req, res) => {
       include: { student: true, trip: { include: { route: true } } }
     });
     res.json(logs);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // School Dashboard Metrics
@@ -297,7 +343,10 @@ app.get('/api/schools/:schoolId/stats', async (req, res) => {
     const pendingLeaves = await prisma.leaveApplication.count({ where: { student: { schoolId }, status: "PENDING" } });
 
     res.json({ totalStudents, totalRoutes, activeTrips, totalBoarded, pendingLeaves });
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // --- 3. PARENT APP ---
@@ -309,7 +358,10 @@ app.patch('/api/parents/:id/preferences', async (req, res) => {
       data: { notificationSettings: preferences }
     });
     res.json({ preferences: JSON.parse(user.notificationSettings) });
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.get('/api/parents/:parentId/students', async (req, res) => {
@@ -354,7 +406,10 @@ app.get('/api/parents/:parentId/students', async (req, res) => {
     });
     
     res.json(formattedStudents);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.post('/api/leaves', async (req, res) => {
@@ -364,7 +419,10 @@ app.post('/api/leaves', async (req, res) => {
       data: { studentId, startDate: new Date(startDate), endDate: new Date(endDate), reason, notes, status: "PENDING" }
     });
     res.json(leave);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.get('/api/parents/:parentId/leaves', async (req, res) => {
@@ -375,7 +433,10 @@ app.get('/api/parents/:parentId/leaves', async (req, res) => {
       orderBy: { createdAt: 'desc' }
     });
     res.json(leaves);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.get('/api/parents/:parentId/notifications', async (req, res) => {
@@ -386,7 +447,10 @@ app.get('/api/parents/:parentId/notifications', async (req, res) => {
       take: 50
     });
     res.json(notifications);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // --- 4. DRIVER APP ---
@@ -399,7 +463,10 @@ app.post('/api/alerts/sos', async (req, res) => {
     // Instantly notify admin dashboard
     io.emit('emergency_alert', alert);
     res.json(alert);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.get('/api/drivers/:driverId/trips', async (req, res) => {
@@ -420,7 +487,10 @@ app.get('/api/drivers/:driverId/trips', async (req, res) => {
       orderBy: { createdAt: 'asc' }
     });
     res.json(trips);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.patch('/api/trips/:tripId/status', async (req, res) => {
@@ -435,7 +505,10 @@ app.patch('/api/trips/:tripId/status', async (req, res) => {
       data
     });
     res.json(trip);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.post('/api/attendance', async (req, res) => {
@@ -445,7 +518,10 @@ app.post('/api/attendance', async (req, res) => {
       data: { studentId, tripId, type }
     });
     res.json(log);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // --- 5. SUPER ADMIN STATS ---
@@ -464,7 +540,10 @@ app.get('/api/admin/stats', async (req, res) => {
       offlineDevices,
       totalStudents
     });
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // --- 6. SUPER ADMIN DATA ---
@@ -488,7 +567,10 @@ app.get('/api/schools', async (req, res) => {
     ]);
     
     res.json({ data: schools, total, page, limit });
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.post('/api/schools', async (req, res) => {
@@ -496,7 +578,10 @@ app.post('/api/schools', async (req, res) => {
     const { name, address } = req.body;
     const school = await prisma.school.create({ data: { name, address } });
     res.json(school);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.put('/api/schools/:id', async (req, res) => {
@@ -505,7 +590,10 @@ app.put('/api/schools/:id', async (req, res) => {
       where: { id: req.params.id }, data: req.body
     });
     res.json(school);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.delete('/api/schools/:id', async (req, res) => {
@@ -514,7 +602,10 @@ app.delete('/api/schools/:id', async (req, res) => {
     // Assuming simple delete for now, if it fails, cascading needs to be explicitly handled.
     await prisma.school.delete({ where: { id: req.params.id } });
     res.json({ success: true });
-  } catch(err) { res.status(500).json({ error: "Cannot delete school with active associations. Please remove devices and routes first." }); }
+  } catch(err) {
+    console.error(err);
+    res.status(500).json({ error: "Cannot delete school with active associations. Please remove devices and routes first." });
+  }
 });
 
 // Device Provisioning
@@ -543,7 +634,10 @@ app.get('/api/devices', async (req, res) => {
     ]);
     
     res.json({ data: devices, total, page, limit });
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.post('/api/devices', async (req, res) => {
@@ -555,7 +649,10 @@ app.post('/api/devices', async (req, res) => {
     });
     io.emit('device_status_change', { deviceId: device.id, status: 'ONLINE', message: 'New device provisioned' });
     res.json(device);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.put('/api/devices/:id', async (req, res) => {
@@ -565,7 +662,10 @@ app.put('/api/devices/:id', async (req, res) => {
     });
     io.emit('device_status_change', { deviceId: device.id, status: 'ONLINE', message: 'Device updated' });
     res.json(device);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.delete('/api/devices/:id', async (req, res) => {
@@ -573,7 +673,10 @@ app.delete('/api/devices/:id', async (req, res) => {
     await prisma.bus.delete({ where: { id: req.params.id } });
     io.emit('device_status_change', { deviceId: req.params.id, status: 'OFFLINE', message: 'Device decommissioned' });
     res.json({ success: true });
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // Initial Map State & Real-time Status
@@ -598,7 +701,10 @@ app.get('/api/devices/locations', async (req, res) => {
     })).filter(b => b.lastKnownLat !== null);
 
     res.json(locations);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // Advanced System Logs
@@ -621,7 +727,10 @@ app.get('/api/admin/logs', async (req, res) => {
     });
     
     res.json(logs);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // Admins Management
@@ -632,7 +741,10 @@ app.get('/api/admins', async (req, res) => {
       select: { id: true, name: true, email: true, role: true, schoolId: true, createdAt: true }
     });
     res.json(admins);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.post('/api/admins', async (req, res) => {
@@ -644,7 +756,10 @@ app.post('/api/admins', async (req, res) => {
       select: { id: true, name: true, email: true, role: true }
     });
     res.json(admin);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.put('/api/admins/:id', async (req, res) => {
@@ -658,14 +773,20 @@ app.put('/api/admins/:id', async (req, res) => {
       select: { id: true, name: true, email: true, role: true }
     });
     res.json(admin);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.delete('/api/admins/:id', async (req, res) => {
   try {
     await prisma.user.delete({ where: { id: req.params.id } });
     res.json({ success: true });
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // Settings Management
@@ -676,7 +797,10 @@ app.get('/api/settings', async (req, res) => {
       settings = await prisma.globalSettings.create({ data: { id: "global" } });
     }
     res.json(settings);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.put('/api/settings', async (req, res) => {
@@ -687,7 +811,10 @@ app.put('/api/settings', async (req, res) => {
       create: { id: "global", ...req.body }
     });
     res.json(settings);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 io.on('connection', (socket) => {
