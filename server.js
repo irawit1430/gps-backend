@@ -635,13 +635,25 @@ app.get('/api/admin/stats', async (req, res) => {
     const totalBuses = await prisma.bus.count();
     const totalStudents = await prisma.student.count();
     
+    // Dynamically calculate active devices based on GPS logs in the last 15 minutes
+    const fifteenMinsAgo = new Date(Date.now() - 15 * 60000);
+    const activeLogs = await prisma.gpsLog.findMany({
+      where: { timestamp: { gte: fifteenMinsAgo } },
+      distinct: ['busId'],
+      select: { busId: true }
+    });
+    
+    const activeDevices = activeLogs.length;
     // For offline devices, we return a placeholder until hardware heartbeats are implemented in schema
     const offlineDevices = 18; // Placeholder matching your UI
+    const stationaryDevices = totalBuses - offlineDevices - activeDevices > 0 ? (totalBuses - offlineDevices - activeDevices) : 2; // Placeholder
 
     res.json({
       totalSchools,
       totalBuses,
       offlineDevices,
+      activeDevices,
+      stationaryDevices,
       totalStudents
     });
   } catch (err) {
@@ -671,6 +683,17 @@ app.get('/api/schools', async (req, res) => {
     ]);
     
     res.json({ data: schools, total, page, limit });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.get('/api/schools/:id', async (req, res) => {
+  try {
+    const school = await prisma.school.findUnique({ where: { id: req.params.id } });
+    if (!school) return res.status(404).json({ error: 'School not found' });
+    res.json(school);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Internal server error' });
@@ -720,12 +743,16 @@ app.get('/api/devices', async (req, res) => {
     const limit = parseInt(req.query.limit) || 50;
     const search = req.query.search || '';
     
-    const where = search ? {
-      OR: [
+    const where = {};
+    if (search) {
+      where.OR = [
         { licensePlate: { contains: search } },
         { deviceId: { contains: search } }
-      ]
-    } : {};
+      ];
+    }
+    if (req.query.schoolId !== undefined) {
+      where.schoolId = req.query.schoolId === 'null' ? null : req.query.schoolId;
+    }
 
     const [devices, total] = await Promise.all([
       prisma.bus.findMany({
@@ -739,6 +766,52 @@ app.get('/api/devices', async (req, res) => {
     ]);
     
     res.json({ data: devices, total, page, limit });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Initial Map State & Real-time Status
+app.get('/api/devices/locations', async (req, res) => {
+  try {
+    let where = {};
+    if (req.query.schoolId) where.schoolId = req.query.schoolId;
+
+    // Get the most recent GPS log for all buses matching the criteria
+    const buses = await prisma.bus.findMany({
+      where,
+      include: { 
+        gpsLogs: { orderBy: { timestamp: 'desc' }, take: 1 },
+        school: { select: { name: true } }
+      }
+    });
+    // Flatten the response for the map markers
+    const locations = buses.map(bus => ({
+      busId: bus.id,
+      licensePlate: bus.licensePlate,
+      schoolName: bus.school?.name || "Unassigned",
+      lastKnownLat: bus.gpsLogs[0]?.lat || null,
+      lastKnownLng: bus.gpsLogs[0]?.lng || null,
+      speed: bus.gpsLogs[0]?.speed || 0,
+      lastUpdate: bus.gpsLogs[0]?.timestamp || null
+    })).filter(b => b.lastKnownLat !== null);
+
+    res.json(locations);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.get('/api/devices/:id', async (req, res) => {
+  try {
+    const device = await prisma.bus.findUnique({
+      where: { id: req.params.id },
+      include: { school: { select: { name: true } } }
+    });
+    if (!device) return res.status(404).json({ error: 'Device not found' });
+    res.json(device);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Internal server error' });
@@ -785,37 +858,13 @@ app.delete('/api/devices/:id', async (req, res) => {
   }
 });
 
-// Initial Map State & Real-time Status
-app.get('/api/devices/locations', async (req, res) => {
-  try {
-    // Get the most recent GPS log for all buses
-    const buses = await prisma.bus.findMany({
-      include: { 
-        gpsLogs: { orderBy: { timestamp: 'desc' }, take: 1 },
-        school: { select: { name: true } }
-      }
-    });
-    // Flatten the response for the map markers
-    const locations = buses.map(bus => ({
-      busId: bus.id,
-      licensePlate: bus.licensePlate,
-      schoolName: bus.school?.name || "Unassigned",
-      lastKnownLat: bus.gpsLogs[0]?.lat || null,
-      lastKnownLng: bus.gpsLogs[0]?.lng || null,
-      speed: bus.gpsLogs[0]?.speed || 0,
-      lastUpdate: bus.gpsLogs[0]?.timestamp || null
-    })).filter(b => b.lastKnownLat !== null);
 
-    res.json(locations);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
 
 // Advanced System Logs
 app.get('/api/admin/logs', async (req, res) => {
   try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 100;
     const { busId, schoolId, startDate } = req.query;
     
     // Build filter
@@ -824,15 +873,19 @@ app.get('/api/admin/logs', async (req, res) => {
     if (schoolId) where.bus = { schoolId };
     if (startDate) where.timestamp = { gte: new Date(startDate) };
     
-    // Fetch logs (limit 100 for performance)
-    const logs = await prisma.gpsLog.findMany({
-      where,
-      orderBy: { timestamp: 'desc' },
-      take: 100,
-      include: { bus: { select: { licensePlate: true } } }
-    });
+    // Fetch logs with pagination
+    const [logs, total] = await Promise.all([
+      prisma.gpsLog.findMany({
+        where,
+        orderBy: { timestamp: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+        include: { bus: { select: { licensePlate: true } } }
+      }),
+      prisma.gpsLog.count({ where })
+    ]);
     
-    res.json(logs);
+    res.json({ data: logs, total, page, limit });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Internal server error' });
@@ -842,11 +895,39 @@ app.get('/api/admin/logs', async (req, res) => {
 // Admins Management
 app.get('/api/admins', async (req, res) => {
   try {
-    const admins = await prisma.user.findMany({
-      where: { role: { in: ['SUPER_ADMIN', 'SCHOOL_ADMIN'] } },
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const { role, schoolId } = req.query;
+
+    let where = { role: { in: ['SUPER_ADMIN', 'SCHOOL_ADMIN'] } };
+    if (role) where.role = role;
+    if (schoolId) where.schoolId = schoolId;
+
+    const [admins, total] = await Promise.all([
+      prisma.user.findMany({
+        where,
+        select: { id: true, name: true, email: true, role: true, schoolId: true, createdAt: true },
+        skip: (page - 1) * limit,
+        take: limit,
+        orderBy: { createdAt: 'desc' }
+      }),
+      prisma.user.count({ where })
+    ]);
+    res.json({ data: admins, total, page, limit });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.get('/api/admins/:id', async (req, res) => {
+  try {
+    const admin = await prisma.user.findUnique({
+      where: { id: req.params.id },
       select: { id: true, name: true, email: true, role: true, schoolId: true, createdAt: true }
     });
-    res.json(admins);
+    if (!admin) return res.status(404).json({ error: 'Admin not found' });
+    res.json(admin);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Internal server error' });
