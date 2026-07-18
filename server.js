@@ -13,6 +13,7 @@ const cors = require('cors');
 const { PrismaClient } = require('@prisma/client');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 require('dotenv').config();
 
 const app = express();
@@ -273,7 +274,7 @@ app.post('/api/schools/:schoolId/drivers', async (req, res) => {
   try {
     const { name, email } = req.body;
     // For MVP, auto-generate a temporary password for the driver
-    const tempPassword = Math.random().toString(36).slice(-8);
+    const tempPassword = crypto.randomBytes(4).toString('hex');
     const hashedPassword = await bcrypt.hash(tempPassword, 10);
     
     const driver = await prisma.user.create({
@@ -348,7 +349,7 @@ app.post('/api/schools/:schoolId/students', async (req, res) => {
       let parent = await prisma.user.findUnique({ where: { email: parentEmail } });
       
       if (!parent) {
-        generatedPassword = Math.random().toString(36).slice(-8); // Generate random 8-char password
+        generatedPassword = crypto.randomBytes(4).toString('hex'); // Generate random 8-char password
         const bcrypt = require('bcryptjs'); // Ensure bcrypt is available
         const hashedPassword = await bcrypt.hash(generatedPassword, 10);
         
