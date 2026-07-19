@@ -414,7 +414,7 @@ app.post('/api/student-route-mappings', async (req, res) => {
     res.json(mapping);
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
