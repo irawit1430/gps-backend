@@ -440,11 +440,20 @@ app.get('/api/schools/:schoolId/stats', async (req, res) => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     
-    const totalStudents = await prisma.student.count({ where: { schoolId } });
-    const totalRoutes = await prisma.route.count({ where: { schoolId } });
-    const activeTrips = await prisma.trip.count({ where: { route: { schoolId }, status: "ON_SCHEDULE" } });
-    const totalBoarded = await prisma.attendanceLog.count({ where: { student: { schoolId }, type: "BOARDED", timestamp: { gte: today } } });
-    const pendingLeaves = await prisma.leaveApplication.count({ where: { student: { schoolId }, status: "PENDING" } });
+    // ⚡ Bolt: Execute independent aggregations concurrently to reduce overall latency (prevents N+1 query pattern)
+    const [
+      totalStudents,
+      totalRoutes,
+      activeTrips,
+      totalBoarded,
+      pendingLeaves
+    ] = await Promise.all([
+      prisma.student.count({ where: { schoolId } }),
+      prisma.route.count({ where: { schoolId } }),
+      prisma.trip.count({ where: { route: { schoolId }, status: "ON_SCHEDULE" } }),
+      prisma.attendanceLog.count({ where: { student: { schoolId }, type: "BOARDED", timestamp: { gte: today } } }),
+      prisma.leaveApplication.count({ where: { student: { schoolId }, status: "PENDING" } })
+    ]);
 
     res.json({ totalStudents, totalRoutes, activeTrips, totalBoarded, pendingLeaves });
   } catch (err) {
@@ -631,9 +640,12 @@ app.post('/api/attendance', async (req, res) => {
 // --- 5. SUPER ADMIN STATS ---
 app.get('/api/admin/stats', async (req, res) => {
   try {
-    const totalSchools = await prisma.school.count();
-    const totalBuses = await prisma.bus.count();
-    const totalStudents = await prisma.student.count();
+    // ⚡ Bolt: Batch independent DB counts into Promise.all to improve endpoint response time
+    const [totalSchools, totalBuses, totalStudents] = await Promise.all([
+      prisma.school.count(),
+      prisma.bus.count(),
+      prisma.student.count()
+    ]);
     
     // Dynamically calculate active devices based on GPS logs in the last 15 minutes
     const fifteenMinsAgo = new Date(Date.now() - 15 * 60000);
