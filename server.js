@@ -59,6 +59,14 @@ app.use('/api', (req, res, next) => {
 
 
 
+
+const authorizeRoles = (...roles) => (req, res, next) => {
+  if (!req.user || !roles.includes(req.user.role)) {
+    return res.status(403).json({ error: 'Forbidden: Insufficient privileges' });
+  }
+  next();
+};
+
 app.get('/', (req, res) => res.send('Fleet API is running perfectly!'));
 
 
@@ -638,7 +646,7 @@ app.post('/api/attendance', async (req, res) => {
 });
 
 // --- 5. SUPER ADMIN STATS ---
-app.get('/api/admin/stats', async (req, res) => {
+app.get('/api/admin/stats', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     // ⚡ Bolt: Batch independent DB counts into Promise.all to improve endpoint response time
     const [totalSchools, totalBuses, totalStudents] = await Promise.all([
@@ -873,7 +881,7 @@ app.delete('/api/devices/:id', async (req, res) => {
 
 
 // Advanced System Logs
-app.get('/api/admin/logs', async (req, res) => {
+app.get('/api/admin/logs', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 100;
@@ -905,7 +913,7 @@ app.get('/api/admin/logs', async (req, res) => {
 });
 
 // Admins Management
-app.get('/api/admins', async (req, res) => {
+app.get('/api/admins', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 50;
@@ -932,7 +940,7 @@ app.get('/api/admins', async (req, res) => {
   }
 });
 
-app.get('/api/admins/:id', async (req, res) => {
+app.get('/api/admins/:id', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     const admin = await prisma.user.findUnique({
       where: { id: req.params.id },
@@ -946,7 +954,7 @@ app.get('/api/admins/:id', async (req, res) => {
   }
 });
 
-app.post('/api/admins', async (req, res) => {
+app.post('/api/admins', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     const { name, email, password, role, schoolId } = req.body;
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -961,7 +969,7 @@ app.post('/api/admins', async (req, res) => {
   }
 });
 
-app.put('/api/admins/:id', async (req, res) => {
+app.put('/api/admins/:id', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     const updateData = {
       name: req.body.name,
@@ -985,7 +993,7 @@ app.put('/api/admins/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/admins/:id', async (req, res) => {
+app.delete('/api/admins/:id', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     await prisma.user.delete({ where: { id: req.params.id } });
     res.json({ success: true });
@@ -996,7 +1004,7 @@ app.delete('/api/admins/:id', async (req, res) => {
 });
 
 // Settings Management
-app.get('/api/settings', async (req, res) => {
+app.get('/api/settings', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     let settings = await prisma.globalSettings.findUnique({ where: { id: "global" } });
     if (!settings) {
@@ -1009,7 +1017,7 @@ app.get('/api/settings', async (req, res) => {
   }
 });
 
-app.put('/api/settings', async (req, res) => {
+app.put('/api/settings', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     const { maintenanceMode, mapCenterLat, mapCenterLng } = req.body;
     const settingsData = { maintenanceMode, mapCenterLat, mapCenterLng };
