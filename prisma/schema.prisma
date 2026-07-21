@@ -25,6 +25,8 @@ model User {
   parentStudents Student[]      @relation("ParentStudents")
   driverTrips    Trip[]         @relation("DriverTrips")
   notifications  Notification[]
+
+  @@index([schoolId])
 }
 
 model School {
@@ -52,6 +54,8 @@ model Bus {
   
   trips        Trip[]
   gpsLogs      GpsLog[]
+
+  @@index([schoolId])
 }
 
 model Route {
@@ -65,6 +69,8 @@ model Route {
   
   stops     RouteStop[]
   trips     Trip[]
+
+  @@index([schoolId])
 }
 
 model RouteStop {
@@ -96,6 +102,9 @@ model Student {
   routeMappings    StudentRouteMapping[]
   attendanceLogs   AttendanceLog[]
   leaveApplications LeaveApplication[]
+
+  @@index([schoolId])
+  @@index([parentId])
 }
 
 model StudentRouteMapping {
@@ -138,6 +147,8 @@ model GpsLog {
   lng       Float
   speed     Float    @default(0)
   timestamp DateTime @default(now())
+
+  @@index([busId, timestamp])
 }
 
 model AttendanceLog {
