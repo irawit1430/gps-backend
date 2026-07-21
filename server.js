@@ -1062,43 +1062,89 @@ app.get('/api/search', async (req, res) => {
   try {
     const q = req.query.q || '';
     if (!q) {
-      return res.json({ schools: [], devices: [], admins: [] });
+      return res.json({ results: [], schools: [], devices: [], admins: [] });
     }
 
-    const [schools, devices, admins] = await Promise.all([
-      prisma.school.findMany({
-        where: {
-          OR: [
-            { name: { contains: q } },
-            { city: { contains: q } },
-            { state: { contains: q } }
-          ]
-        },
-        take: 20
-      }),
-      prisma.bus.findMany({
-        where: {
-          OR: [
-            { licensePlate: { contains: q } },
-            { deviceId: { contains: q } }
-          ]
-        },
-        take: 20
-      }),
-      prisma.user.findMany({
-        where: {
-          role: { in: ['SUPER_ADMIN', 'SCHOOL_ADMIN'] },
-          OR: [
-            { name: { contains: q } },
-            { email: { contains: q } }
-          ]
-        },
-        select: { id: true, name: true, email: true, role: true },
-        take: 20
-      })
-    ]);
+    const { role, schoolId } = req.user;
 
-    res.json({ schools, devices, admins });
+    if (role === 'SCHOOL_ADMIN' && schoolId) {
+      // SCHOOL ADMIN SEARCH (Students, Drivers, Buses, Routes)
+      const [students, drivers, buses, routes] = await Promise.all([
+        prisma.student.findMany({
+          where: { schoolId, name: { contains: q } },
+          include: { routeMappings: { include: { routeStop: { include: { route: true } } } } },
+          take: 10
+        }),
+        prisma.user.findMany({
+          where: { schoolId, role: 'DRIVER', name: { contains: q } },
+          include: { driverTrips: { include: { bus: true } } },
+          take: 10
+        }),
+        prisma.bus.findMany({
+          where: { schoolId, licensePlate: { contains: q } },
+          take: 10
+        }),
+        prisma.route.findMany({
+          where: { schoolId, name: { contains: q } },
+          take: 10
+        })
+      ]);
+
+      const results = [];
+      students.forEach(s => {
+        const routeName = s.routeMappings[0]?.routeStop?.route?.name || 'Unassigned Route';
+        results.push({ id: s.id, type: 'student', name: s.name, detail: `Grade: ${s.grade || 'N/A'} | ${routeName}` });
+      });
+      drivers.forEach(d => {
+        const activeTrip = d.driverTrips[0];
+        const detail = activeTrip ? `Assigned to Bus: ${activeTrip.bus?.licensePlate}` : 'Idle / Unassigned';
+        results.push({ id: d.id, type: 'driver', name: d.name, detail });
+      });
+      buses.forEach(b => {
+        results.push({ id: b.id, type: 'bus', name: b.licensePlate, detail: `Capacity: ${b.capacity} | Device: ${b.deviceId}` });
+      });
+      routes.forEach(r => {
+        results.push({ id: r.id, type: 'route', name: r.name, detail: `Est Duration: ${r.estimatedDuration || 0} mins` });
+      });
+
+      return res.json({ results });
+    } else {
+      // SUPER ADMIN SEARCH (Schools, Devices, Admins)
+      const [schools, devices, admins] = await Promise.all([
+        prisma.school.findMany({
+          where: {
+            OR: [
+              { name: { contains: q } },
+              { city: { contains: q } },
+              { state: { contains: q } }
+            ]
+          },
+          take: 20
+        }),
+        prisma.bus.findMany({
+          where: {
+            OR: [
+              { licensePlate: { contains: q } },
+              { deviceId: { contains: q } }
+            ]
+          },
+          take: 20
+        }),
+        prisma.user.findMany({
+          where: {
+            role: { in: ['SUPER_ADMIN', 'SCHOOL_ADMIN'] },
+            OR: [
+              { name: { contains: q } },
+              { email: { contains: q } }
+            ]
+          },
+          select: { id: true, name: true, email: true, role: true },
+          take: 20
+        })
+      ]);
+
+      return res.json({ schools, devices, admins, results: [] });
+    }
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Internal server error' });
@@ -1109,48 +1155,132 @@ app.get('/api/search', async (req, res) => {
 app.get('/api/notifications', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 20;
+    const { id: userId, role } = req.user;
 
-    // Fetch real SOS/alerts
-    const realAlerts = await prisma.emergencyAlert.findMany({
-      orderBy: { createdAt: 'desc' },
-      take: limit
-    });
+    if (role === 'SUPER_ADMIN') {
+      // Super Admin notifications (SOS + System warnings)
+      const realAlerts = await prisma.emergencyAlert.findMany({
+        orderBy: { createdAt: 'desc' },
+        take: limit
+      });
 
-    const formattedRealAlerts = realAlerts.map(alert => ({
-      id: alert.id,
-      type: 'DRIVER_SOS',
-      title: 'Emergency SOS',
-      message: alert.message || 'Driver triggered SOS alert',
-      status: alert.status,
-      createdAt: alert.createdAt
-    }));
+      const formattedRealAlerts = realAlerts.map(alert => ({
+        id: alert.id,
+        type: 'DRIVER_SOS',
+        title: 'Emergency SOS',
+        message: alert.message || 'Driver triggered SOS alert',
+        status: alert.status,
+        isRead: alert.status === 'RESOLVED',
+        createdAt: alert.createdAt
+      }));
 
-    // Mix in simulated system alerts/warnings for demonstration
-    const simulatedAlerts = [
-      {
-        id: 'sys-offline-1',
-        type: 'SYSTEM_WARNING',
-        title: 'Device Offline',
-        message: 'Device DL1P-1234 has been offline for more than 24 hours.',
-        status: 'ACTIVE',
-        createdAt: new Date(Date.now() - 3600000).toISOString()
-      },
-      {
-        id: 'sys-warning-2',
-        type: 'SYSTEM_WARNING',
-        title: 'High Speed Alert',
-        message: 'Bus DL1P-4321 exceeded speed limit (85 km/h).',
-        status: 'ACTIVE',
-        createdAt: new Date(Date.now() - 100000).toISOString()
+      const simulatedAlerts = [
+        {
+          id: 'sys-offline-1',
+          type: 'SYSTEM_WARNING',
+          title: 'Device Offline',
+          message: 'Device DL1P-1234 has been offline for more than 24 hours.',
+          status: 'ACTIVE',
+          isRead: false,
+          createdAt: new Date(Date.now() - 3600000).toISOString()
+        },
+        {
+          id: 'sys-warning-2',
+          type: 'SYSTEM_WARNING',
+          title: 'High Speed Alert',
+          message: 'Bus DL1P-4321 exceeded speed limit (85 km/h).',
+          status: 'ACTIVE',
+          isRead: false,
+          createdAt: new Date(Date.now() - 100000).toISOString()
+        }
+      ];
+
+      const allAlerts = [...formattedRealAlerts, ...simulatedAlerts]
+        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+        .slice(0, limit);
+
+      return res.json(allAlerts);
+    } else {
+      // SCHOOL_ADMIN & PARENT notifications (targeted at user ID)
+      let notifications = await prisma.notification.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+        take: limit
+      });
+
+      // Inject mock notifications if database is empty for testing UI bell dropdown
+      if (notifications.length === 0) {
+        notifications = [
+          {
+            id: 'mock-notif-1',
+            userId,
+            title: 'New Leave Request',
+            message: 'Rohan Sharma has submitted a leave application for tomorrow.',
+            type: 'LEAVE',
+            isRead: false,
+            createdAt: new Date(Date.now() - 600000).toISOString()
+          },
+          {
+            id: 'mock-notif-2',
+            userId,
+            title: 'Bus Delay Warning',
+            message: 'Bus DL1P-1234 on Morning Route A is delayed by 15 minutes.',
+            type: 'DELAY',
+            isRead: false,
+            createdAt: new Date(Date.now() - 1800000).toISOString()
+          },
+          {
+            id: 'mock-notif-3',
+            userId,
+            title: 'SOS Active Alert',
+            message: 'Driver Ashok Kumar triggered SOS alert on Route B.',
+            type: 'SOS',
+            isRead: false,
+            createdAt: new Date(Date.now() - 3600000).toISOString()
+          }
+        ];
       }
-    ];
 
-    // Combine them, sort by createdAt descending, and slice to limit
-    const allAlerts = [...formattedRealAlerts, ...simulatedAlerts]
-      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-      .slice(0, limit);
+      return res.json(notifications);
+    }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
-    res.json(allAlerts);
+// Mark All Notifications as Read
+app.post('/api/notifications/mark-read', async (req, res) => {
+  try {
+    const { id: userId } = req.user;
+    await prisma.notification.updateMany({
+      where: { userId },
+      data: { isRead: true }
+    });
+    res.json({ success: true, message: 'All notifications marked as read' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Mark Single Notification as Read
+app.post('/api/notifications/:id/read', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (id.startsWith('mock-') || id.startsWith('sys-')) {
+      return res.json({ success: true, id, isRead: true });
+    }
+
+    try {
+      const updatedNotif = await prisma.notification.update({
+        where: { id },
+        data: { isRead: true }
+      });
+      return res.json({ success: true, id: updatedNotif.id, isRead: updatedNotif.isRead });
+    } catch (dbErr) {
+      return res.status(404).json({ error: 'Notification not found' });
+    }
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Internal server error' });
@@ -1163,7 +1293,7 @@ app.post('/api/notifications/:id/resolve', async (req, res) => {
     const { id } = req.params;
     
     // If it's a simulated alert, return success instantly
-    if (id.startsWith('sys-')) {
+    if (id.startsWith('sys-') || id.startsWith('mock-')) {
       return res.json({ success: true, id, status: 'RESOLVED' });
     }
 
