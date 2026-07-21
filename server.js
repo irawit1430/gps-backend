@@ -714,8 +714,10 @@ app.get('/api/schools/:id', async (req, res) => {
 
 app.post('/api/schools', async (req, res) => {
   try {
-    const { name, address } = req.body;
-    const school = await prisma.school.create({ data: { name, address } });
+    const { name, address, contactPerson, city, state, phone, email } = req.body;
+    const school = await prisma.school.create({ 
+      data: { name, address, contactPerson, city, state, phone, email } 
+    });
     res.json(school);
   } catch (err) {
     console.error(err);
@@ -725,9 +727,19 @@ app.post('/api/schools', async (req, res) => {
 
 app.put('/api/schools/:id', async (req, res) => {
   try {
-    const { name, address } = req.body;
+    const { name, address, contactPerson, city, state, phone, email } = req.body;
+    const updateData = {};
+    if (name !== undefined) updateData.name = name;
+    if (address !== undefined) updateData.address = address;
+    if (contactPerson !== undefined) updateData.contactPerson = contactPerson;
+    if (city !== undefined) updateData.city = city;
+    if (state !== undefined) updateData.state = state;
+    if (phone !== undefined) updateData.phone = phone;
+    if (email !== undefined) updateData.email = email;
+
     const school = await prisma.school.update({
-      where: { id: req.params.id }, data: { name, address }
+      where: { id: req.params.id }, 
+      data: updateData
     });
     res.json(school);
   } catch (err) {
