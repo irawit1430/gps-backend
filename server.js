@@ -637,7 +637,7 @@ app.post('/api/attendance', async (req, res) => {
   }
 });
 // --- 5. SUPER ADMIN STATS ---
-app.get('/api/admin/stats', async (req, res) => {
+app.get(['/api/admin/stats', '/api/stats'], async (req, res) => {
   try {
     const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
 
