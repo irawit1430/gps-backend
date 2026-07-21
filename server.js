@@ -1157,6 +1157,32 @@ app.get('/api/notifications', async (req, res) => {
   }
 });
 
+// Resolve Notification API
+app.post('/api/notifications/:id/resolve', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // If it's a simulated alert, return success instantly
+    if (id.startsWith('sys-')) {
+      return res.json({ success: true, id, status: 'RESOLVED' });
+    }
+
+    // Try to update the real database alert
+    try {
+      const updatedAlert = await prisma.emergencyAlert.update({
+        where: { id },
+        data: { status: 'RESOLVED' }
+      });
+      return res.json({ success: true, id: updatedAlert.id, status: updatedAlert.status });
+    } catch (dbErr) {
+      return res.status(404).json({ error: 'Alert not found' });
+    }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 io.on('connection', (socket) => {
   console.log('New Client Connected:', socket.id);
 });
