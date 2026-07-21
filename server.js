@@ -1057,6 +1057,106 @@ app.put('/api/settings', async (req, res) => {
   }
 });
 
+// Global Search API
+app.get('/api/search', async (req, res) => {
+  try {
+    const q = req.query.q || '';
+    if (!q) {
+      return res.json({ schools: [], devices: [], admins: [] });
+    }
+
+    const [schools, devices, admins] = await Promise.all([
+      prisma.school.findMany({
+        where: {
+          OR: [
+            { name: { contains: q } },
+            { city: { contains: q } },
+            { state: { contains: q } }
+          ]
+        },
+        take: 20
+      }),
+      prisma.bus.findMany({
+        where: {
+          OR: [
+            { licensePlate: { contains: q } },
+            { deviceId: { contains: q } }
+          ]
+        },
+        take: 20
+      }),
+      prisma.user.findMany({
+        where: {
+          role: { in: ['SUPER_ADMIN', 'SCHOOL_ADMIN'] },
+          OR: [
+            { name: { contains: q } },
+            { email: { contains: q } }
+          ]
+        },
+        select: { id: true, name: true, email: true, role: true },
+        take: 20
+      })
+    ]);
+
+    res.json({ schools, devices, admins });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Notifications API
+app.get('/api/notifications', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 20;
+
+    // Fetch real SOS/alerts
+    const realAlerts = await prisma.emergencyAlert.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: limit
+    });
+
+    const formattedRealAlerts = realAlerts.map(alert => ({
+      id: alert.id,
+      type: 'DRIVER_SOS',
+      title: 'Emergency SOS',
+      message: alert.message || 'Driver triggered SOS alert',
+      status: alert.status,
+      createdAt: alert.createdAt
+    }));
+
+    // Mix in simulated system alerts/warnings for demonstration
+    const simulatedAlerts = [
+      {
+        id: 'sys-offline-1',
+        type: 'SYSTEM_WARNING',
+        title: 'Device Offline',
+        message: 'Device DL1P-1234 has been offline for more than 24 hours.',
+        status: 'ACTIVE',
+        createdAt: new Date(Date.now() - 3600000).toISOString()
+      },
+      {
+        id: 'sys-warning-2',
+        type: 'SYSTEM_WARNING',
+        title: 'High Speed Alert',
+        message: 'Bus DL1P-4321 exceeded speed limit (85 km/h).',
+        status: 'ACTIVE',
+        createdAt: new Date(Date.now() - 100000).toISOString()
+      }
+    ];
+
+    // Combine them, sort by createdAt descending, and slice to limit
+    const allAlerts = [...formattedRealAlerts, ...simulatedAlerts]
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+      .slice(0, limit);
+
+    res.json(allAlerts);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 io.on('connection', (socket) => {
   console.log('New Client Connected:', socket.id);
 });
