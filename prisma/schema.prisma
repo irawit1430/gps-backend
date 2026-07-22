@@ -1,5 +1,5 @@
 generator client {
-  provider = "prisma-client-js"
+  provider   = "prisma-client-js"
   engineType = "library"
 }
 
@@ -9,22 +9,24 @@ datasource db {
 }
 
 model User {
-  id                   String         @id @default(uuid())
-  email                String         @unique
+  id                   String   @id @default(uuid())
+  email                String   @unique
   password             String
-  role                 String         // "SUPER_ADMIN", "SCHOOL_ADMIN", "DRIVER", "PARENT"
+  role                 String // "SUPER_ADMIN", "SCHOOL_ADMIN", "DRIVER", "PARENT"
   name                 String
   photoUrl             String?
-  notificationSettings String?        // JSON string storing toggle states
+  notificationSettings String? // JSON string storing toggle states
   schoolId             String?
-  school               School?        @relation(fields: [schoolId], references: [id])
-  createdAt            DateTime       @default(now())
-  updatedAt            DateTime       @updatedAt
-  
+  school               School?  @relation(fields: [schoolId], references: [id])
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
   // Relations for specific roles
   parentStudents Student[]      @relation("ParentStudents")
   driverTrips    Trip[]         @relation("DriverTrips")
   notifications  Notification[]
+
+  @@index([schoolId])
 }
 
 model School {
@@ -38,11 +40,11 @@ model School {
   email         String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
-  
-  users     User[]
-  buses     Bus[]
-  routes    Route[]
-  students  Student[]
+
+  users    User[]
+  buses    Bus[]
+  routes   Route[]
+  students Student[]
 }
 
 model Bus {
@@ -54,9 +56,11 @@ model Bus {
   deviceId     String   @unique // IMEI of TM-100
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
-  
-  trips        Trip[]
-  gpsLogs      GpsLog[]
+
+  trips   Trip[]
+  gpsLogs GpsLog[]
+
+  @@index([schoolId])
 }
 
 model Route {
@@ -64,12 +68,14 @@ model Route {
   schoolId          String
   school            School   @relation(fields: [schoolId], references: [id])
   name              String
-  estimatedDuration Int?     // In minutes
+  estimatedDuration Int? // In minutes
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
-  
-  stops     RouteStop[]
-  trips     Trip[]
+
+  stops RouteStop[]
+  trips Trip[]
+
+  @@index([schoolId])
 }
 
 model RouteStop {
@@ -81,7 +87,7 @@ model RouteStop {
   lng       Float
   orderIdx  Int
   createdAt DateTime @default(now())
-  
+
   studentMappings StudentRouteMapping[]
 }
 
@@ -98,9 +104,12 @@ model Student {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  routeMappings    StudentRouteMapping[]
-  attendanceLogs   AttendanceLog[]
+  routeMappings     StudentRouteMapping[]
+  attendanceLogs    AttendanceLog[]
   leaveApplications LeaveApplication[]
+
+  @@index([schoolId])
+  @@index([parentId])
 }
 
 model StudentRouteMapping {
@@ -109,26 +118,26 @@ model StudentRouteMapping {
   student     Student   @relation(fields: [studentId], references: [id])
   routeStopId String
   routeStop   RouteStop @relation(fields: [routeStopId], references: [id])
-  
+
   @@unique([studentId, routeStopId])
 }
 
 model Trip {
-  id                String   @id @default(uuid())
+  id                String    @id @default(uuid())
   routeId           String
-  route             Route    @relation(fields: [routeId], references: [id])
+  route             Route     @relation(fields: [routeId], references: [id])
   busId             String
-  bus               Bus      @relation(fields: [busId], references: [id])
+  bus               Bus       @relation(fields: [busId], references: [id])
   driverId          String
-  driver            User     @relation("DriverTrips", fields: [driverId], references: [id])
-  status            String   @default("PLANNED") // "PLANNED", "ON_SCHEDULE", "DELAYED", "COMPLETED"
-  progressPercent   Int      @default(0)
-  delayMinutes      Int      @default(0)
+  driver            User      @relation("DriverTrips", fields: [driverId], references: [id])
+  status            String    @default("PLANNED") // "PLANNED", "ON_SCHEDULE", "DELAYED", "COMPLETED"
+  progressPercent   Int       @default(0)
+  delayMinutes      Int       @default(0)
   currentEtaMessage String?
   startTime         DateTime?
   endTime           DateTime?
-  createdAt         DateTime @default(now())
-  
+  createdAt         DateTime  @default(now())
+
   gpsLogs        GpsLog[]
   attendanceLogs AttendanceLog[]
 }
@@ -143,6 +152,8 @@ model GpsLog {
   lng       Float
   speed     Float    @default(0)
   timestamp DateTime @default(now())
+
+  @@index([busId, timestamp])
 }
 
 model AttendanceLog {
@@ -151,41 +162,41 @@ model AttendanceLog {
   student   Student  @relation(fields: [studentId], references: [id])
   tripId    String
   trip      Trip     @relation(fields: [tripId], references: [id])
-  type      String   // "BOARDED", "ALIGHTED"
+  type      String // "BOARDED", "ALIGHTED"
   timestamp DateTime @default(now())
 }
 
 model LeaveApplication {
-  id          String   @id @default(uuid())
-  studentId   String
-  student     Student  @relation(fields: [studentId], references: [id])
-  startDate   DateTime 
-  endDate     DateTime 
-  reason      String
-  notes       String?  // Optional text from parent
-  status      String   @default("PENDING") // PENDING, APPROVED, REJECTED
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id        String   @id @default(uuid())
+  studentId String
+  student   Student  @relation(fields: [studentId], references: [id])
+  startDate DateTime
+  endDate   DateTime
+  reason    String
+  notes     String? // Optional text from parent
+  status    String   @default("PENDING") // PENDING, APPROVED, REJECTED
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model EmergencyAlert {
   id        String   @id @default(uuid())
   schoolId  String
-  type      String   // "DRIVER_SOS", "ADMIN_BROADCAST"
-  message   String?  
-  senderId  String   
-  tripId    String?  
+  type      String // "DRIVER_SOS", "ADMIN_BROADCAST"
+  message   String?
+  senderId  String
+  tripId    String?
   status    String   @default("ACTIVE") // ACTIVE, RESOLVED
   createdAt DateTime @default(now())
 }
 
 model Notification {
   id        String   @id @default(uuid())
-  userId    String   // Parent ID
+  userId    String // Parent ID
   user      User     @relation(fields: [userId], references: [id])
   title     String
   message   String
-  type      String   // "ARRIVAL", "BOARDING", "DELAY", "SYSTEM"
+  type      String // "ARRIVAL", "BOARDING", "DELAY", "SYSTEM"
   isRead    Boolean  @default(false)
   createdAt DateTime @default(now())
 }
@@ -197,4 +208,3 @@ model GlobalSettings {
   mapCenterLng    Float    @default(77.1025)
   updatedAt       DateTime @updatedAt
 }
-
