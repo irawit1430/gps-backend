@@ -57,7 +57,15 @@ app.use('/api', (req, res, next) => {
   return authenticate(req, res, next);
 });
 
+const authorizeRoles = (...roles) => (req, res, next) => {
+  if (!req.user || !roles.includes(req.user.role)) {
+    return res.status(403).json({ error: 'Forbidden: Insufficient privileges' });
+  }
+  next();
+};
 
+app.use('/api/admin', authorizeRoles('SUPER_ADMIN'));
+app.use('/api/admins', authorizeRoles('SUPER_ADMIN'));
 
 app.get('/', (req, res) => res.send('Fleet API is running perfectly!'));
 
