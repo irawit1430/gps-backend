@@ -57,6 +57,16 @@ app.use('/api', (req, res, next) => {
   return authenticate(req, res, next);
 });
 
+// Authorization Middleware
+const authorizeRoles = (...roles) => {
+  return (req, res, next) => {
+    if (!req.user || !roles.includes(req.user.role)) {
+      return res.status(403).json({ error: 'Forbidden: Insufficient permissions' });
+    }
+    next();
+  };
+};
+
 
 
 app.get('/', (req, res) => res.send('Fleet API is running perfectly!'));
@@ -637,6 +647,10 @@ app.post('/api/attendance', async (req, res) => {
   }
 });
 // --- 5. SUPER ADMIN STATS ---
+app.use('/api/admin', authorizeRoles('SUPER_ADMIN'));
+app.use('/api/admins', authorizeRoles('SUPER_ADMIN'));
+app.use('/api/settings', authorizeRoles('SUPER_ADMIN'));
+
 app.get('/api/admin/stats', async (req, res) => {
   try {
     const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
