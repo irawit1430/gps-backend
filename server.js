@@ -1388,4 +1388,4 @@ if (require.main === module) {
   server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 }
 
-module.exports = { app, server, prisma };
+module.exports = { app, server, io, prisma };
