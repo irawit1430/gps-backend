@@ -52,6 +52,16 @@ const authenticate = (req, res, next) => {
   }
 };
 
+// Role Authorization Middleware
+const authorizeRoles = (...roles) => {
+  return (req, res, next) => {
+    if (!req.user || !roles.includes(req.user.role)) {
+      return res.status(403).json({ error: 'Forbidden: Insufficient privileges' });
+    }
+    next();
+  };
+};
+
 app.use('/api', (req, res, next) => {
   if (req.path === '/auth/login' || req.path === '/telemetry') return next();
   return authenticate(req, res, next);
@@ -636,6 +646,10 @@ app.post('/api/attendance', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+// Protect Admin endpoints
+app.use('/api/admin', authorizeRoles('SUPER_ADMIN'));
+
 // --- 5. SUPER ADMIN STATS ---
 app.get('/api/admin/stats', async (req, res) => {
   try {
