@@ -120,7 +120,7 @@ async function seedAdmin() {
       });
     }
 
-    // 7. Create a Bus
+    // 7. Create/Update Bus with Real Blackbox TM-100 IMEI
     const existingBus = await prisma.bus.findUnique({ where: { licensePlate: 'DL1P-1234' } });
     if (!existingBus) {
       await prisma.bus.create({
@@ -128,8 +128,13 @@ async function seedAdmin() {
           schoolId: school.id,
           licensePlate: 'DL1P-1234',
           capacity: 40,
-          deviceId: 'TM100-MOCK'
+          deviceId: '866738083792638'
         }
+      });
+    } else {
+      await prisma.bus.update({
+        where: { licensePlate: 'DL1P-1234' },
+        data: { deviceId: '866738083792638' }
       });
     }
 
