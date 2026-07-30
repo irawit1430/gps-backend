@@ -4,3 +4,6 @@
 ## 2026-07-19 - Concurrent Database Queries
 **Learning:** Sequential, independent database queries inside endpoints (like multiple `count()` calls) lead to an N+1 query pattern latency issue, as each query waits for the previous one to complete.
 **Action:** Always wrap independent asynchronous database operations in `Promise.all()` to execute them concurrently, reducing overall request processing time.
+## 2024-05-19 - Composite Indexes on Time-Series Tables
+**Learning:** High-volume time-series tables (like GpsLog) suffer from full table scans when fetching the latest record without a properly sorted index.
+**Action:** Utilize composite indexes with a sort modifier (e.g., `@@index([busId, timestamp(sort: Desc)])`) on high-volume time-series tables to optimize latest-record fetches and prevent full table scans.
