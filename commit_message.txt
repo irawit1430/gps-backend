@@ -1,0 +1,5 @@
+🧪 Add missing tests for PUT /api/routes/:id
+
+🎯 **What:** Added tests for the `PUT /api/routes/:id` endpoint which was previously missing test coverage.
+📊 **Coverage:** Added test cases for successful route update, internal server error when database fails, and unauthorized error when missing auth token.
+✨ **Result:** Improved test coverage for route endpoints and ensured edge cases are properly handled.
