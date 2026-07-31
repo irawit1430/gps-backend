@@ -16,6 +16,11 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 require('dotenv').config();
 
+if (!process.env.JWT_SECRET) {
+  console.error('FATAL: process.env.JWT_SECRET is required');
+  process.exit(1);
+}
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
@@ -62,10 +67,6 @@ app.use('/api', (req, res, next) => {
 app.get('/', (req, res) => res.send('Fleet API is running perfectly!'));
 
 
-if (!process.env.JWT_SECRET) {
-  console.error('FATAL: process.env.JWT_SECRET is required');
-  process.exit(1);
-}
 
 // --- 0. AUTHENTICATION ---
 app.post('/api/auth/login', async (req, res) => {
