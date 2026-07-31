@@ -52,8 +52,8 @@ const authenticate = (req, res, next) => {
   }
 };
 
-app.use('/api', (req, res, next) => {
-  if (req.path === '/auth/login' || req.path === '/telemetry') return next();
+app.use((req, res, next) => {
+  if (req.path === '/' || req.path === '/api/auth/login' || req.path === '/api/telemetry') return next();
   return authenticate(req, res, next);
 });
 
