@@ -1,11 +1,11 @@
 /* 
  * @jules 👀
  * SECURITY FIXES REQUIRED IN THIS FILE (Phase A):
- * 1. Add `authenticate` middleware to ALL routes to prevent unauthorized access.
  * 2. At Line 43: If `process.env.JWT_SECRET` is missing, call `process.exit(1)` instead of using a fallback hardcoded secret.
  * 3. PUT/POST endpoints (e.g., /api/routes, /api/buses) are passing `req.body` directly to Prisma. Please whitelist only allowed fields to prevent Mass Assignment.
  * 4. Remove password hashes from being returned in the GET /api/schools/:schoolId/drivers response (use Prisma `select`).
  */
+const { getSimulatedAlerts, getMockNotifications } = require('./mock-data');
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -15,6 +15,11 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 require('dotenv').config();
+
+if (!process.env.JWT_SECRET) {
+  console.error('FATAL: process.env.JWT_SECRET is required');
+  process.exit(1);
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -52,20 +57,32 @@ const authenticate = (req, res, next) => {
   }
 };
 
-app.use('/api', (req, res, next) => {
-  if (req.path === '/auth/login' || req.path === '/telemetry') return next();
+app.use((req, res, next) => {
+  if (req.path === '/api/auth/login' || req.path === '/api/telemetry') return next();
   return authenticate(req, res, next);
 });
+
+// Role-based Access Control Middleware
+const authorizeRoles = (...roles) => {
+  return (req, res, next) => {
+    if (!req.user || !roles.includes(req.user.role)) {
+      return res.status(403).json({ error: 'Forbidden: Insufficient permissions' });
+    }
+    next();
+  };
+};
+
+// Apply RBAC to Admin routes
+app.use('/api/admin', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'));
+app.use('/api/admins', authorizeRoles('SUPER_ADMIN'));
+app.use('/api/settings', authorizeRoles('SUPER_ADMIN'));
+
 
 
 
 app.get('/', (req, res) => res.send('Fleet API is running perfectly!'));
 
 
-if (!process.env.JWT_SECRET) {
-  console.error('FATAL: process.env.JWT_SECRET is required');
-  process.exit(1);
-}
 
 // --- 0. AUTHENTICATION ---
 app.post('/api/auth/login', async (req, res) => {
@@ -291,7 +308,7 @@ app.post('/api/schools/:schoolId/drivers', async (req, res) => {
   try {
     const { name, email } = req.body;
     // For MVP, auto-generate a temporary password for the driver
-    const tempPassword = crypto.randomBytes(4).toString('hex');
+    const tempPassword = crypto.randomBytes(16).toString('hex');
     const hashedPassword = await bcrypt.hash(tempPassword, 10);
     
     const driver = await prisma.user.create({
@@ -366,7 +383,7 @@ app.post('/api/schools/:schoolId/students', async (req, res) => {
       let parent = await prisma.user.findUnique({ where: { email: parentEmail } });
       
       if (!parent) {
-        generatedPassword = crypto.randomBytes(4).toString('hex'); // Generate random 8-char password
+        generatedPassword = crypto.randomBytes(16).toString('hex'); // Generate random 32-char password
         const bcrypt = require('bcryptjs'); // Ensure bcrypt is available
         const hashedPassword = await bcrypt.hash(generatedPassword, 10);
         
@@ -637,122 +654,132 @@ app.post('/api/attendance', async (req, res) => {
   }
 });
 // --- 5. SUPER ADMIN STATS ---
+const getSchoolAdminStats = async (prisma, schoolId) => {
+  const fifteenMinsAgo = new Date(Date.now() - 15 * 60000);
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+  const [
+    totalBuses,
+    totalStudents,
+    totalRoutes,
+    pendingLeaves,
+    activeBusesLogs,
+    busesThisMonth,
+    studentsThisMonth,
+    avgDurationRes,
+    minRouteRes,
+    unoptimizedRoutesCount
+  ] = await Promise.all([
+    prisma.bus.count({ where: { schoolId } }),
+    prisma.student.count({ where: { schoolId } }),
+    prisma.route.count({ where: { schoolId } }),
+    prisma.leaveApplication.count({ where: { student: { schoolId }, status: 'PENDING' } }),
+    prisma.gpsLog.findMany({
+      where: {
+        bus: { schoolId },
+        timestamp: { gte: fifteenMinsAgo }
+      },
+      distinct: ['busId'],
+      select: { busId: true }
+    }),
+    prisma.bus.count({ where: { schoolId, createdAt: { gte: thirtyDaysAgo } } }),
+    prisma.student.count({ where: { schoolId, createdAt: { gte: thirtyDaysAgo } } }),
+    prisma.route.aggregate({
+      _avg: { estimatedDuration: true },
+      where: { schoolId }
+    }),
+    prisma.route.findFirst({
+      where: { schoolId, estimatedDuration: { not: null } },
+      orderBy: { estimatedDuration: 'asc' }
+    }),
+    prisma.route.count({
+      where: { schoolId, stops: { none: {} } }
+    })
+  ]);
+
+  const activeDevices = activeBusesLogs.length;
+  const offlineDevices = Math.max(0, totalBuses - activeDevices);
+
+  const busesBase = totalBuses - busesThisMonth;
+  const busesGrowthPercent = busesBase > 0 ? Math.round((busesThisMonth / busesBase) * 100) : 12;
+
+  const studentsBase = totalStudents - studentsThisMonth;
+  const studentsGrowthPercent = studentsBase > 0 ? Math.round((studentsThisMonth / studentsBase) * 100) : 8;
+
+  const averageRouteDuration = avgDurationRes._avg.estimatedDuration ? Math.round(avgDurationRes._avg.estimatedDuration) : 45;
+  const mostEfficientRoute = minRouteRes ? `${minRouteRes.name} (${minRouteRes.estimatedDuration} mins)` : 'Morning Route A (35 mins)';
+  const pendingOptimizations = unoptimizedRoutesCount;
+
+  return {
+    totalBuses,
+    totalStudents,
+    totalRoutes,
+    pendingLeaves,
+    activeDevices,
+    offlineDevices,
+    busesGrowthPercent,
+    studentsGrowthPercent,
+    averageRouteDuration,
+    mostEfficientRoute,
+    pendingOptimizations
+  };
+};
+
+const getSuperAdminStats = async (prisma) => {
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const [
+    totalSchools,
+    totalBuses,
+    totalStudents,
+    schoolsThisMonth,
+    busesThisMonth,
+    activeLogs
+  ] = await Promise.all([
+    prisma.school.count(),
+    prisma.bus.count(),
+    prisma.student.count(),
+    prisma.school.count({ where: { createdAt: { gte: thirtyDaysAgo } } }),
+    prisma.bus.count({ where: { createdAt: { gte: thirtyDaysAgo } } }),
+    prisma.gpsLog.findMany({
+      where: { timestamp: { gte: new Date(Date.now() - 15 * 60000) } },
+      distinct: ['busId'],
+      select: { busId: true }
+    })
+  ]);
+
+  const activeDevices = activeLogs.length;
+  const offlineDevices = 18; // Placeholder matching UI design constraints
+  const stationaryDevices = totalBuses - offlineDevices - activeDevices > 0 ? (totalBuses - offlineDevices - activeDevices) : 2;
+
+  const schoolsBase = totalSchools - schoolsThisMonth;
+  const schoolsGrowthPercent = schoolsBase > 0 ? Math.round((schoolsThisMonth / schoolsBase) * 100) : 3;
+
+  const busesBase = totalBuses - busesThisMonth;
+  const busesGrowthPercent = busesBase > 0 ? Math.round((busesThisMonth / busesBase) * 100) : 12;
+
+  return {
+    totalSchools,
+    totalBuses,
+    offlineDevices,
+    activeDevices,
+    stationaryDevices,
+    totalStudents,
+    schoolsGrowthPercent,
+    busesGrowthPercent
+  };
+};
+
 app.get(['/api/admin/stats', '/api/stats'], async (req, res) => {
   try {
     const { role, schoolId } = req.user;
 
     if (role === 'SCHOOL_ADMIN' && schoolId) {
-      const fifteenMinsAgo = new Date(Date.now() - 15 * 60000);
-      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-
-      const [
-        totalBuses,
-        totalStudents,
-        totalRoutes,
-        pendingLeaves,
-        activeBusesLogs,
-        busesThisMonth,
-        studentsThisMonth,
-        avgDurationRes,
-        minRouteRes,
-        unoptimizedRoutesCount
-      ] = await Promise.all([
-        prisma.bus.count({ where: { schoolId } }),
-        prisma.student.count({ where: { schoolId } }),
-        prisma.route.count({ where: { schoolId } }),
-        prisma.leaveApplication.count({ where: { student: { schoolId }, status: 'PENDING' } }),
-        prisma.gpsLog.findMany({
-          where: {
-            bus: { schoolId },
-            timestamp: { gte: fifteenMinsAgo }
-          },
-          distinct: ['busId'],
-          select: { busId: true }
-        }),
-        prisma.bus.count({ where: { schoolId, createdAt: { gte: thirtyDaysAgo } } }),
-        prisma.student.count({ where: { schoolId, createdAt: { gte: thirtyDaysAgo } } }),
-        prisma.route.aggregate({
-          _avg: { estimatedDuration: true },
-          where: { schoolId }
-        }),
-        prisma.route.findFirst({
-          where: { schoolId, estimatedDuration: { not: null } },
-          orderBy: { estimatedDuration: 'asc' }
-        }),
-        prisma.route.count({
-          where: { schoolId, stops: { none: {} } }
-        })
-      ]);
-
-      const activeDevices = activeBusesLogs.length;
-      const offlineDevices = Math.max(0, totalBuses - activeDevices);
-
-      const busesBase = totalBuses - busesThisMonth;
-      const busesGrowthPercent = busesBase > 0 ? Math.round((busesThisMonth / busesBase) * 100) : 12;
-
-      const studentsBase = totalStudents - studentsThisMonth;
-      const studentsGrowthPercent = studentsBase > 0 ? Math.round((studentsThisMonth / studentsBase) * 100) : 8;
-
-      const averageRouteDuration = avgDurationRes._avg.estimatedDuration ? Math.round(avgDurationRes._avg.estimatedDuration) : 45;
-      const mostEfficientRoute = minRouteRes ? `${minRouteRes.name} (${minRouteRes.estimatedDuration} mins)` : 'Morning Route A (35 mins)';
-      const pendingOptimizations = unoptimizedRoutesCount;
-
-      return res.json({
-        totalBuses,
-        totalStudents,
-        totalRoutes,
-        pendingLeaves,
-        activeDevices,
-        offlineDevices,
-        busesGrowthPercent,
-        studentsGrowthPercent,
-        averageRouteDuration,
-        mostEfficientRoute,
-        pendingOptimizations
-      });
+      const stats = await getSchoolAdminStats(prisma, schoolId);
+      return res.json(stats);
     } else {
       // SUPER ADMIN (Global) STATS
-      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-      const [
-        totalSchools,
-        totalBuses,
-        totalStudents,
-        schoolsThisMonth,
-        busesThisMonth,
-        activeLogs
-      ] = await Promise.all([
-        prisma.school.count(),
-        prisma.bus.count(),
-        prisma.student.count(),
-        prisma.school.count({ where: { createdAt: { gte: thirtyDaysAgo } } }),
-        prisma.bus.count({ where: { createdAt: { gte: thirtyDaysAgo } } }),
-        prisma.gpsLog.findMany({
-          where: { timestamp: { gte: new Date(Date.now() - 15 * 60000) } },
-          distinct: ['busId'],
-          select: { busId: true }
-        })
-      ]);
-
-      const activeDevices = activeLogs.length;
-      const offlineDevices = 18; // Placeholder matching UI design constraints
-      const stationaryDevices = totalBuses - offlineDevices - activeDevices > 0 ? (totalBuses - offlineDevices - activeDevices) : 2;
-
-      const schoolsBase = totalSchools - schoolsThisMonth;
-      const schoolsGrowthPercent = schoolsBase > 0 ? Math.round((schoolsThisMonth / schoolsBase) * 100) : 3;
-
-      const busesBase = totalBuses - busesThisMonth;
-      const busesGrowthPercent = busesBase > 0 ? Math.round((busesThisMonth / busesBase) * 100) : 12;
-
-      return res.json({
-        totalSchools,
-        totalBuses,
-        offlineDevices,
-        activeDevices,
-        stationaryDevices,
-        totalStudents,
-        schoolsGrowthPercent,
-        busesGrowthPercent
-      });
+      const stats = await getSuperAdminStats(prisma);
+      return res.json(stats);
     }
   } catch (err) {
     console.error(err);
@@ -798,7 +825,7 @@ app.get('/api/schools/:id', async (req, res) => {
   }
 });
 
-app.post('/api/schools', async (req, res) => {
+app.post('/api/schools', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     const { name, address, contactPerson, city, state, phone, email } = req.body;
     const school = await prisma.school.create({ 
@@ -811,7 +838,7 @@ app.post('/api/schools', async (req, res) => {
   }
 });
 
-app.put('/api/schools/:id', async (req, res) => {
+app.put('/api/schools/:id', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     const { name, address, contactPerson, city, state, phone, email } = req.body;
     const updateData = {};
@@ -834,7 +861,7 @@ app.put('/api/schools/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/schools/:id', async (req, res) => {
+app.delete('/api/schools/:id', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     // Delete related entities first due to foreign keys, or rely on Prisma cascade if configured.
     // Assuming simple delete for now, if it fails, cascading needs to be explicitly handled.
@@ -1240,26 +1267,7 @@ app.get('/api/notifications', async (req, res) => {
         createdAt: alert.createdAt
       }));
 
-      const simulatedAlerts = [
-        {
-          id: 'sys-offline-1',
-          type: 'SYSTEM_WARNING',
-          title: 'Device Offline',
-          message: 'Device DL1P-1234 has been offline for more than 24 hours.',
-          status: 'ACTIVE',
-          isRead: false,
-          createdAt: new Date(Date.now() - 3600000).toISOString()
-        },
-        {
-          id: 'sys-warning-2',
-          type: 'SYSTEM_WARNING',
-          title: 'High Speed Alert',
-          message: 'Bus DL1P-4321 exceeded speed limit (85 km/h).',
-          status: 'ACTIVE',
-          isRead: false,
-          createdAt: new Date(Date.now() - 100000).toISOString()
-        }
-      ];
+      const simulatedAlerts = getSimulatedAlerts();
 
       const allAlerts = [...formattedRealAlerts, ...simulatedAlerts]
         .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
@@ -1276,35 +1284,7 @@ app.get('/api/notifications', async (req, res) => {
 
       // Inject mock notifications if database is empty for testing UI bell dropdown
       if (notifications.length === 0) {
-        notifications = [
-          {
-            id: 'mock-notif-1',
-            userId,
-            title: 'New Leave Request',
-            message: 'Rohan Sharma has submitted a leave application for tomorrow.',
-            type: 'LEAVE',
-            isRead: false,
-            createdAt: new Date(Date.now() - 600000).toISOString()
-          },
-          {
-            id: 'mock-notif-2',
-            userId,
-            title: 'Bus Delay Warning',
-            message: 'Bus DL1P-1234 on Morning Route A is delayed by 15 minutes.',
-            type: 'DELAY',
-            isRead: false,
-            createdAt: new Date(Date.now() - 1800000).toISOString()
-          },
-          {
-            id: 'mock-notif-3',
-            userId,
-            title: 'SOS Active Alert',
-            message: 'Driver Ashok Kumar triggered SOS alert on Route B.',
-            type: 'SOS',
-            isRead: false,
-            createdAt: new Date(Date.now() - 3600000).toISOString()
-          }
-        ];
+        notifications = getMockNotifications(userId);
       }
 
       return res.json(notifications);
