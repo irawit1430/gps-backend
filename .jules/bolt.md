@@ -4,3 +4,6 @@
 ## 2026-07-19 - Concurrent Database Queries
 **Learning:** Sequential, independent database queries inside endpoints (like multiple `count()` calls) lead to an N+1 query pattern latency issue, as each query waits for the previous one to complete.
 **Action:** Always wrap independent asynchronous database operations in `Promise.all()` to execute them concurrently, reducing overall request processing time.
+## 2024-07-31 - Caching TCP Server Lookups
+**Learning:** The TCP Server's `socket.on('data')` loop hits the database on every parsed packet to resolve the device IMEI to a Bus record. This creates an N+1 query bottleneck when processing large chunks of telemetry.
+**Action:** Implemented a `Map`-based cache (`busCache`) with a TTL to store the IMEI-to-Bus mapping, significantly reducing database lookups for consecutive packets from the same device.
