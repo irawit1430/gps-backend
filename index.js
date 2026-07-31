@@ -12,7 +12,18 @@ try {
   console.error('Failed to initialize database on boot:', e.message);
 }
 
-const { server } = require('./server.js');
+const { server, io } = require('./server.js');
+const { startTcpServer } = require('./tcp-server.js');
+
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+const TCP_PORT = process.env.TCP_PORT || 5000;
+
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  try {
+    startTcpServer(io, TCP_PORT);
+  } catch (err) {
+    console.error('Failed to start TCP listener:', err.message);
+  }
+});
 
