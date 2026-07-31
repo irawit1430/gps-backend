@@ -1,0 +1,7 @@
+🎯 **What:** Extracted long inline stats generation logic from the `/api/admin/stats` handler into two distinct helper functions: `getSchoolAdminStats` and `getSuperAdminStats`.
+
+💡 **Why:** Reduces the overall complexity of the main route handler, improving code readability and maintainability. It makes it easier to test and reason about the logic for different admin roles separately.
+
+✅ **Verification:** Ran the test suite successfully and ensured functionality remained intact by checking the response formats.
+
+✨ **Result:** A cleaner, more modular `server.js` file.
