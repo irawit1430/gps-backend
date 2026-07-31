@@ -465,7 +465,8 @@ app.get('/api/schools/:schoolId/stats', async (req, res) => {
 // --- 3. PARENT APP ---
 app.patch('/api/parents/:id/preferences', async (req, res) => {
   try {
-    const preferences = JSON.stringify(req.body);
+    const { pushEnabled, emailEnabled, smsEnabled } = req.body;
+    const preferences = JSON.stringify({ pushEnabled, emailEnabled, smsEnabled });
     const user = await prisma.user.update({
       where: { id: req.params.id },
       data: { notificationSettings: preferences }
