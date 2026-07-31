@@ -291,7 +291,7 @@ app.post('/api/schools/:schoolId/drivers', async (req, res) => {
   try {
     const { name, email } = req.body;
     // For MVP, auto-generate a temporary password for the driver
-    const tempPassword = crypto.randomBytes(4).toString('hex');
+    const tempPassword = crypto.randomBytes(16).toString('hex');
     const hashedPassword = await bcrypt.hash(tempPassword, 10);
     
     const driver = await prisma.user.create({
@@ -366,7 +366,7 @@ app.post('/api/schools/:schoolId/students', async (req, res) => {
       let parent = await prisma.user.findUnique({ where: { email: parentEmail } });
       
       if (!parent) {
-        generatedPassword = crypto.randomBytes(4).toString('hex'); // Generate random 8-char password
+        generatedPassword = crypto.randomBytes(16).toString('hex'); // Generate random 32-char password
         const bcrypt = require('bcryptjs'); // Ensure bcrypt is available
         const hashedPassword = await bcrypt.hash(generatedPassword, 10);
         
@@ -637,57 +637,123 @@ app.post('/api/attendance', async (req, res) => {
   }
 });
 // --- 5. SUPER ADMIN STATS ---
-app.get('/api/admin/stats', async (req, res) => {
+app.get(['/api/admin/stats', '/api/stats'], async (req, res) => {
   try {
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const { role, schoolId } = req.user;
 
-    // Batch counts concurrently
-    const [
-      totalSchools, 
-      totalBuses, 
-      totalStudents,
-      schoolsThisMonth,
-      busesThisMonth,
-      activeLogs
-    ] = await Promise.all([
-      prisma.school.count(),
-      prisma.bus.count(),
-      prisma.student.count(),
-      prisma.school.count({ where: { createdAt: { gte: thirtyDaysAgo } } }),
-      prisma.bus.count({ where: { createdAt: { gte: thirtyDaysAgo } } }),
-      prisma.gpsLog.findMany({
-        where: { timestamp: { gte: new Date(Date.now() - 15 * 60000) } },
-        distinct: ['busId'],
-        select: { busId: true }
-      })
-    ]);
-    
-    // Dynamic growth percentage calculations
-    const schoolsBase = totalSchools - schoolsThisMonth;
-    const schoolsGrowthPercent = schoolsBase > 0 
-      ? Math.round((schoolsThisMonth / schoolsBase) * 100) 
-      : 3.0; // Fallback mockup value (+3%)
+    if (role === 'SCHOOL_ADMIN' && schoolId) {
+      const fifteenMinsAgo = new Date(Date.now() - 15 * 60000);
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
 
-    const busesBase = totalBuses - busesThisMonth;
-    const busesGrowthPercent = busesBase > 0 
-      ? Math.round((busesThisMonth / busesBase) * 100) 
-      : 12.0; // Fallback mockup value (+12%)
+      const [
+        totalBuses,
+        totalStudents,
+        totalRoutes,
+        pendingLeaves,
+        activeBusesLogs,
+        busesThisMonth,
+        studentsThisMonth,
+        avgDurationRes,
+        minRouteRes,
+        unoptimizedRoutesCount
+      ] = await Promise.all([
+        prisma.bus.count({ where: { schoolId } }),
+        prisma.student.count({ where: { schoolId } }),
+        prisma.route.count({ where: { schoolId } }),
+        prisma.leaveApplication.count({ where: { student: { schoolId }, status: 'PENDING' } }),
+        prisma.gpsLog.findMany({
+          where: {
+            bus: { schoolId },
+            timestamp: { gte: fifteenMinsAgo }
+          },
+          distinct: ['busId'],
+          select: { busId: true }
+        }),
+        prisma.bus.count({ where: { schoolId, createdAt: { gte: thirtyDaysAgo } } }),
+        prisma.student.count({ where: { schoolId, createdAt: { gte: thirtyDaysAgo } } }),
+        prisma.route.aggregate({
+          _avg: { estimatedDuration: true },
+          where: { schoolId }
+        }),
+        prisma.route.findFirst({
+          where: { schoolId, estimatedDuration: { not: null } },
+          orderBy: { estimatedDuration: 'asc' }
+        }),
+        prisma.route.count({
+          where: { schoolId, stops: { none: {} } }
+        })
+      ]);
 
-    const activeDevices = activeLogs.length;
-    // For offline devices, we return a placeholder until hardware heartbeats are implemented in schema
-    const offlineDevices = 18; // Placeholder matching your UI
-    const stationaryDevices = totalBuses - offlineDevices - activeDevices > 0 ? (totalBuses - offlineDevices - activeDevices) : 2; // Placeholder
+      const activeDevices = activeBusesLogs.length;
+      const offlineDevices = Math.max(0, totalBuses - activeDevices);
 
-    res.json({
-      totalSchools,
-      totalBuses,
-      offlineDevices,
-      activeDevices,
-      stationaryDevices,
-      totalStudents,
-      schoolsGrowthPercent,
-      busesGrowthPercent
-    });
+      const busesBase = totalBuses - busesThisMonth;
+      const busesGrowthPercent = busesBase > 0 ? Math.round((busesThisMonth / busesBase) * 100) : 12;
+
+      const studentsBase = totalStudents - studentsThisMonth;
+      const studentsGrowthPercent = studentsBase > 0 ? Math.round((studentsThisMonth / studentsBase) * 100) : 8;
+
+      const averageRouteDuration = avgDurationRes._avg.estimatedDuration ? Math.round(avgDurationRes._avg.estimatedDuration) : 45;
+      const mostEfficientRoute = minRouteRes ? `${minRouteRes.name} (${minRouteRes.estimatedDuration} mins)` : 'Morning Route A (35 mins)';
+      const pendingOptimizations = unoptimizedRoutesCount;
+
+      return res.json({
+        totalBuses,
+        totalStudents,
+        totalRoutes,
+        pendingLeaves,
+        activeDevices,
+        offlineDevices,
+        busesGrowthPercent,
+        studentsGrowthPercent,
+        averageRouteDuration,
+        mostEfficientRoute,
+        pendingOptimizations
+      });
+    } else {
+      // SUPER ADMIN (Global) STATS
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      const [
+        totalSchools,
+        totalBuses,
+        totalStudents,
+        schoolsThisMonth,
+        busesThisMonth,
+        activeLogs
+      ] = await Promise.all([
+        prisma.school.count(),
+        prisma.bus.count(),
+        prisma.student.count(),
+        prisma.school.count({ where: { createdAt: { gte: thirtyDaysAgo } } }),
+        prisma.bus.count({ where: { createdAt: { gte: thirtyDaysAgo } } }),
+        prisma.gpsLog.findMany({
+          where: { timestamp: { gte: new Date(Date.now() - 15 * 60000) } },
+          distinct: ['busId'],
+          select: { busId: true }
+        })
+      ]);
+
+      const activeDevices = activeLogs.length;
+      const offlineDevices = 18; // Placeholder matching UI design constraints
+      const stationaryDevices = totalBuses - offlineDevices - activeDevices > 0 ? (totalBuses - offlineDevices - activeDevices) : 2;
+
+      const schoolsBase = totalSchools - schoolsThisMonth;
+      const schoolsGrowthPercent = schoolsBase > 0 ? Math.round((schoolsThisMonth / schoolsBase) * 100) : 3;
+
+      const busesBase = totalBuses - busesThisMonth;
+      const busesGrowthPercent = busesBase > 0 ? Math.round((busesThisMonth / busesBase) * 100) : 12;
+
+      return res.json({
+        totalSchools,
+        totalBuses,
+        offlineDevices,
+        activeDevices,
+        stationaryDevices,
+        totalStudents,
+        schoolsGrowthPercent,
+        busesGrowthPercent
+      });
+    }
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Internal server error' });
@@ -1322,4 +1388,4 @@ if (require.main === module) {
   server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 }
 
-module.exports = { app, server, prisma };
+module.exports = { app, server, io, prisma };

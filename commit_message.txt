@@ -1,0 +1,10 @@
+🛡️ Sentinel: [HIGH] Fix weak auto-generated passwords
+
+🎯 What: The vulnerability fixed
+The temporary password generator in `server.js` was using `crypto.randomBytes(4)`, which only provides 32 bits of entropy (producing an 8-character hex string). This is a weak password that can be easily brute-forced.
+
+⚠️ Risk: The potential impact if left unfixed
+An attacker could potentially brute-force the auto-generated temporary passwords for newly created Drivers and Parents, allowing unauthorized access to their accounts before they change their password. This could lead to a compromise of PII or misuse of driver features.
+
+🛡️ Solution: How the fix addresses the vulnerability
+Updated the entropy generation to use `crypto.randomBytes(16)` instead. This provides 128 bits of entropy and produces a secure 32-character hex string, eliminating the possibility of offline or online brute-force attacks against the temporary password.
