@@ -1123,6 +1123,85 @@ app.put('/api/settings', async (req, res) => {
   }
 });
 
+async function handleSchoolAdminSearch(q, schoolId) {
+  const [students, drivers, buses, routes] = await Promise.all([
+    prisma.student.findMany({
+      where: { schoolId, name: { contains: q } },
+      include: { routeMappings: { include: { routeStop: { include: { route: true } } } } },
+      take: 10
+    }),
+    prisma.user.findMany({
+      where: { schoolId, role: 'DRIVER', name: { contains: q } },
+      include: { driverTrips: { include: { bus: true } } },
+      take: 10
+    }),
+    prisma.bus.findMany({
+      where: { schoolId, licensePlate: { contains: q } },
+      take: 10
+    }),
+    prisma.route.findMany({
+      where: { schoolId, name: { contains: q } },
+      take: 10
+    })
+  ]);
+
+  const results = [];
+  students.forEach(s => {
+    const routeName = s.routeMappings[0]?.routeStop?.route?.name || 'Unassigned Route';
+    results.push({ id: s.id, type: 'student', name: s.name, detail: `Grade: ${s.grade || 'N/A'} | ${routeName}` });
+  });
+  drivers.forEach(d => {
+    const activeTrip = d.driverTrips[0];
+    const detail = activeTrip ? `Assigned to Bus: ${activeTrip.bus?.licensePlate}` : 'Idle / Unassigned';
+    results.push({ id: d.id, type: 'driver', name: d.name, detail });
+  });
+  buses.forEach(b => {
+    results.push({ id: b.id, type: 'bus', name: b.licensePlate, detail: `Capacity: ${b.capacity} | Device: ${b.deviceId}` });
+  });
+  routes.forEach(r => {
+    results.push({ id: r.id, type: 'route', name: r.name, detail: `Est Duration: ${r.estimatedDuration || 0} mins` });
+  });
+
+  return { results };
+}
+
+async function handleSuperAdminSearch(q) {
+  const [schools, devices, admins] = await Promise.all([
+    prisma.school.findMany({
+      where: {
+        OR: [
+          { name: { contains: q } },
+          { city: { contains: q } },
+          { state: { contains: q } }
+        ]
+      },
+      take: 20
+    }),
+    prisma.bus.findMany({
+      where: {
+        OR: [
+          { licensePlate: { contains: q } },
+          { deviceId: { contains: q } }
+        ]
+      },
+      take: 20
+    }),
+    prisma.user.findMany({
+      where: {
+        role: { in: ['SUPER_ADMIN', 'SCHOOL_ADMIN'] },
+        OR: [
+          { name: { contains: q } },
+          { email: { contains: q } }
+        ]
+      },
+      select: { id: true, name: true, email: true, role: true },
+      take: 20
+    })
+  ]);
+
+  return { schools, devices, admins, results: [] };
+}
+
 // Global Search API
 app.get('/api/search', async (req, res) => {
   try {
@@ -1134,82 +1213,11 @@ app.get('/api/search', async (req, res) => {
     const { role, schoolId } = req.user;
 
     if (role === 'SCHOOL_ADMIN' && schoolId) {
-      // SCHOOL ADMIN SEARCH (Students, Drivers, Buses, Routes)
-      const [students, drivers, buses, routes] = await Promise.all([
-        prisma.student.findMany({
-          where: { schoolId, name: { contains: q } },
-          include: { routeMappings: { include: { routeStop: { include: { route: true } } } } },
-          take: 10
-        }),
-        prisma.user.findMany({
-          where: { schoolId, role: 'DRIVER', name: { contains: q } },
-          include: { driverTrips: { include: { bus: true } } },
-          take: 10
-        }),
-        prisma.bus.findMany({
-          where: { schoolId, licensePlate: { contains: q } },
-          take: 10
-        }),
-        prisma.route.findMany({
-          where: { schoolId, name: { contains: q } },
-          take: 10
-        })
-      ]);
-
-      const results = [];
-      students.forEach(s => {
-        const routeName = s.routeMappings[0]?.routeStop?.route?.name || 'Unassigned Route';
-        results.push({ id: s.id, type: 'student', name: s.name, detail: `Grade: ${s.grade || 'N/A'} | ${routeName}` });
-      });
-      drivers.forEach(d => {
-        const activeTrip = d.driverTrips[0];
-        const detail = activeTrip ? `Assigned to Bus: ${activeTrip.bus?.licensePlate}` : 'Idle / Unassigned';
-        results.push({ id: d.id, type: 'driver', name: d.name, detail });
-      });
-      buses.forEach(b => {
-        results.push({ id: b.id, type: 'bus', name: b.licensePlate, detail: `Capacity: ${b.capacity} | Device: ${b.deviceId}` });
-      });
-      routes.forEach(r => {
-        results.push({ id: r.id, type: 'route', name: r.name, detail: `Est Duration: ${r.estimatedDuration || 0} mins` });
-      });
-
-      return res.json({ results });
+      const responseData = await handleSchoolAdminSearch(q, schoolId);
+      return res.json(responseData);
     } else {
-      // SUPER ADMIN SEARCH (Schools, Devices, Admins)
-      const [schools, devices, admins] = await Promise.all([
-        prisma.school.findMany({
-          where: {
-            OR: [
-              { name: { contains: q } },
-              { city: { contains: q } },
-              { state: { contains: q } }
-            ]
-          },
-          take: 20
-        }),
-        prisma.bus.findMany({
-          where: {
-            OR: [
-              { licensePlate: { contains: q } },
-              { deviceId: { contains: q } }
-            ]
-          },
-          take: 20
-        }),
-        prisma.user.findMany({
-          where: {
-            role: { in: ['SUPER_ADMIN', 'SCHOOL_ADMIN'] },
-            OR: [
-              { name: { contains: q } },
-              { email: { contains: q } }
-            ]
-          },
-          select: { id: true, name: true, email: true, role: true },
-          take: 20
-        })
-      ]);
-
-      return res.json({ schools, devices, admins, results: [] });
+      const responseData = await handleSuperAdminSearch(q);
+      return res.json(responseData);
     }
   } catch (err) {
     console.error(err);

@@ -1,0 +1,7 @@
+🎯 **What:** Extracted the complex search logic from the `app.get('/api/search')` route handler in `server.js` into two separate utility functions: `handleSchoolAdminSearch` and `handleSuperAdminSearch`.
+
+💡 **Why:** The original `/api/search` route handler was overly complex, containing inline logic for both `SCHOOL_ADMIN` and `SUPER_ADMIN` roles. Extracting this logic into separate functions improves readability, maintainability, and makes the code easier to test in the future.
+
+✅ **Verification:** Verified the code manually with `cat` and `grep` commands to ensure the refactoring was done correctly. Executed the full test suite (`npm test`) to ensure no existing functionality was broken. Requested code review, and it passed with a `#Correct#` rating.
+
+✨ **Result:** The `/api/search` route handler is now much cleaner and easier to read, delegating the heavy lifting to the appropriate role-specific utility functions.
