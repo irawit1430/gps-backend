@@ -410,6 +410,12 @@ app.post('/api/schools/:schoolId/students', async (req, res) => {
     });
   } catch (err) {
     console.error(err);
+    if (err.code === 'P2002') {
+      const targetField = err.meta?.target || 'rfidTag';
+      return res.status(400).json({ 
+        error: `RFID Tag is already assigned to another student. Please enter a unique RFID Tag.` 
+      });
+    }
     res.status(500).json({ error: 'Internal server error' });
   }
 });
