@@ -384,7 +384,7 @@ app.post(['/api/schools/:schoolId/students', '/api/students'], async (req, res) 
 
     // Auto-generate a unique RFID tag if not provided or empty string
     if (!rfidTag || typeof rfidTag !== 'string' || rfidTag.trim() === '') {
-      rfidTag = `RFID-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
+      rfidTag = `RFID-${Date.now()}-${crypto.randomInt(100, 1000)}`;
     } else {
       rfidTag = rfidTag.trim();
     }
@@ -397,7 +397,7 @@ app.post(['/api/schools/:schoolId/students', '/api/students'], async (req, res) 
       let parent = await prisma.user.findUnique({ where: { email: parentEmail } });
       
       if (!parent) {
-        generatedPassword = crypto.randomBytes(4).toString('hex'); // Generate random 8-char password
+        generatedPassword = crypto.randomBytes(16).toString('hex'); // Generate secure random password
         const bcrypt = require('bcryptjs');
         const hashedPassword = await bcrypt.hash(generatedPassword, 10);
         

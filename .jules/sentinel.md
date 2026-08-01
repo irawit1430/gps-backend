@@ -10,3 +10,7 @@
 **Vulnerability:** Critical admin-level routes (like `/api/admins`, `/api/admin/stats`, `/api/settings`) were missing `authorizeRoles` middleware checks, allowing any authenticated user to access them and potentially escalate privileges.
 **Learning:** Even though `authenticate` middleware was in place, it only verified the presence of a valid token without checking the user's role. Authentication does not imply authorization. The assumption that the middleware already restricted access was incorrect.
 **Prevention:** Always verify that sensitive endpoints have explicit role-based access checks (e.g., `authorizeRoles('SUPER_ADMIN')`) applied at the route definition or using an `app.use` prefix. Never assume authentication implies authorization.
+## 2025-02-23 - Insecure Randomness and Insufficient Entropy
+**Vulnerability:** Weak random number generation (`Math.random()`) was used for creating RFID tags, and insufficient entropy (`crypto.randomBytes(4)`) was used for generating temporary passwords.
+**Learning:** `Math.random()` is not a cryptographically secure pseudorandom number generator (CSPRNG) and its values can be predicted. Additionally, `crypto.randomBytes(4)` only provides 32 bits of entropy, which is too short for a secure password and susceptible to brute-force attacks.
+**Prevention:** Use `crypto.randomBytes()` with at least 16 bytes for secure tokens and passwords, and use `crypto.randomInt()` instead of `Math.random()` when random numbers are required for IDs.
