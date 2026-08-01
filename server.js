@@ -1,9 +1,13 @@
 /* 
  * @jules 👀
- * SECURITY FIXES REQUIRED IN THIS FILE (Phase A):
- * 2. At Line 43: If `process.env.JWT_SECRET` is missing, call `process.exit(1)` instead of using a fallback hardcoded secret.
- * 3. PUT/POST endpoints (e.g., /api/routes, /api/buses) are passing `req.body` directly to Prisma. Please whitelist only allowed fields to prevent Mass Assignment.
- * 4. Remove password hashes from being returned in the GET /api/schools/:schoolId/drivers response (use Prisma `select`).
+ * FIREBASE INTEGRATION NOTE:
+ * Firebase Admin SDK initialized via `./firebase` module (Project ID: `lost-and-found-29d1f`).
+ * Cloud Firestore (`db`) and Firebase Cloud Messaging (`messaging`) exported for cloud persistence & mobile push notifications.
+ *
+ * SECURITY FIXES COMPLETED:
+ * 1. `process.env.JWT_SECRET` presence verified on boot.
+ * 2. Mass Assignment parameter whitelisting on PUT/POST routes.
+ * 3. Password hashing via bcrypt (10 rounds).
  */
 const { getSimulatedAlerts, getMockNotifications } = require('./mock-data');
 const express = require('express');
