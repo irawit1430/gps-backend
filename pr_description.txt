@@ -1,9 +1,13 @@
-🎯 **What:** The testing gap addressed
-Added a missing test for the `GET /api/schools/:schoolId/buses` endpoint to verify that it successfully fetches data using Prisma and correctly maps `driverName` and `routeName` in the response.
+**What**
+Dynamically checked the P2002 target field in `/api/schools/:schoolId/students` to ensure error message accurately reflects which unique constraint failed.
 
-📊 **Coverage:** What scenarios are now tested
-- Happy path: Verifies that the endpoint successfully returns a list of formatted buses with active trip info, ensuring the `driverName` and `routeName` are correctly mapped from the `trips` relation.
-- Error path: Verifies that the endpoint correctly handles and returns a 500 error when the database throws an error.
+**Why**
+When a parent email unique constraint violation occurred (e.g., during parent auto-creation race conditions or similar DB clashes), the system hardcoded the error message to say "RFID Tag is already assigned". This misled users to debug the RFID rather than the parent email.
 
-✨ **Result:** The improvement in test coverage
-The `GET /api/schools/:schoolId/buses` endpoint is now fully tested, ensuring its reliability and preventing future regressions when mapping nested Prisma relations.
+**Verification**
+- Verified using test reproduction script simulating `email` unique constraint violation.
+- Full test suite passes.
+- Pre-commit checks passed.
+
+**Result**
+The backend now correctly returns "Email address is already in use." when the email constraint is violated, and continues to return the RFID error when the RFID constraint is violated.

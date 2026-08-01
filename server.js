@@ -411,7 +411,11 @@ app.post('/api/schools/:schoolId/students', async (req, res) => {
   } catch (err) {
     console.error(err);
     if (err.code === 'P2002') {
-      const targetField = err.meta?.target || 'rfidTag';
+      const targetField = err.meta?.target || [];
+      const field = Array.isArray(targetField) ? targetField[0] : targetField;
+      if (field === 'email') {
+        return res.status(400).json({ error: 'Email address is already in use.' });
+      }
       return res.status(400).json({ 
         error: `RFID Tag is already assigned to another student. Please enter a unique RFID Tag.` 
       });
