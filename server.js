@@ -306,10 +306,8 @@ app.get('/api/schools/:schoolId/drivers', async (req, res) => {
 
 app.post('/api/schools/:schoolId/drivers', async (req, res) => {
   try {
-    const { name, email } = req.body;
-    // For MVP, auto-generate a temporary password for the driver
-    const tempPassword = crypto.randomBytes(16).toString('hex');
-    const hashedPassword = await bcrypt.hash(tempPassword, 10);
+    const { name, email, password } = req.body;
+    const hashedPassword = await bcrypt.hash(password, 10);
     
     const driver = await prisma.user.create({
       data: {
@@ -321,7 +319,7 @@ app.post('/api/schools/:schoolId/drivers', async (req, res) => {
       }
     });
     
-    res.json({ driver, tempPassword });
+    res.json(driver);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Internal server error' });
