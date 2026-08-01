@@ -1,4 +1,6 @@
-const admin = require('firebase-admin');
+const { initializeApp, cert, getApps } = require('firebase-admin/app');
+const { getFirestore } = require('firebase-admin/firestore');
+const { getMessaging } = require('firebase-admin/messaging');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
@@ -41,23 +43,33 @@ if (!serviceAccount) {
   }
 }
 
+let app = null;
+let db = null;
+let messaging = null;
+
 if (serviceAccount) {
-  if (!admin.apps.length) {
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-      projectId: serviceAccount.project_id || 'lost-and-found-29d1f'
-    });
-    console.log(`[Firebase] Cloud Firestore initialized for project: ${serviceAccount.project_id}`);
+  try {
+    const apps = getApps();
+    if (!apps.length) {
+      app = initializeApp({
+        credential: cert(serviceAccount),
+        projectId: serviceAccount.project_id || 'lost-and-found-29d1f'
+      });
+    } else {
+      app = apps[0];
+    }
+    db = getFirestore(app);
+    messaging = getMessaging(app);
+    console.log(`[Firebase] Cloud Firestore & FCM initialized for project: ${serviceAccount.project_id}`);
+  } catch (err) {
+    console.error('[Firebase] Initialization error:', err.message);
   }
 } else {
   console.warn('[Firebase] No Service Account credentials found. Firestore cloud sync will be disabled.');
 }
 
-const db = admin.apps.length ? admin.firestore() : null;
-const messaging = admin.apps.length ? admin.messaging() : null;
-
 module.exports = {
-  admin,
+  app,
   db,
   messaging
 };
