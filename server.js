@@ -372,9 +372,25 @@ app.get('/api/schools/:schoolId/students', async (req, res) => {
   }
 });
 
-app.post('/api/schools/:schoolId/students', async (req, res) => {
+app.post(['/api/schools/:schoolId/students', '/api/students'], async (req, res) => {
   try {
-    const { rfidTag, name, grade, parentEmail, parentName } = req.body;
+    const schoolId = req.params.schoolId || req.body.schoolId || req.user?.schoolId;
+    if (!schoolId) {
+      return res.status(400).json({ error: 'schoolId is required' });
+    }
+
+    let { rfidTag, name, grade, parentEmail, parentName } = req.body;
+    if (!name) {
+      return res.status(400).json({ error: 'Student name is required' });
+    }
+
+    // Auto-generate a unique RFID tag if not provided or empty string
+    if (!rfidTag || typeof rfidTag !== 'string' || rfidTag.trim() === '') {
+      rfidTag = `RFID-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
+    } else {
+      rfidTag = rfidTag.trim();
+    }
+
     let parentId = null;
     let generatedPassword = null;
 
@@ -383,8 +399,8 @@ app.post('/api/schools/:schoolId/students', async (req, res) => {
       let parent = await prisma.user.findUnique({ where: { email: parentEmail } });
       
       if (!parent) {
-        generatedPassword = crypto.randomBytes(16).toString('hex'); // Generate random 32-char password
-        const bcrypt = require('bcryptjs'); // Ensure bcrypt is available
+        generatedPassword = crypto.randomBytes(4).toString('hex'); // Generate random 8-char password
+        const bcrypt = require('bcryptjs');
         const hashedPassword = await bcrypt.hash(generatedPassword, 10);
         
         parent = await prisma.user.create({
@@ -393,7 +409,7 @@ app.post('/api/schools/:schoolId/students', async (req, res) => {
             password: hashedPassword,
             role: "PARENT",
             name: parentName || `Parent of ${name}`,
-            schoolId: req.params.schoolId
+            schoolId: schoolId
           }
         });
       }
@@ -401,7 +417,7 @@ app.post('/api/schools/:schoolId/students', async (req, res) => {
     }
 
     const student = await prisma.student.create({
-      data: { schoolId: req.params.schoolId, rfidTag, name, grade, parentId }
+      data: { schoolId, rfidTag, name, grade: grade || 'General', parentId }
     });
 
     res.json({
@@ -409,11 +425,10 @@ app.post('/api/schools/:schoolId/students', async (req, res) => {
       parentCredentials: generatedPassword ? { email: parentEmail, temporaryPassword: generatedPassword } : null
     });
   } catch (err) {
-    console.error(err);
+    console.error('Error registering student:', err);
     if (err.code === 'P2002') {
-      const targetField = err.meta?.target || 'rfidTag';
       return res.status(400).json({ 
-        error: `RFID Tag is already assigned to another student. Please enter a unique RFID Tag.` 
+        error: 'RFID Tag is already assigned to another student. Please enter a unique RFID Tag.' 
       });
     }
     res.status(500).json({ error: 'Internal server error' });
