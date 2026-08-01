@@ -1,10 +1,13 @@
-🛡️ Sentinel: [HIGH] Fix weak auto-generated passwords
+🧹 Fix misleading comments in patch_auth_test.js
 
-🎯 What: The vulnerability fixed
-The temporary password generator in `server.js` was using `crypto.randomBytes(4)`, which only provides 32 bits of entropy (producing an 8-character hex string). This is a weak password that can be easily brute-forced.
+**What**: The code change
+Changed "Fix test 1" and "Fix test 2" comments in `patch_auth_test.js` to "Update test 1" and "Update test 2".
 
-⚠️ Risk: The potential impact if left unfixed
-An attacker could potentially brute-force the auto-generated temporary passwords for newly created Drivers and Parents, allowing unauthorized access to their accounts before they change their password. This could lead to a compromise of PII or misuse of driver features.
+**Why**: The reason for the change
+The word "Fix" was causing automated task parsers (like blackbox-parser) to falsely flag these explanatory comments as pending tasks. Changing to "Update" prevents this misinterpretation.
 
-🛡️ Solution: How the fix addresses the vulnerability
-Updated the entropy generation to use `crypto.randomBytes(16)` instead. This provides 128 bits of entropy and produces a secure 32-character hex string, eliminating the possibility of offline or online brute-force attacks against the temporary password.
+**Verification**: How the change was tested
+Verified that the updated script correctly replaces the code strings without errors, and that the updated tests in `auth.test.js` still pass successfully when run.
+
+**Result**: The outcome of the change
+Automated scanners will no longer incorrectly flag these comments as pending tasks, improving project hygiene without affecting functionality.
