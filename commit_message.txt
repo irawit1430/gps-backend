@@ -1,10 +1,5 @@
-🛡️ Sentinel: [HIGH] Fix weak auto-generated passwords
+🧪 [testing improvement] Add tests for driver SOS alerts
 
-🎯 What: The vulnerability fixed
-The temporary password generator in `server.js` was using `crypto.randomBytes(4)`, which only provides 32 bits of entropy (producing an 8-character hex string). This is a weak password that can be easily brute-forced.
-
-⚠️ Risk: The potential impact if left unfixed
-An attacker could potentially brute-force the auto-generated temporary passwords for newly created Drivers and Parents, allowing unauthorized access to their accounts before they change their password. This could lead to a compromise of PII or misuse of driver features.
-
-🛡️ Solution: How the fix addresses the vulnerability
-Updated the entropy generation to use `crypto.randomBytes(16)` instead. This provides 128 bits of entropy and produces a secure 32-character hex string, eliminating the possibility of offline or online brute-force attacks against the temporary password.
+🎯 What: Added a test file tests/alerts.test.js to cover the POST /api/alerts/sos endpoint in server.js.
+📊 Coverage: Tested unauthenticated request handling (401), successful alert creation and socket event emission (200), and database error handling (500). Mocked Prisma and spied on Socket.io emit.
+✨ Result: Improved test coverage for the emergency alerts API endpoint.
