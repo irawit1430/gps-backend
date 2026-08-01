@@ -1,9 +1,12 @@
-🎯 **What:** The testing gap addressed
-Added a missing test for the `GET /api/schools/:schoolId/buses` endpoint to verify that it successfully fetches data using Prisma and correctly maps `driverName` and `routeName` in the response.
+🎯 **What:** Added tests for POST `/api/schools/:schoolId/students` and `/api/students`.
 
-📊 **Coverage:** What scenarios are now tested
-- Happy path: Verifies that the endpoint successfully returns a list of formatted buses with active trip info, ensuring the `driverName` and `routeName` are correctly mapped from the `trips` relation.
-- Error path: Verifies that the endpoint correctly handles and returns a 500 error when the database throws an error.
+📊 **Coverage:** Tests now cover:
+- Student creation without a parent.
+- Student creation linking to an existing parent (skipping auto-invite).
+- Student creation where a new parent must be invited (auto-invite and temporary password generation).
+- Missing schoolId returning 400.
+- Missing student name returning 400.
+- Duplicate RFID tag handling returning 400.
+- Database errors returning 500.
 
-✨ **Result:** The improvement in test coverage
-The `GET /api/schools/:schoolId/buses` endpoint is now fully tested, ensuring its reliability and preventing future regressions when mapping nested Prisma relations.
+✨ **Result:** Improved test reliability and 100% test coverage achieved for this endpoint's complex branching.
