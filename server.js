@@ -397,7 +397,7 @@ app.post(['/api/schools/:schoolId/students', '/api/students'], async (req, res) 
       let parent = await prisma.user.findUnique({ where: { email: parentEmail } });
       
       if (!parent) {
-        generatedPassword = crypto.randomBytes(4).toString('hex'); // Generate random 8-char password
+        generatedPassword = crypto.randomBytes(16).toString('hex'); // Generate random 32-char password
         const bcrypt = require('bcryptjs');
         const hashedPassword = await bcrypt.hash(generatedPassword, 10);
         
