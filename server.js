@@ -974,7 +974,7 @@ app.get('/api/devices/:id', async (req, res) => {
   }
 });
 
-app.post('/api/devices', async (req, res) => {
+app.post('/api/devices', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), async (req, res) => {
   try {
     const { deviceId, licensePlate, capacity, schoolId } = req.body;
     // Note: schoolId is now optional, so it can be unassigned (null)
@@ -989,7 +989,7 @@ app.post('/api/devices', async (req, res) => {
   }
 });
 
-app.put('/api/devices/:id', async (req, res) => {
+app.put('/api/devices/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), async (req, res) => {
   try {
     const { deviceId, licensePlate, capacity, schoolId } = req.body;
     const device = await prisma.bus.update({
@@ -1003,7 +1003,7 @@ app.put('/api/devices/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/devices/:id', async (req, res) => {
+app.delete('/api/devices/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), async (req, res) => {
   try {
     await prisma.bus.delete({ where: { id: req.params.id } });
     io.emit('device_status_change', { deviceId: req.params.id, status: 'OFFLINE', message: 'Device decommissioned' });

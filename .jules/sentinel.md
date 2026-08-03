@@ -10,3 +10,7 @@
 **Vulnerability:** Critical admin-level routes (like `/api/admins`, `/api/admin/stats`, `/api/settings`) were missing `authorizeRoles` middleware checks, allowing any authenticated user to access them and potentially escalate privileges.
 **Learning:** Even though `authenticate` middleware was in place, it only verified the presence of a valid token without checking the user's role. Authentication does not imply authorization. The assumption that the middleware already restricted access was incorrect.
 **Prevention:** Always verify that sensitive endpoints have explicit role-based access checks (e.g., `authorizeRoles('SUPER_ADMIN')`) applied at the route definition or using an `app.use` prefix. Never assume authentication implies authorization.
+## 2025-02-23 - Authorization Bypass on Device Provisioning Routes
+**Vulnerability:** The `/api/devices` endpoints (POST, PUT, DELETE) were entirely missing `authorizeRoles` checks. This allowed any authenticated user (e.g., PARENT) to provision or decommission hardware devices, bypassing intended administrative controls.
+**Learning:** Endpoints meant for administrative provisioning may be inadvertently left exposed if role-based middleware isn't applied systematically. Global authentication middleware does not suffice for role-based actions.
+**Prevention:** Always verify that critical provisioning and management endpoints have `authorizeRoles('SUPER_ADMIN')` or equivalent checks directly on the route or via a router prefix.
