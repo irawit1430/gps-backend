@@ -673,6 +673,7 @@ app.post('/api/attendance', async (req, res) => {
   }
 });
 // --- 5. SUPER ADMIN STATS ---
+// ⚡ Bolt: Replaced distinct findMany with bus.count(some) for active devices to prevent fetching full arrays.
 const getSchoolAdminStats = async (prisma, schoolId) => {
   const fifteenMinsAgo = new Date(Date.now() - 15 * 60000);
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
@@ -693,13 +694,11 @@ const getSchoolAdminStats = async (prisma, schoolId) => {
     prisma.student.count({ where: { schoolId } }),
     prisma.route.count({ where: { schoolId } }),
     prisma.leaveApplication.count({ where: { student: { schoolId }, status: 'PENDING' } }),
-    prisma.gpsLog.findMany({
+    prisma.bus.count({
       where: {
-        bus: { schoolId },
-        timestamp: { gte: fifteenMinsAgo }
-      },
-      distinct: ['busId'],
-      select: { busId: true }
+        schoolId,
+        gpsLogs: { some: { timestamp: { gte: fifteenMinsAgo } } }
+      }
     }),
     prisma.bus.count({ where: { schoolId, createdAt: { gte: thirtyDaysAgo } } }),
     prisma.student.count({ where: { schoolId, createdAt: { gte: thirtyDaysAgo } } }),
@@ -716,7 +715,7 @@ const getSchoolAdminStats = async (prisma, schoolId) => {
     })
   ]);
 
-  const activeDevices = activeBusesLogs.length;
+  const activeDevices = activeBusesLogs;
   const offlineDevices = Math.max(0, totalBuses - activeDevices);
 
   const busesBase = totalBuses - busesThisMonth;
@@ -759,14 +758,12 @@ const getSuperAdminStats = async (prisma) => {
     prisma.student.count(),
     prisma.school.count({ where: { createdAt: { gte: thirtyDaysAgo } } }),
     prisma.bus.count({ where: { createdAt: { gte: thirtyDaysAgo } } }),
-    prisma.gpsLog.findMany({
-      where: { timestamp: { gte: new Date(Date.now() - 15 * 60000) } },
-      distinct: ['busId'],
-      select: { busId: true }
+    prisma.bus.count({
+      where: { gpsLogs: { some: { timestamp: { gte: new Date(Date.now() - 15 * 60000) } } } }
     })
   ]);
 
-  const activeDevices = activeLogs.length;
+  const activeDevices = activeLogs;
   const offlineDevices = 18; // Placeholder matching UI design constraints
   const stationaryDevices = totalBuses - offlineDevices - activeDevices > 0 ? (totalBuses - offlineDevices - activeDevices) : 2;
 
