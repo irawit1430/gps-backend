@@ -7,3 +7,6 @@
 ## 2024-11-20 - Adding Database Indices
 **Learning:** High-volume time-series queries and frequent filtered queries on foreign keys (like `schoolId` and `parentId`) can cause performance issues due to full table scans when missing appropriate database indices.
 **Action:** Use standard indices like `@@index([schoolId])` on heavily filtered foreign keys and composite indexes like `@@index([busId, timestamp(sort: Desc)])` for high-volume time-series tables to prevent full table scans and significantly improve query performance.
+## 2024-11-21 - Avoiding Array Memory Overhead with Relational Counts
+**Learning:** Using `prisma.findMany({ distinct: ... }).length` to count relations fetches the entire array payload into Node.js memory, creating severe bottlenecks for large datasets.
+**Action:** Use relational counts (e.g. `prisma.bus.count({ where: { gpsLogs: { some: ... } } })`) to let the database handle aggregation and avoid memory overhead.
