@@ -682,7 +682,7 @@ const getSchoolAdminStats = async (prisma, schoolId) => {
     totalStudents,
     totalRoutes,
     pendingLeaves,
-    activeBusesLogs,
+    activeDevices,
     busesThisMonth,
     studentsThisMonth,
     avgDurationRes,
@@ -693,13 +693,13 @@ const getSchoolAdminStats = async (prisma, schoolId) => {
     prisma.student.count({ where: { schoolId } }),
     prisma.route.count({ where: { schoolId } }),
     prisma.leaveApplication.count({ where: { student: { schoolId }, status: 'PENDING' } }),
-    prisma.gpsLog.findMany({
+    // ⚡ Bolt: Optimize active device counting using relational queries instead of pulling arrays into memory.
+    // Impact: Avoids node memory overhead by delegating count to the database.
+    prisma.bus.count({
       where: {
-        bus: { schoolId },
-        timestamp: { gte: fifteenMinsAgo }
-      },
-      distinct: ['busId'],
-      select: { busId: true }
+        schoolId,
+        gpsLogs: { some: { timestamp: { gte: fifteenMinsAgo } } }
+      }
     }),
     prisma.bus.count({ where: { schoolId, createdAt: { gte: thirtyDaysAgo } } }),
     prisma.student.count({ where: { schoolId, createdAt: { gte: thirtyDaysAgo } } }),
@@ -716,7 +716,6 @@ const getSchoolAdminStats = async (prisma, schoolId) => {
     })
   ]);
 
-  const activeDevices = activeBusesLogs.length;
   const offlineDevices = Math.max(0, totalBuses - activeDevices);
 
   const busesBase = totalBuses - busesThisMonth;
@@ -752,21 +751,20 @@ const getSuperAdminStats = async (prisma) => {
     totalStudents,
     schoolsThisMonth,
     busesThisMonth,
-    activeLogs
+    activeDevices
   ] = await Promise.all([
     prisma.school.count(),
     prisma.bus.count(),
     prisma.student.count(),
     prisma.school.count({ where: { createdAt: { gte: thirtyDaysAgo } } }),
     prisma.bus.count({ where: { createdAt: { gte: thirtyDaysAgo } } }),
-    prisma.gpsLog.findMany({
-      where: { timestamp: { gte: new Date(Date.now() - 15 * 60000) } },
-      distinct: ['busId'],
-      select: { busId: true }
+    // ⚡ Bolt: Optimize active device counting using relational queries instead of pulling arrays into memory.
+    // Impact: Avoids node memory overhead by delegating count to the database.
+    prisma.bus.count({
+      where: { gpsLogs: { some: { timestamp: { gte: new Date(Date.now() - 15 * 60000) } } } }
     })
   ]);
 
-  const activeDevices = activeLogs.length;
   const offlineDevices = 18; // Placeholder matching UI design constraints
   const stationaryDevices = totalBuses - offlineDevices - activeDevices > 0 ? (totalBuses - offlineDevices - activeDevices) : 2;
 
