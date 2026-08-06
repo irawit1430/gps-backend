@@ -12,6 +12,7 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const { PrismaClient } = require('@prisma/client');
 const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 require('dotenv').config();
@@ -85,7 +86,16 @@ app.get('/', (req, res) => res.send('Fleet API is running perfectly!'));
 
 
 // --- 0. AUTHENTICATION ---
-app.post('/api/auth/login', async (req, res) => {
+// 🛡️ Sentinel: Add rate limiting to prevent brute-force attacks on login
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per windowMs
+  message: { error: 'Too many login attempts from this IP, please try again after 15 minutes' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+app.post('/api/auth/login', loginLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
     const user = await prisma.user.findUnique({ where: { email } });
@@ -384,7 +394,8 @@ app.post(['/api/schools/:schoolId/students', '/api/students'], async (req, res) 
 
     // Auto-generate a unique RFID tag if not provided or empty string
     if (!rfidTag || typeof rfidTag !== 'string' || rfidTag.trim() === '') {
-      rfidTag = `RFID-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
+      // 🛡️ Sentinel: Replaced insecure Math.random() with crypto.randomInt()
+      rfidTag = `RFID-${Date.now()}-${crypto.randomInt(100, 1000)}`;
     } else {
       rfidTag = rfidTag.trim();
     }
@@ -1017,7 +1028,7 @@ app.delete('/api/devices/:id', async (req, res) => {
 
 
 // Advanced System Logs
-app.get('/api/admin/logs', async (req, res) => {
+app.get('/api/admin/logs', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 100;
