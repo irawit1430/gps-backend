@@ -25,6 +25,8 @@ model User {
   parentStudents Student[]      @relation("ParentStudents")
   driverTrips    Trip[]         @relation("DriverTrips")
   notifications  Notification[]
+
+  @@index([schoolId])
 }
 
 model School {
@@ -87,6 +89,8 @@ model RouteStop {
   createdAt DateTime @default(now())
 
   studentMappings StudentRouteMapping[]
+
+  @@index([routeId])
 }
 
 model Student {
@@ -138,6 +142,10 @@ model Trip {
 
   gpsLogs        GpsLog[]
   attendanceLogs AttendanceLog[]
+
+  @@index([driverId])
+  @@index([routeId])
+  @@index([busId])
 }
 
 model GpsLog {
@@ -162,6 +170,9 @@ model AttendanceLog {
   trip      Trip     @relation(fields: [tripId], references: [id])
   type      String // "BOARDED", "ALIGHTED"
   timestamp DateTime @default(now())
+
+  @@index([studentId])
+  @@index([tripId])
 }
 
 model LeaveApplication {
@@ -175,6 +186,8 @@ model LeaveApplication {
   status    String   @default("PENDING") // PENDING, APPROVED, REJECTED
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([studentId])
 }
 
 model EmergencyAlert {
@@ -197,6 +210,8 @@ model Notification {
   type      String // "ARRIVAL", "BOARDING", "DELAY", "SYSTEM"
   isRead    Boolean  @default(false)
   createdAt DateTime @default(now())
+
+  @@index([userId, createdAt(sort: Desc)])
 }
 
 model GlobalSettings {
