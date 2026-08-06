@@ -1,3 +1,8 @@
+require('dotenv').config();
+if (!process.env.DATABASE_URL) {
+  process.env.DATABASE_URL = 'file:./dev.db';
+}
+
 const { parseBlackboxPacket, calculateCRC32 } = require('./blackbox-parser');
 const net = require('net');
 const { startTcpServer } = require('./tcp-server');
