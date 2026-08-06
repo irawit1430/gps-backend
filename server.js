@@ -10,6 +10,7 @@
  * 3. Password hashing via bcrypt (10 rounds).
  */
 const { getSimulatedAlerts, getMockNotifications } = require('./mock-data');
+const { syncGpsLogToFirebase, syncEmergencyAlertToFirebase, syncStudentToFirebase } = require('./firebase');
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -102,16 +103,25 @@ app.post('/api/auth/login', async (req, res) => {
     const token = jwt.sign({ id: user.id, role: user.role, schoolId: user.schoolId }, process.env.JWT_SECRET, { expiresIn: '7d' });
     
     const preferences = user.notificationSettings ? JSON.parse(user.notificationSettings) : {};
-    res.json({ token, user: { id: user.id, role: user.role, name: user.name, email: user.email, schoolId: user.schoolId, preferences } });
+    
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        schoolId: user.schoolId,
+        preferences
+      }
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// --- 1. HARDWARE / SIMULATION ---
-// ⚡ Bolt: Added in-memory cache to prevent N+1 query bottleneck on high-frequency telemetry endpoint
-// Impact: Reduces DB lookups by ~99% per active device. Re-fetches only once per minute per device.
+// --- 1. DRIVER APP & TELEMETRY ---
 const telemetryCache = new Map();
 const CACHE_TTL_MS = 60000; // 1 minute
 
@@ -138,6 +148,16 @@ app.post('/api/telemetry', async (req, res) => {
 
     const log = await prisma.gpsLog.create({
       data: { busId: bus.id, lat, lng, speed: speed || 0, timestamp: timestamp || new Date() }
+    });
+
+    // Cloud Firestore Async Sync
+    syncGpsLogToFirebase({
+      busId: bus.id,
+      licensePlate: bus.licensePlate,
+      lat,
+      lng,
+      speed: speed || 0,
+      timestamp: log.timestamp
     });
 
     // Push real-time event

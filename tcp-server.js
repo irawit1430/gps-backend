@@ -6,6 +6,7 @@ if (!process.env.DATABASE_URL) {
 const net = require('net');
 const { PrismaClient } = require('@prisma/client');
 const { parseBlackboxPacket } = require('./blackbox-parser');
+const { syncGpsLogToFirebase, syncEmergencyAlertToFirebase } = require('./firebase');
 
 const prisma = new PrismaClient();
 
@@ -43,7 +44,7 @@ function startTcpServer(io, tcpPort = 5000) {
             if (bus) {
               // 1. Log GPS Position in DB
               if (parsed.lat !== undefined && parsed.lng !== undefined && (parsed.lat !== 0 || parsed.lng !== 0)) {
-                await prisma.gpsLog.create({
+                const log = await prisma.gpsLog.create({
                   data: {
                     busId: bus.id,
                     lat: parsed.lat,
@@ -51,6 +52,16 @@ function startTcpServer(io, tcpPort = 5000) {
                     speed: parsed.speed || 0.0,
                     timestamp: parsed.timestamp || new Date()
                   }
+                });
+
+                // Cloud Firestore Async Sync
+                syncGpsLogToFirebase({
+                  busId: bus.id,
+                  licensePlate: bus.licensePlate,
+                  lat: parsed.lat,
+                  lng: parsed.lng,
+                  speed: parsed.speed || 0.0,
+                  timestamp: log.timestamp
                 });
 
                 // Broadcast live location update to all connected WebSockets (Web Dashboards & Mobile Apps)
@@ -78,6 +89,9 @@ function startTcpServer(io, tcpPort = 5000) {
                     status: 'ACTIVE'
                   }
                 });
+
+                // Cloud Firestore Async Sync
+                syncEmergencyAlertToFirebase(alert);
 
                 if (io) {
                   io.emit('emergency_alert', alert);

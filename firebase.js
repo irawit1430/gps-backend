@@ -1,5 +1,5 @@
 const { initializeApp, cert, getApps } = require('firebase-admin/app');
-const { getFirestore } = require('firebase-admin/firestore');
+const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { getMessaging } = require('firebase-admin/messaging');
 const fs = require('fs');
 const path = require('path');
@@ -68,8 +68,85 @@ if (serviceAccount) {
   console.warn('[Firebase] No Service Account credentials found. Firestore cloud sync will be disabled.');
 }
 
+/**
+ * Sync GPS location telemetry log to Firestore
+ */
+async function syncGpsLogToFirebase(data) {
+  if (!db) return;
+  try {
+    // 1. Add log to 'gps_logs' collection
+    await db.collection('gps_logs').add({
+      busId: data.busId || 'unknown',
+      licensePlate: data.licensePlate || 'unassigned',
+      lat: data.lat,
+      lng: data.lng,
+      speed: data.speed || 0.0,
+      timestamp: data.timestamp ? new Date(data.timestamp).toISOString() : new Date().toISOString(),
+      createdAt: FieldValue.serverTimestamp()
+    });
+
+    // 2. Update latest location in 'buses' collection
+    if (data.busId) {
+      await db.collection('buses').doc(data.busId).set({
+        busId: data.busId,
+        licensePlate: data.licensePlate || 'unassigned',
+        lastKnownLat: data.lat,
+        lastKnownLng: data.lng,
+        speed: data.speed || 0.0,
+        status: 'ONLINE',
+        lastUpdate: FieldValue.serverTimestamp()
+      }, { merge: true });
+    }
+  } catch (err) {
+    console.error('[Firebase Sync Error] GpsLog:', err.message);
+  }
+}
+
+/**
+ * Sync Emergency SOS Alert to Firestore
+ */
+async function syncEmergencyAlertToFirebase(alertData) {
+  if (!db) return;
+  try {
+    await db.collection('emergency_alerts').add({
+      schoolId: alertData.schoolId || 'unknown',
+      type: alertData.type || 'HARDWARE_SOS',
+      message: alertData.message || 'SOS Triggered',
+      status: alertData.status || 'ACTIVE',
+      createdAt: FieldValue.serverTimestamp()
+    });
+    console.log('[Firebase Sync] Emergency Alert written to Cloud Firestore');
+  } catch (err) {
+    console.error('[Firebase Sync Error] EmergencyAlert:', err.message);
+  }
+}
+
+/**
+ * Sync Student Profile to Firestore
+ */
+async function syncStudentToFirebase(studentData) {
+  if (!db) return;
+  try {
+    await db.collection('students').doc(studentData.id).set({
+      studentId: studentData.id,
+      schoolId: studentData.schoolId,
+      name: studentData.name,
+      rfidTag: studentData.rfidTag,
+      grade: studentData.grade || 'General',
+      parentId: studentData.parentId || null,
+      updatedAt: FieldValue.serverTimestamp()
+    }, { merge: true });
+    console.log(`[Firebase Sync] Student '${studentData.name}' synced to Cloud Firestore`);
+  } catch (err) {
+    console.error('[Firebase Sync Error] Student:', err.message);
+  }
+}
+
 module.exports = {
   app,
   db,
-  messaging
+  messaging,
+  syncGpsLogToFirebase,
+  syncEmergencyAlertToFirebase,
+  syncStudentToFirebase
 };
