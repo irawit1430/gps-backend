@@ -10,3 +10,6 @@
 ## 2024-05-19 - Optimizing "Active Device" counting
 **Learning:** Fetching distinct rows (using `findMany` with `distinct`) just to get the count of items that have associated time-series records is inefficient as it downloads an array of objects into memory.
 **Action:** Use relational counts like `bus.count({ where: { gpsLogs: { some: { timestamp: { gte: ... } } } } })` instead to let the database handle the aggregation efficiently without pulling rows into Node.js.
+## 2024-11-21 - Prisma Foreign Key Indexing
+**Learning:** Prisma does not automatically create database indices for relation scalar fields (foreign keys). This leads to O(n) full table scans when querying relations, causing significant bottlenecks as data grows.
+**Action:** Always explicitly add `@@index([foreignKeyId])` to models that are frequently filtered or joined on those relations.
