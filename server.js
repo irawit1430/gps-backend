@@ -213,7 +213,7 @@ app.get('/api/schools/:schoolId/leaves', async (req, res) => {
   }
 });
 
-app.put('/api/leaves/:id/approve', async (req, res) => {
+app.put('/api/leaves/:id/approve', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), async (req, res) => {
   try {
     const leave = await prisma.leaveApplication.update({
       where: { id: req.params.id }, data: { status: "APPROVED" }
@@ -225,7 +225,7 @@ app.put('/api/leaves/:id/approve', async (req, res) => {
   }
 });
 
-app.put('/api/leaves/:id/reject', async (req, res) => {
+app.put('/api/leaves/:id/reject', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), async (req, res) => {
   try {
     const leave = await prisma.leaveApplication.update({
       where: { id: req.params.id }, data: { status: "REJECTED" }
@@ -251,7 +251,7 @@ app.get('/api/schools/:schoolId/routes', async (req, res) => {
   }
 });
 
-app.post('/api/schools/:schoolId/routes', async (req, res) => {
+app.post('/api/schools/:schoolId/routes', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), async (req, res) => {
   try {
     const { name, estimatedDuration } = req.body;
     const route = await prisma.route.create({
@@ -380,7 +380,7 @@ app.get('/api/schools/:schoolId/students', async (req, res) => {
   }
 });
 
-app.post(['/api/schools/:schoolId/students', '/api/students'], async (req, res) => {
+app.post(['/api/schools/:schoolId/students', '/api/students'], authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), async (req, res) => {
   try {
     const schoolId = req.params.schoolId || req.body.schoolId || req.user?.schoolId;
     if (!schoolId) {

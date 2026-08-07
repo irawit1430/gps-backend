@@ -19,3 +19,8 @@
 **Vulnerability:** The login endpoint (`/api/auth/login`) lacked rate limiting.
 **Learning:** This leaves the endpoint vulnerable to brute-force attacks.
 **Prevention:** Use `express-rate-limit` to limit requests to authentication endpoints.
+
+## 2025-02-23 - Missing Role-Based Access Control (RBAC) on Operational Endpoints
+**Vulnerability:** Endpoints for creating students (`/api/schools/:schoolId/students`) and routes (`/api/schools/:schoolId/routes`) were missing `authorizeRoles` middleware checks, allowing any authenticated user to create students and routes.
+**Learning:** Even though `authenticate` middleware was in place, it only verified the presence of a valid token without checking the user's role. Authentication does not imply authorization.
+**Prevention:** Always verify that sensitive endpoints have explicit role-based access checks (e.g., `authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN')`) applied at the route definition.
