@@ -138,6 +138,11 @@ model Trip {
 
   gpsLogs        GpsLog[]
   attendanceLogs AttendanceLog[]
+
+  // ⚡ Bolt: Adding indices to frequently filtered foreign keys to prevent full table scans
+  @@index([routeId])
+  @@index([busId])
+  @@index([driverId])
 }
 
 model GpsLog {
@@ -162,6 +167,10 @@ model AttendanceLog {
   trip      Trip     @relation(fields: [tripId], references: [id])
   type      String // "BOARDED", "ALIGHTED"
   timestamp DateTime @default(now())
+
+  // ⚡ Bolt: Prevent full table scans on student attendance queries
+  @@index([studentId])
+  @@index([tripId])
 }
 
 model LeaveApplication {
@@ -175,6 +184,9 @@ model LeaveApplication {
   status    String   @default("PENDING") // PENDING, APPROVED, REJECTED
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  // ⚡ Bolt: Improve performance of parent leave queries
+  @@index([studentId])
 }
 
 model EmergencyAlert {
@@ -186,6 +198,9 @@ model EmergencyAlert {
   tripId    String?
   status    String   @default("ACTIVE") // ACTIVE, RESOLVED
   createdAt DateTime @default(now())
+
+  // ⚡ Bolt: Index schoolId for admin queries
+  @@index([schoolId])
 }
 
 model Notification {
@@ -197,6 +212,9 @@ model Notification {
   type      String // "ARRIVAL", "BOARDING", "DELAY", "SYSTEM"
   isRead    Boolean  @default(false)
   createdAt DateTime @default(now())
+
+  // ⚡ Bolt: Index userId for fast notification fetches
+  @@index([userId])
 }
 
 model GlobalSettings {
