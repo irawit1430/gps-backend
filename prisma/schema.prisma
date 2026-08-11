@@ -25,6 +25,9 @@ model User {
   parentStudents Student[]      @relation("ParentStudents")
   driverTrips    Trip[]         @relation("DriverTrips")
   notifications  Notification[]
+
+  // ⚡ Bolt: Added index to optimize /api/schools/:schoolId/drivers queries
+  @@index([schoolId, role])
 }
 
 model School {
@@ -138,6 +141,10 @@ model Trip {
 
   gpsLogs        GpsLog[]
   attendanceLogs AttendanceLog[]
+
+  // ⚡ Bolt: Added indexes for fast filtering of active driver trips and route aggregations
+  @@index([driverId, status])
+  @@index([routeId, status])
 }
 
 model GpsLog {
@@ -162,6 +169,10 @@ model AttendanceLog {
   trip      Trip     @relation(fields: [tripId], references: [id])
   type      String // "BOARDED", "ALIGHTED"
   timestamp DateTime @default(now())
+
+  // ⚡ Bolt: Added indexes to prevent full table scans on foreign keys
+  @@index([studentId])
+  @@index([tripId])
 }
 
 model LeaveApplication {
@@ -175,6 +186,9 @@ model LeaveApplication {
   status    String   @default("PENDING") // PENDING, APPROVED, REJECTED
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  // ⚡ Bolt: Index on studentId and status to speed up pending leaves queries
+  @@index([studentId, status])
 }
 
 model EmergencyAlert {
@@ -197,6 +211,9 @@ model Notification {
   type      String // "ARRIVAL", "BOARDING", "DELAY", "SYSTEM"
   isRead    Boolean  @default(false)
   createdAt DateTime @default(now())
+
+  // ⚡ Bolt: Added composite index to optimize fetching recent notifications by user
+  @@index([userId, createdAt(sort: Desc)])
 }
 
 model GlobalSettings {

@@ -1,1 +1,6 @@
-🧪 [testing improvement] Add tests for POST /api/schools/:schoolId/students
+🧹 [code health improvement description]
+
+What: Add missing database indexes on frequently queried fields in prisma/schema.prisma. Added comments above index creation.
+Why: Full table scans happen when filtering for foreign keys and common combinations. These indexes ensure the filtering happens efficiently.
+Verification: Ran tests to ensure code still executes functionally as expected.
+Result: The application interacts faster with queries on these fields.
