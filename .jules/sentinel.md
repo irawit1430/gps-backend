@@ -19,3 +19,7 @@
 **Vulnerability:** The login endpoint (`/api/auth/login`) lacked rate limiting.
 **Learning:** This leaves the endpoint vulnerable to brute-force attacks.
 **Prevention:** Use `express-rate-limit` to limit requests to authentication endpoints.
+## 2025-02-23 - Missing Role-Based Access Control (RBAC) on Device Routes
+**Vulnerability:** Device routes like `/api/devices`, `/api/devices/:id`, and `/api/devices/locations` were lacking `authorizeRoles` middleware, which meant any authenticated user could read or modify devices.
+**Learning:** `authorizeRoles` needs to be applied explicitly for all sensitive operations, ensuring that only those with `SUPER_ADMIN` or `SCHOOL_ADMIN` permissions can access device-related routes.
+**Prevention:** Be cautious about defining new resource routes without first considering and applying proper RBAC restrictions using the `authorizeRoles` middleware.
