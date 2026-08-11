@@ -10,3 +10,6 @@
 ## 2024-05-19 - Optimizing "Active Device" counting
 **Learning:** Fetching distinct rows (using `findMany` with `distinct`) just to get the count of items that have associated time-series records is inefficient as it downloads an array of objects into memory.
 **Action:** Use relational counts like `bus.count({ where: { gpsLogs: { some: { timestamp: { gte: ... } } } } })` instead to let the database handle the aggregation efficiently without pulling rows into Node.js.
+## 2024-05-24 - Missing Database Indexes on Foreign Keys and Frequently Filtered Fields
+**Learning:** Prisma does not automatically create database indexes on foreign keys (like `schoolId` or `userId`) or fields frequently used in `where` clauses (like `status` or `role`). This leads to full table scans during API reads, especially on composite filters.
+**Action:** Always explicitly define single or composite `@@index()` directives in `schema.prisma` for foreign keys and commonly filtered fields to optimize query performance, avoiding silent bottlenecks.
