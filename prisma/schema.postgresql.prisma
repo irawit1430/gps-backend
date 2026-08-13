@@ -1,0 +1,188 @@
+generator client {
+  provider   = "prisma-client-js"
+  engineType = "library"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                   String   @id @default(uuid())
+  email                String   @unique
+  password             String
+  role                 String // "SUPER_ADMIN", "SCHOOL_ADMIN", "DRIVER", "PARENT"
+  name                 String
+  photoUrl             String?
+  notificationSettings String? // JSON string storing toggle states
+  schoolId             String?
+  school               School?  @relation(fields: [schoolId], references: [id])
+
+  // Relational mappings
+  parentStudents Student[]       @relation("ParentStudents")
+  driverTrips    Trip[]          @relation("DriverTrips")
+  notifications  Notification[]
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+}
+
+model School {
+  id            String   @id @default(uuid())
+  name          String
+  address       String
+  contactPerson String?
+  city          String?
+  state         String?
+  phone         String?
+  email         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  users         User[]
+  buses         Bus[]
+  routes        Route[]
+  students      Student[]
+}
+
+model Bus {
+  id           String   @id @default(uuid())
+  schoolId     String?
+  school       School?  @relation(fields: [schoolId], references: [id])
+  licensePlate String   @unique
+  capacity     Int
+  deviceId     String?  @unique // Blackbox TM-100 Hardware Tracker IMEI
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  trips   Trip[]
+  gpsLogs GpsLog[]
+}
+
+model Route {
+  id                String   @id @default(uuid())
+  schoolId          String
+  school            School   @relation(fields: [schoolId], references: [id])
+  name              String
+  estimatedDuration Int?     // Estimated travel time in minutes
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  stops RouteStop[]
+  trips Trip[]
+}
+
+model RouteStop {
+  id        String   @id @default(uuid())
+  routeId   String
+  route     Route    @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  name      String
+  lat       Float
+  lng       Float
+  orderIdx  Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  studentMappings StudentRouteMapping[]
+}
+
+model Student {
+  id        String   @id @default(uuid())
+  schoolId  String
+  school    School   @relation(fields: [schoolId], references: [id])
+  rfidTag   String   @unique
+  name      String
+  grade     String?
+  photoUrl  String?
+  parentId  String?
+  parent    User?    @relation("ParentStudents", fields: [parentId], references: [id])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  routeMappings     StudentRouteMapping[]
+  attendanceLogs    AttendanceLog[]
+  leaveApplications LeaveApplication[]
+}
+
+model StudentRouteMapping {
+  id          String    @id @default(uuid())
+  studentId   String
+  student     Student   @relation(fields: [studentId], references: [id])
+  routeStopId String
+  routeStop   RouteStop @relation(fields: [routeStopId], references: [id])
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([studentId, routeStopId])
+}
+
+model Trip {
+  id        String   @id @default(uuid())
+  routeId   String
+  route     Route    @relation(fields: [routeId], references: [id])
+  busId     String
+  bus       Bus      @relation(fields: [busId], references: [id])
+  driverId  String
+  driver    User     @relation("DriverTrips", fields: [driverId], references: [id])
+  status    String   // "PLANNED", "ON_SCHEDULE", "DELAYED", "COMPLETED"
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  gpsLogs        GpsLog[]
+  attendanceLogs AttendanceLog[]
+}
+
+model GpsLog {
+  id        String   @id @default(uuid())
+  busId     String
+  bus       Bus      @relation(fields: [busId], references: [id])
+  tripId    String?
+  trip      Trip?    @relation(fields: [tripId], references: [id])
+  lat       Float
+  lng       Float
+  speed     Float
+  timestamp DateTime @default(now())
+}
+
+model AttendanceLog {
+  id        String   @id @default(uuid())
+  studentId String
+  student   Student  @relation(fields: [studentId], references: [id])
+  tripId    String
+  trip      Trip     @relation(fields: [tripId], references: [id])
+  type      String   // "BOARDED", "LEFT"
+  timestamp DateTime @default(now())
+}
+
+model LeaveApplication {
+  id        String   @id @default(uuid())
+  studentId String
+  student   Student  @relation(fields: [studentId], references: [id])
+  startDate DateTime
+  endDate   DateTime
+  reason    String
+  status    String   // "PENDING", "APPROVED", "REJECTED"
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  title     String
+  message   String
+  isRead    Boolean  @default(false)
+  status    String   @default("ACTIVE") // "ACTIVE", "RESOLVED"
+  createdAt DateTime @default(now())
+}
+
+model EmergencyAlert {
+  id        String   @id @default(uuid())
+  schoolId  String
+  type      String   // "HARDWARE_SOS", "DRIVER_SOS", "DELAY"
+  message   String
+  status    String   @default("ACTIVE") // "ACTIVE", "RESOLVED"
+  createdAt DateTime @default(now())
+}

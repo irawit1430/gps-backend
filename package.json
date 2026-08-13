@@ -6,6 +6,8 @@
   "scripts": {
     "start": "node index.js",
     "build": "npx prisma generate",
+    "db:postgres": "npx prisma db push --schema=prisma/schema.postgresql.prisma",
+    "db:sqlite": "npx prisma db push --schema=prisma/schema.prisma",
     "test": "jest"
   },
   "keywords": [],
