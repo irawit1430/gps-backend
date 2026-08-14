@@ -1,149 +1,93 @@
+// Seed the initial SUPER_ADMIN. Idempotent — never overwrites an existing password.
+// Gated: requires ALLOW_SEED=1 + SEED_ADMIN_EMAIL + SEED_ADMIN_PASSWORD in env.
+// Additional dev fixtures (dummy school/parent/driver/student/bus) are gated behind
+// SEED_INCLUDE_DEMO=1 so prod runs create *only* the super admin.
+
+const config = require('./config');
 const { PrismaClient } = require('@prisma/client');
 const bcrypt = require('bcryptjs');
+const logger = require('./logger');
 
 const prisma = new PrismaClient({ log: ['error'] });
 
-async function seedAdmin() {
-  try {
-    const hashedPassword = await bcrypt.hash('password123', 10);
-    
-    // 1. Create Super Admin
-    const existingAdmin = await prisma.user.findUnique({ where: { email: 'admin@fleet.com' } });
-    if (!existingAdmin) {
-      await prisma.user.create({
-      data: {
-        name: 'Super Admin',
-        email: 'admin@fleet.com',
-        password: hashedPassword,
-        role: 'SUPER_ADMIN'
-      }
-    });
-    }
-
-    // 2. Create Dummy School
-    let school = await prisma.school.findFirst({ where: { name: 'Delhi Public School' } });
-    if (!school) {
-      school = await prisma.school.create({
-        data: { name: 'Delhi Public School', address: 'New Delhi, India' }
-      });
-    }
-
-    // 2.5 Create School Admin (Principal)
-    const existingSchoolAdmin = await prisma.user.findUnique({ where: { email: 'principal@example.com' } });
-    if (!existingSchoolAdmin) {
-      await prisma.user.create({
-        data: {
-          name: 'Principal Sharma',
-          email: 'principal@example.com',
-          password: hashedPassword,
-          role: 'SCHOOL_ADMIN',
-          schoolId: school.id
-        }
-      });
-    } else {
-      await prisma.user.update({
-        where: { email: 'principal@example.com' },
-        data: { schoolId: school.id }
-      });
-    }
-
-    // 3. Create Dummy Parent
-    const existingParent = await prisma.user.findUnique({ where: { email: 'parent@example.com' } });
-    let parent = existingParent;
-    if (!existingParent) {
-      parent = await prisma.user.create({
-        data: {
-          name: 'Rahul Sharma (Parent)',
-          email: 'parent@example.com',
-          password: hashedPassword,
-          role: 'PARENT'
-        }
-      });
-    }
-
-    // 4. Create Dummy Driver
-    const existingDriver = await prisma.user.findUnique({ where: { email: 'driver@example.com' } });
-    if (!existingDriver) {
-      await prisma.user.create({
-        data: {
-          name: 'Ashok Kumar (Driver)',
-          email: 'driver@example.com',
-          password: hashedPassword,
-          role: 'DRIVER',
-          schoolId: school.id
-        }
-      });
-    } else {
-      await prisma.user.update({
-        where: { email: 'driver@example.com' },
-        data: { schoolId: school.id }
-      });
-    }
-
-    // 5. Create a Student linked to School and Parent
-    const existingStudent = await prisma.student.findUnique({ where: { rfidTag: 'RFID-12345' } });
-    if (!existingStudent && parent) {
-      const student = await prisma.student.create({
-        data: {
-          schoolId: school.id,
-          parentId: parent.id,
-          name: 'Rohan Sharma',
-          grade: 'Grade 4',
-          rfidTag: 'RFID-12345'
-        }
-      });
-
-      // 6. Create a Route and Stops
-      const route = await prisma.route.create({
-        data: {
-          schoolId: school.id,
-          name: 'Morning Route A',
-          estimatedDuration: 45
-        }
-      });
-
-      const stop = await prisma.routeStop.create({
-        data: {
-          routeId: route.id,
-          name: 'Green Park Estate',
-          lat: 28.5584,
-          lng: 77.2029,
-          orderIdx: 1
-        }
-      });
-
-      await prisma.studentRouteMapping.create({
-        data: {
-          studentId: student.id,
-          routeStopId: stop.id
-        }
-      });
-    }
-
-    // 7. Create/Update Bus with Real Blackbox TM-100 IMEI
-    const existingBus = await prisma.bus.findUnique({ where: { licensePlate: 'DL1P-1234' } });
-    if (!existingBus) {
-      await prisma.bus.create({
-        data: {
-          schoolId: school.id,
-          licensePlate: 'DL1P-1234',
-          capacity: 40,
-          deviceId: '866738083792638'
-        }
-      });
-    } else {
-      await prisma.bus.update({
-        where: { licensePlate: 'DL1P-1234' },
-        data: { deviceId: '866738083792638' }
-      });
-    }
-
-    console.log('Successfully seeded complete dummy dataset for testing!');
-  } catch (err) {
-    console.error('Error seeding admin:', err);
-  } finally {
-    await prisma.$disconnect();
+async function main() {
+  if (!config.ALLOW_SEED) {
+    logger.warn('Seed refused: ALLOW_SEED is not 1');
+    return;
   }
+  if (!config.SEED_ADMIN_EMAIL || !config.SEED_ADMIN_PASSWORD) {
+    logger.error('Seed refused: SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD are required');
+    process.exitCode = 1;
+    return;
+  }
+
+  const email = config.SEED_ADMIN_EMAIL;
+  const existing = await prisma.user.findUnique({ where: { email } });
+  if (existing) {
+    logger.info({ email }, 'Seed: super admin already exists — leaving password unchanged');
+  } else {
+    const hashed = await bcrypt.hash(config.SEED_ADMIN_PASSWORD, 10);
+    await prisma.user.create({
+      data: { name: 'Super Admin', email, password: hashed, role: 'SUPER_ADMIN' },
+    });
+    logger.info({ email }, 'Seed: created SUPER_ADMIN');
+  }
+
+  if (process.env.SEED_INCLUDE_DEMO !== '1') {
+    logger.info('Seed complete (SEED_INCLUDE_DEMO=0)');
+    return;
+  }
+
+  // ─── Demo fixtures (staging only) ─────────────────────────
+  logger.warn('Seed: creating DEMO fixtures — do not run this in production');
+
+  let school = await prisma.school.findFirst({ where: { name: 'Delhi Public School' } });
+  if (!school) {
+    school = await prisma.school.create({ data: { name: 'Delhi Public School', address: 'New Delhi, India' } });
+  }
+
+  const demoPass = await bcrypt.hash('changeme-demo-' + Date.now(), 10);
+
+  await prisma.user.upsert({
+    where: { email: 'principal@example.com' },
+    update: { schoolId: school.id },
+    create: { name: 'Principal Sharma', email: 'principal@example.com', password: demoPass, role: 'SCHOOL_ADMIN', schoolId: school.id, mustResetPassword: true },
+  });
+  const parent = await prisma.user.upsert({
+    where: { email: 'parent@example.com' },
+    update: {},
+    create: { name: 'Rahul Sharma', email: 'parent@example.com', password: demoPass, role: 'PARENT', mustResetPassword: true },
+  });
+  await prisma.user.upsert({
+    where: { email: 'driver@example.com' },
+    update: { schoolId: school.id },
+    create: { name: 'Ashok Kumar', email: 'driver@example.com', password: demoPass, role: 'DRIVER', schoolId: school.id, mustResetPassword: true },
+  });
+
+  const existingStudent = await prisma.student.findUnique({ where: { rfidTag: 'RFID-12345' } });
+  if (!existingStudent) {
+    const student = await prisma.student.create({
+      data: { schoolId: school.id, parentId: parent.id, name: 'Rohan Sharma', grade: 'Grade 4', rfidTag: 'RFID-12345' },
+    });
+    const route = await prisma.route.create({ data: { schoolId: school.id, name: 'Morning Route A', estimatedDuration: 45 } });
+    const stop = await prisma.routeStop.create({ data: { routeId: route.id, name: 'Green Park Estate', lat: 28.5584, lng: 77.2029, orderIdx: 1 } });
+    await prisma.studentRouteMapping.create({ data: { studentId: student.id, routeStopId: stop.id } });
+  }
+
+  await prisma.bus.upsert({
+    where: { licensePlate: 'DL1P-1234' },
+    update: {},
+    create: { schoolId: school.id, licensePlate: 'DL1P-1234', capacity: 40, deviceId: '866738083792638' },
+  });
+
+  logger.info('Seed complete (with demo fixtures)');
 }
 
-seedAdmin();
+main()
+  .catch((err) => {
+    logger.error({ err: err.message }, 'Seed failed');
+    process.exitCode = 1;
+  })
+  .finally(async () => {
+    await prisma.$disconnect();
+  });

@@ -1,109 +1,123 @@
-/* 
- * @jules 👀
- * FIREBASE INTEGRATION NOTE:
- * Firebase Admin SDK initialized via `./firebase` module (Project ID: `lost-and-found-29d1f`).
- * Cloud Firestore (`db`) and Firebase Cloud Messaging (`messaging`) exported for cloud persistence & mobile push notifications.
- *
- * SECURITY FIXES COMPLETED:
- * 1. `process.env.JWT_SECRET` presence verified on boot.
- * 2. Mass Assignment parameter whitelisting on PUT/POST routes.
- * 3. Password hashing via bcrypt (10 rounds).
- */
-const { getSimulatedAlerts, getMockNotifications } = require('./mock-data');
-const { syncGpsLogToFirebase, syncEmergencyAlertToFirebase, syncStudentToFirebase } = require('./firebase');
 const express = require('express');
 const http = require('http');
-const { Server } = require('socket.io');
 const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const pinoHttp = require('pino-http');
+const { Server } = require('socket.io');
 const { PrismaClient } = require('@prisma/client');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
-require('dotenv').config();
 
-if (!process.env.JWT_SECRET) {
-  console.error('FATAL: process.env.JWT_SECRET is required');
-  process.exit(1);
-}
+const config = require('./config');
+const logger = require('./logger');
+const S = require('./schemas');
+const { validate } = require('./middleware/validate');
+const { authenticate, authorizeRoles, requireTenant, requireSelfOrRoles } = require('./middleware/auth');
+const { telemetryHmac } = require('./middleware/telemetryHmac');
+const { attachSocketAuth, emitToSchool, emitToUser } = require('./middleware/socketAuth');
+const { getSimulatedAlerts, getMockNotifications } = require('./mock-data');
+const {
+  syncGpsLogToFirebase,
+  syncEmergencyAlertToFirebase,
+  syncStudentToFirebase,
+} = require('./firebase');
 
+// ─── Boot ───────────────────────────────────────────────────
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
-const prisma = new PrismaClient({ log: ['error'] });
-const { execSync } = require('child_process');
+const io = new Server(server, {
+  cors: { origin: config.CORS_ORIGINS, credentials: true },
+});
+const prisma = new PrismaClient({ log: ['error', 'warn'] });
 
-if (require.main === module) {
+attachSocketAuth(io);
+
+// ─── Global middleware ─────────────────────────────────────
+app.set('trust proxy', 1); // behind nginx
+app.use(helmet());
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true); // allow curl / server-to-server
+      if (config.CORS_ORIGINS.includes(origin)) return cb(null, true);
+      return cb(new Error(`CORS origin not allowed: ${origin}`));
+    },
+    credentials: true,
+  })
+);
+app.use(express.json({ limit: '256kb' }));
+app.use(
+  pinoHttp({
+    logger,
+    genReqId: (req) => req.headers['x-request-id'] || crypto.randomUUID(),
+    customLogLevel: (_req, res, err) => {
+      if (err || res.statusCode >= 500) return 'error';
+      if (res.statusCode >= 400) return 'warn';
+      return 'info';
+    },
+  })
+);
+
+// Rate limits
+const loginLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: config.RATE_LIMIT_LOGIN_PER_MIN,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many login attempts; try again shortly.' },
+});
+const globalLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: config.RATE_LIMIT_GLOBAL_PER_MIN,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use(globalLimiter);
+
+// ─── Public routes (health, login, telemetry) ──────────────
+app.get('/', (_req, res) => res.send('Fleet API is running perfectly!'));
+
+app.get('/healthz', (_req, res) => res.status(200).json({ status: 'ok' }));
+
+app.get('/readyz', async (_req, res) => {
+  const checks = { db: false, firestore: null };
   try {
-    console.log('Ensuring SQLite database is initialized...');
-    execSync('npx prisma db push', { stdio: 'inherit' });
-    execSync('node seed-admin.js', { stdio: 'inherit' });
-    console.log('Database initialized successfully!');
-  } catch (e) {
-    console.error('Failed to initialize database on boot:', e.message);
-  }
-}
-
-app.use(cors());
-app.use(express.json());
-
-// Authentication Middleware
-const authenticate = (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Unauthorized: Missing or invalid token' });
-  }
-  const token = authHeader.split(' ')[1];
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded;
-    next();
+    await Promise.race([
+      prisma.$queryRaw`SELECT 1`,
+      new Promise((_, rej) => setTimeout(() => rej(new Error('db timeout')), 2000)),
+    ]);
+    checks.db = true;
   } catch (err) {
-    return res.status(401).json({ error: 'Unauthorized: Invalid token' });
+    return res.status(503).json({ status: 'degraded', checks, error: err.message });
   }
-};
-
-app.use((req, res, next) => {
-  if (req.path === '/' || req.path === '/api/auth/login' || req.path === '/api/telemetry') return next();
-  return authenticate(req, res, next);
+  res.status(200).json({ status: 'ok', checks });
 });
 
-// Role-based Access Control Middleware
-const authorizeRoles = (...roles) => {
-  return (req, res, next) => {
-    if (!req.user || !roles.includes(req.user.role)) {
-      return res.status(403).json({ error: 'Forbidden: Insufficient permissions' });
-    }
-    next();
-  };
-};
-
-// Apply RBAC to Admin routes
-app.use('/api/admin', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'));
-app.use('/api/admins', authorizeRoles('SUPER_ADMIN'));
-app.use('/api/settings', authorizeRoles('SUPER_ADMIN'));
-
-
-
-
-app.get('/', (req, res) => res.send('Fleet API is running perfectly!'));
-
-
-
-// --- 0. AUTHENTICATION ---
-app.post('/api/auth/login', async (req, res) => {
+// Login (rate-limited, unauthenticated)
+app.post('/api/auth/login', loginLimiter, validate({ body: S.login }), async (req, res) => {
   try {
     const { email, password } = req.body;
     const user = await prisma.user.findUnique({ where: { email } });
-    
     if (!user) return res.status(401).json({ error: 'Invalid credentials' });
-    
-    const isValid = await bcrypt.compare(password, user.password);
-    if (!isValid) return res.status(401).json({ error: 'Invalid credentials' });
-    
-    const token = jwt.sign({ id: user.id, role: user.role, schoolId: user.schoolId }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    
-    const preferences = user.notificationSettings ? JSON.parse(user.notificationSettings) : {};
-    
+    const ok = await bcrypt.compare(password, user.password);
+    if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
+
+    const token = jwt.sign(
+      { id: user.id, role: user.role, schoolId: user.schoolId },
+      config.JWT_SECRET,
+      { expiresIn: config.JWT_EXPIRES_IN }
+    );
+
+    let preferences = {};
+    if (user.notificationSettings) {
+      preferences =
+        typeof user.notificationSettings === 'string'
+          ? JSON.parse(user.notificationSettings)
+          : user.notificationSettings;
+    }
+
     res.json({
       token,
       user: {
@@ -112,648 +126,757 @@ app.post('/api/auth/login', async (req, res) => {
         email: user.email,
         role: user.role,
         schoolId: user.schoolId,
-        preferences
-      }
+        mustResetPassword: user.mustResetPassword || false,
+        preferences,
+      },
     });
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'login failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// --- 1. DRIVER APP & TELEMETRY ---
-const telemetryCache = new Map();
-const CACHE_TTL_MS = 60000; // 1 minute
+// Telemetry (HMAC-authenticated, not JWT). Bus is looked up by the HMAC middleware
+// and attached as req.bus.
+const telemetryCache = require('./telemetryCache');
+app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => next(), // placeholder to satisfy ordering
+  // deferred HMAC attach after prisma exists:
+  async (req, res, next) => (await telemetryHmac(prisma))(req, res, next),
+  async (req, res) => {
+    try {
+      const { deviceId, lat, lng, speed, timestamp } = req.body;
+      let bus = req.bus;
+      if (!bus) {
+        // HMAC disabled path — fall back to cached lookup
+        const cached = telemetryCache.get(deviceId);
+        bus = cached || (await prisma.bus.findUnique({
+          where: { deviceId },
+          include: {
+            trips: {
+              where: { status: 'ON_SCHEDULE' },
+              include: { driver: { select: { name: true } }, route: { select: { name: true } } },
+            },
+          },
+        }));
+        if (bus) telemetryCache.set(deviceId, bus);
+      }
+      if (!bus) return res.status(404).json({ error: 'Bus not found' });
 
-app.post('/api/telemetry', async (req, res) => {
-  try {
-    const { deviceId, lat, lng, speed, timestamp } = req.body;
-
-    let bus = null;
-    const cached = telemetryCache.get(deviceId);
-
-    if (cached && (Date.now() - cached.timestamp < CACHE_TTL_MS)) {
-      bus = cached.data;
-    } else {
-      bus = await prisma.bus.findUnique({
-        where: { deviceId },
-        include: { trips: { where: { status: "ON_SCHEDULE" }, include: { driver: { select: { name: true } }, route: { select: { name: true } } } } }
+      const log = await prisma.gpsLog.create({
+        data: { busId: bus.id, lat, lng, speed: speed || 0, timestamp: timestamp ? new Date(timestamp) : new Date() },
       });
-      if (bus) {
-        telemetryCache.set(deviceId, { data: bus, timestamp: Date.now() });
-      }
+
+      syncGpsLogToFirebase({
+        busId: bus.id,
+        licensePlate: bus.licensePlate,
+        lat,
+        lng,
+        speed: speed || 0,
+        timestamp: log.timestamp,
+      });
+
+      const activeTrip = bus.trips?.[0];
+      emitToSchool(io, bus.schoolId, 'location_update', {
+        busId: bus.id,
+        licensePlate: bus.licensePlate,
+        capacity: bus.capacity,
+        driverName: activeTrip?.driver?.name || 'Unassigned',
+        routeName: activeTrip?.route?.name || 'Off-Route',
+        lat,
+        lng,
+        speed,
+        timestamp: log.timestamp,
+      });
+
+      res.status(200).json({ success: true });
+    } catch (err) {
+      req.log.error({ err }, 'telemetry failed');
+      res.status(500).json({ error: 'Internal server error' });
     }
-
-    if (!bus) return res.status(404).json({ error: 'Bus not found' });
-
-    const log = await prisma.gpsLog.create({
-      data: { busId: bus.id, lat, lng, speed: speed || 0, timestamp: timestamp || new Date() }
-    });
-
-    // Cloud Firestore Async Sync
-    syncGpsLogToFirebase({
-      busId: bus.id,
-      licensePlate: bus.licensePlate,
-      lat,
-      lng,
-      speed: speed || 0,
-      timestamp: log.timestamp
-    });
-
-    // Push real-time event
-    const activeTrip = bus.trips[0];
-    io.emit('location_update', {
-      busId: bus.id, 
-      licensePlate: bus.licensePlate, 
-      capacity: bus.capacity,
-      driverName: activeTrip?.driver?.name || "Unassigned",
-      routeName: activeTrip?.route?.name || "Off-Route",
-      lat, lng, speed, timestamp: log.timestamp
-    });
-    res.status(200).json({ success: true });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Internal server error' });
   }
-});
+);
 
-// --- 2. ADMIN DASHBOARD ---
-// Buses
-app.get('/api/schools/:schoolId/buses', async (req, res) => {
+// ─── Authenticated routes below ────────────────────────────
+app.use(authenticate);
+
+// Broad RBAC prefixes
+app.use('/api/admin', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'));
+app.use('/api/admins', authorizeRoles('SUPER_ADMIN'));
+app.use('/api/settings', authorizeRoles('SUPER_ADMIN'));
+
+// ─── Tenant-scoped: /api/schools/:schoolId/* ──────────────
+app.get('/api/schools/:schoolId/buses', requireTenant('schoolId'), async (req, res) => {
   try {
     const buses = await prisma.bus.findMany({
       where: { schoolId: req.params.schoolId },
-      include: { 
+      include: {
         gpsLogs: { orderBy: { timestamp: 'desc' }, take: 1 },
-        trips: { where: { status: { in: ["ON_SCHEDULE", "DELAYED"] } }, include: { driver: { select: { name: true } }, route: { select: { name: true } } } }
-      } 
+        trips: {
+          where: { status: { in: ['ON_SCHEDULE', 'DELAYED'] } },
+          include: { driver: { select: { name: true } }, route: { select: { name: true } } },
+        },
+      },
     });
-    
-    // Map response to surface active trip info directly for frontend convenience
-    const formattedBuses = buses.map(bus => {
-      const activeTrip = bus.trips[0];
-      return {
-        ...bus,
-        driverName: activeTrip?.driver?.name || "Unassigned",
-        routeName: activeTrip?.route?.name || "Off-Route"
-      };
-    });
-    
-    res.json(formattedBuses);
+    res.json(
+      buses.map((b) => {
+        const t = b.trips[0];
+        return { ...b, driverName: t?.driver?.name || 'Unassigned', routeName: t?.route?.name || 'Off-Route' };
+      })
+    );
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'list buses failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// Leave Management
-app.get('/api/schools/:schoolId/leaves', async (req, res) => {
+app.get('/api/schools/:schoolId/leaves', requireTenant('schoolId'), async (req, res) => {
   try {
     const { status } = req.query;
-    let whereClause = { student: { schoolId: req.params.schoolId } };
-    if (status && status !== 'all') {
-      whereClause.status = status.toUpperCase();
-    }
-    
+    const where = { student: { schoolId: req.params.schoolId } };
+    if (status && status !== 'all') where.status = String(status).toUpperCase();
     const leaves = await prisma.leaveApplication.findMany({
-      where: whereClause,
+      where,
       include: { student: true },
-      orderBy: { createdAt: 'desc' }
+      orderBy: { createdAt: 'desc' },
     });
     res.json(leaves);
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'list leaves failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-app.put('/api/leaves/:id/approve', async (req, res) => {
+// Doc-parity alias: /api/schools/:schoolId/leaves/pending
+app.get('/api/schools/:schoolId/leaves/pending', requireTenant('schoolId'), async (req, res) => {
   try {
-    const leave = await prisma.leaveApplication.update({
-      where: { id: req.params.id }, data: { status: "APPROVED" }
+    const leaves = await prisma.leaveApplication.findMany({
+      where: { student: { schoolId: req.params.schoolId }, status: 'PENDING' },
+      include: { student: true },
+      orderBy: { createdAt: 'desc' },
     });
+    res.json(leaves);
+  } catch (err) {
+    req.log.error({ err }, 'list pending leaves failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+async function ownsLeave(req, res, next) {
+  if (req.user.role === 'SUPER_ADMIN') return next();
+  const leave = await prisma.leaveApplication.findUnique({
+    where: { id: req.params.id },
+    include: { student: true },
+  });
+  if (!leave) return res.status(404).json({ error: 'Leave not found' });
+  if (req.user.role === 'SCHOOL_ADMIN' && leave.student.schoolId === req.user.schoolId) return next();
+  return res.status(403).json({ error: 'Forbidden' });
+}
+
+app.put('/api/leaves/:id/approve', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), ownsLeave, async (req, res) => {
+  try {
+    const leave = await prisma.leaveApplication.update({ where: { id: req.params.id }, data: { status: 'APPROVED' } });
     res.json(leave);
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'approve leave failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-app.put('/api/leaves/:id/reject', async (req, res) => {
+app.put('/api/leaves/:id/reject', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), ownsLeave, async (req, res) => {
   try {
-    const leave = await prisma.leaveApplication.update({
-      where: { id: req.params.id }, data: { status: "REJECTED" }
-    });
+    const leave = await prisma.leaveApplication.update({ where: { id: req.params.id }, data: { status: 'REJECTED' } });
     res.json(leave);
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'reject leave failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// Route Management
-app.get('/api/schools/:schoolId/routes', async (req, res) => {
+// Doc-parity: PUT /api/parent/leaves/:id { status: APPROVED|REJECTED }
+app.put('/api/parent/leaves/:id',
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  ownsLeave,
+  validate({ body: S.leaveStatus }),
+  async (req, res) => {
+    try {
+      const leave = await prisma.leaveApplication.update({
+        where: { id: req.params.id },
+        data: { status: req.body.status },
+      });
+      res.json(leave);
+    } catch (err) {
+      req.log.error({ err }, 'update leave failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
+// Routes
+app.get('/api/schools/:schoolId/routes', requireTenant('schoolId'), async (req, res) => {
   try {
     const routes = await prisma.route.findMany({
       where: { schoolId: req.params.schoolId },
-      include: { stops: { orderBy: { orderIdx: 'asc' } }, trips: { take: 1, orderBy: { createdAt: 'desc' } } }
+      include: { stops: { orderBy: { orderIdx: 'asc' } }, trips: { take: 1, orderBy: { createdAt: 'desc' } } },
     });
     res.json(routes);
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'list routes failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-app.post('/api/schools/:schoolId/routes', async (req, res) => {
-  try {
-    const { name, estimatedDuration } = req.body;
-    const route = await prisma.route.create({
-      data: { schoolId: req.params.schoolId, name, estimatedDuration }
-    });
-    res.json(route);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Internal server error' });
+app.post('/api/schools/:schoolId/routes',
+  requireTenant('schoolId'),
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  validate({ body: S.createRoute }),
+  async (req, res) => {
+    try {
+      const route = await prisma.route.create({
+        data: { schoolId: req.params.schoolId, name: req.body.name, estimatedDuration: req.body.estimatedDuration ?? null },
+      });
+      res.json(route);
+    } catch (err) {
+      req.log.error({ err }, 'create route failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
   }
-});
+);
 
-app.put('/api/routes/:id', async (req, res) => {
-  try {
-    const { name, estimatedDuration } = req.body;
-    const route = await prisma.route.update({
-      where: { id: req.params.id }, data: { name, estimatedDuration }
-    });
-    res.json(route);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Internal server error' });
+async function ownsRoute(req, res, next) {
+  if (req.user.role === 'SUPER_ADMIN') return next();
+  const route = await prisma.route.findUnique({ where: { id: req.params.id } });
+  if (!route) return res.status(404).json({ error: 'Route not found' });
+  if (req.user.role === 'SCHOOL_ADMIN' && route.schoolId === req.user.schoolId) return next();
+  return res.status(403).json({ error: 'Forbidden' });
+}
+
+app.put('/api/routes/:id',
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  ownsRoute,
+  validate({ body: S.updateRoute }),
+  async (req, res) => {
+    try {
+      const route = await prisma.route.update({ where: { id: req.params.id }, data: req.body });
+      res.json(route);
+    } catch (err) {
+      req.log.error({ err }, 'update route failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
   }
-});
+);
 
-app.delete('/api/routes/:id', async (req, res) => {
+app.delete('/api/routes/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), ownsRoute, async (req, res) => {
   try {
     await prisma.route.delete({ where: { id: req.params.id } });
     res.json({ success: true });
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'delete route failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
 // Drivers
-app.get('/api/schools/:schoolId/drivers', async (req, res) => {
+app.get('/api/schools/:schoolId/drivers', requireTenant('schoolId'), async (req, res) => {
   try {
     const drivers = await prisma.user.findMany({
-      where: { schoolId: req.params.schoolId, role: "DRIVER" },
+      where: { schoolId: req.params.schoolId, role: 'DRIVER' },
       select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        photoUrl: true,
-        notificationSettings: true,
-        schoolId: true,
-        createdAt: true,
-        updatedAt: true,
+        id: true, name: true, email: true, role: true, photoUrl: true,
+        notificationSettings: true, schoolId: true, createdAt: true, updatedAt: true,
         driverTrips: {
-          where: { status: { in: ["PLANNED", "ON_SCHEDULE"] } },
-          include: { bus: true, route: true }
-        }
-      }
+          where: { status: { in: ['PLANNED', 'ON_SCHEDULE'] } },
+          include: { bus: true, route: true },
+        },
+      },
     });
     res.json(drivers);
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'list drivers failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-app.post('/api/schools/:schoolId/drivers', async (req, res) => {
-  try {
-    const { name, email } = req.body;
-    // For MVP, auto-generate a temporary password for the driver
-    const tempPassword = crypto.randomBytes(16).toString('hex');
-    const hashedPassword = await bcrypt.hash(tempPassword, 10);
-    
-    const driver = await prisma.user.create({
-      data: {
-        schoolId: req.params.schoolId,
-        name,
-        email,
-        password: hashedPassword,
-        role: "DRIVER"
-      }
-    });
-    
-    res.json({ driver, tempPassword });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Internal server error' });
+app.post('/api/schools/:schoolId/drivers',
+  requireTenant('schoolId'),
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  validate({ body: S.createDriver }),
+  async (req, res) => {
+    try {
+      const { name, email } = req.body;
+      const tempPassword = crypto.randomBytes(16).toString('hex');
+      const hashed = await bcrypt.hash(tempPassword, 10);
+      const driver = await prisma.user.create({
+        data: { schoolId: req.params.schoolId, name, email, password: hashed, role: 'DRIVER', mustResetPassword: true },
+      });
+      res.json({ driver: { id: driver.id, name: driver.name, email: driver.email }, tempPassword });
+    } catch (err) {
+      req.log.error({ err }, 'create driver failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
   }
-});
+);
 
 // Trips
-app.post('/api/schools/:schoolId/trips', async (req, res) => {
-  try {
-    const { routeId, busId, driverId } = req.body;
-    const trip = await prisma.trip.create({
-      data: { routeId, busId, driverId, status: "PLANNED" }
-    });
-    res.json(trip);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
+app.post('/api/schools/:schoolId/trips',
+  requireTenant('schoolId'),
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  validate({ body: S.createTrip }),
+  async (req, res) => {
+    try {
+      // Verify all referenced entities belong to this school
+      const [route, bus, driver] = await Promise.all([
+        prisma.route.findUnique({ where: { id: req.body.routeId } }),
+        prisma.bus.findUnique({ where: { id: req.body.busId } }),
+        prisma.user.findUnique({ where: { id: req.body.driverId } }),
+      ]);
+      if (!route || route.schoolId !== req.params.schoolId) return res.status(400).json({ error: 'Route not in this school' });
+      if (!bus || (bus.schoolId && bus.schoolId !== req.params.schoolId)) return res.status(400).json({ error: 'Bus not in this school' });
+      if (!driver || driver.role !== 'DRIVER' || driver.schoolId !== req.params.schoolId) return res.status(400).json({ error: 'Driver not in this school' });
 
-// Students & Attendance
-app.get('/api/schools/:schoolId/students', async (req, res) => {
+      const trip = await prisma.trip.create({
+        data: { routeId: req.body.routeId, busId: req.body.busId, driverId: req.body.driverId, status: 'PLANNED' },
+      });
+      res.json(trip);
+    } catch (err) {
+      req.log.error({ err }, 'create trip failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
+// Students & attendance
+app.get('/api/schools/:schoolId/students', requireTenant('schoolId'), async (req, res) => {
   try {
     const students = await prisma.student.findMany({
       where: { schoolId: req.params.schoolId },
-      include: { routeMappings: { include: { routeStop: { include: { route: true } } } } }
+      include: { routeMappings: { include: { routeStop: { include: { route: true } } } } },
     });
-
-    const formattedStudents = students.map(student => {
-      const mapping = student.routeMappings[0];
-      return {
-        id: student.id,
-        rfidTag: student.rfidTag,
-        name: student.name,
-        grade: student.grade,
-        photoUrl: student.photoUrl,
-        assignedRoute: mapping?.routeStop?.route?.name || "Unassigned",
-        routeStopName: mapping?.routeStop?.name || "Unassigned",
-        boardingStatus: "Absent",
-        lastCheckIn: "--:--"
-      };
-    });
-
-    res.json(formattedStudents);
+    res.json(
+      students.map((s) => {
+        const m = s.routeMappings[0];
+        return {
+          id: s.id,
+          rfidTag: s.rfidTag,
+          name: s.name,
+          grade: s.grade,
+          photoUrl: s.photoUrl,
+          assignedRoute: m?.routeStop?.route?.name || 'Unassigned',
+          routeStopName: m?.routeStop?.name || 'Unassigned',
+          boardingStatus: 'Absent',
+          lastCheckIn: '--:--',
+        };
+      })
+    );
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'list students failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-app.post(['/api/schools/:schoolId/students', '/api/students'], async (req, res) => {
+async function studentCreateHandler(req, res) {
   try {
     const schoolId = req.params.schoolId || req.body.schoolId || req.user?.schoolId;
-    if (!schoolId) {
-      return res.status(400).json({ error: 'schoolId is required' });
+    if (!schoolId) return res.status(400).json({ error: 'schoolId is required' });
+
+    // Tenant check: SCHOOL_ADMIN can only create in own school
+    if (req.user.role === 'SCHOOL_ADMIN' && req.user.schoolId !== schoolId) {
+      return res.status(403).json({ error: 'Forbidden: cross-tenant' });
+    }
+    if (req.user.role !== 'SUPER_ADMIN' && req.user.role !== 'SCHOOL_ADMIN') {
+      return res.status(403).json({ error: 'Forbidden' });
     }
 
     let { rfidTag, name, grade, parentEmail, parentName } = req.body;
-    if (!name) {
-      return res.status(400).json({ error: 'Student name is required' });
-    }
-
-    // Auto-generate a unique RFID tag if not provided or empty string
     if (!rfidTag || typeof rfidTag !== 'string' || rfidTag.trim() === '') {
       rfidTag = `RFID-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
     } else {
       rfidTag = rfidTag.trim();
     }
 
-    let parentId = null;
-    let generatedPassword = null;
-
-    // Auto-Invite Flow: Create parent if email is provided and doesn't exist
-    if (parentEmail) {
-      let parent = await prisma.user.findUnique({ where: { email: parentEmail } });
-      
-      if (!parent) {
-        generatedPassword = crypto.randomBytes(4).toString('hex'); // Generate random 8-char password
-        const bcrypt = require('bcryptjs');
-        const hashedPassword = await bcrypt.hash(generatedPassword, 10);
-        
-        parent = await prisma.user.create({
-          data: {
-            email: parentEmail,
-            password: hashedPassword,
-            role: "PARENT",
-            name: parentName || `Parent of ${name}`,
-            schoolId: schoolId
-          }
-        });
+    // Wrap parent-provisioning + student-create in a transaction
+    const result = await prisma.$transaction(async (tx) => {
+      let parentId = null;
+      let generatedPassword = null;
+      if (parentEmail) {
+        let parent = await tx.user.findUnique({ where: { email: parentEmail } });
+        if (!parent) {
+          generatedPassword = crypto.randomBytes(16).toString('hex');
+          const hashed = await bcrypt.hash(generatedPassword, 10);
+          parent = await tx.user.create({
+            data: {
+              email: parentEmail,
+              password: hashed,
+              role: 'PARENT',
+              name: parentName || `Parent of ${name}`,
+              schoolId,
+              mustResetPassword: true,
+            },
+          });
+        }
+        parentId = parent.id;
       }
-      parentId = parent.id;
-    }
-
-    const student = await prisma.student.create({
-      data: { schoolId, rfidTag, name, grade: grade || 'General', parentId }
+      const student = await tx.student.create({
+        data: { schoolId, rfidTag, name, grade: grade || 'General', parentId },
+      });
+      return { student, generatedPassword };
     });
 
     res.json({
-      student,
-      parentCredentials: generatedPassword ? { email: parentEmail, temporaryPassword: generatedPassword } : null
+      student: result.student,
+      parentCredentials: result.generatedPassword
+        ? { email: parentEmail, temporaryPassword: result.generatedPassword }
+        : null,
     });
   } catch (err) {
-    console.error('Error registering student:', err);
     if (err.code === 'P2002') {
-      return res.status(400).json({ 
-        error: 'RFID Tag is already assigned to another student. Please enter a unique RFID Tag.' 
+      return res.status(400).json({ error: 'RFID Tag is already assigned to another student.' });
+    }
+    req.log.error({ err }, 'create student failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+app.post('/api/schools/:schoolId/students', requireTenant('schoolId'), validate({ body: S.createStudent }), studentCreateHandler);
+app.post('/api/students', validate({ body: S.createStudent }), studentCreateHandler);
+
+// Student → route stop
+app.post('/api/student-route-mappings',
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  validate({ body: S.mapping }),
+  async (req, res) => {
+    try {
+      const { studentId, routeStopId } = req.body;
+      // Tenant check: the student and route stop must belong to caller's school
+      if (req.user.role === 'SCHOOL_ADMIN') {
+        const [student, stop] = await Promise.all([
+          prisma.student.findUnique({ where: { id: studentId }, select: { schoolId: true } }),
+          prisma.routeStop.findUnique({ where: { id: routeStopId }, include: { route: { select: { schoolId: true } } } }),
+        ]);
+        if (!student || student.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
+        if (!stop || stop.route.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
+      }
+      const mapping = await prisma.studentRouteMapping.upsert({
+        where: { studentId_routeStopId: { studentId, routeStopId } },
+        update: {},
+        create: { studentId, routeStopId },
+        include: { student: true, routeStop: { include: { route: true } } },
       });
+      res.json(mapping);
+    } catch (err) {
+      req.log.error({ err }, 'create mapping failed');
+      res.status(500).json({ error: 'Internal server error' });
     }
-    res.status(500).json({ error: 'Internal server error' });
   }
-});
+);
 
-// Student to Bus Assignment (Route Stop Mapping)
-app.post('/api/student-route-mappings', async (req, res) => {
-  try {
-    const { studentId, routeStopId } = req.body;
-    if (!studentId || !routeStopId) {
-      return res.status(400).json({ error: 'studentId and routeStopId are required' });
-    }
-    // upsert: if mapping already exists, update it; otherwise create new
-    const mapping = await prisma.studentRouteMapping.upsert({
-      where: { studentId_routeStopId: { studentId, routeStopId } },
-      update: { routeStopId },
-      create: { studentId, routeStopId },
-      include: { student: true, routeStop: { include: { route: true } } }
-    });
-    res.json(mapping);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-app.get('/api/schools/:schoolId/attendance/today', async (req, res) => {
+app.get('/api/schools/:schoolId/attendance/today', requireTenant('schoolId'), async (req, res) => {
   try {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const logs = await prisma.attendanceLog.findMany({
       where: { student: { schoolId: req.params.schoolId }, timestamp: { gte: today } },
-      include: { student: true, trip: { include: { route: true } } }
+      include: { student: true, trip: { include: { route: true } } },
     });
     res.json(logs);
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'list attendance failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// School Dashboard Metrics
-app.get('/api/schools/:schoolId/stats', async (req, res) => {
+// School stats
+app.get('/api/schools/:schoolId/stats', requireTenant('schoolId'), async (req, res) => {
   try {
     const schoolId = req.params.schoolId;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    
-    // ⚡ Bolt: Execute independent aggregations concurrently to reduce overall latency (prevents N+1 query pattern)
-    const [
-      totalStudents,
-      totalRoutes,
-      activeTrips,
-      totalBoarded,
-      pendingLeaves
-    ] = await Promise.all([
+    const [totalStudents, totalRoutes, activeTrips, totalBoarded, pendingLeaves] = await Promise.all([
       prisma.student.count({ where: { schoolId } }),
       prisma.route.count({ where: { schoolId } }),
-      prisma.trip.count({ where: { route: { schoolId }, status: "ON_SCHEDULE" } }),
-      prisma.attendanceLog.count({ where: { student: { schoolId }, type: "BOARDED", timestamp: { gte: today } } }),
-      prisma.leaveApplication.count({ where: { student: { schoolId }, status: "PENDING" } })
+      prisma.trip.count({ where: { route: { schoolId }, status: 'ON_SCHEDULE' } }),
+      prisma.attendanceLog.count({ where: { student: { schoolId }, type: 'BOARDED', timestamp: { gte: today } } }),
+      prisma.leaveApplication.count({ where: { student: { schoolId }, status: 'PENDING' } }),
     ]);
-
     res.json({ totalStudents, totalRoutes, activeTrips, totalBoarded, pendingLeaves });
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'school stats failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// --- 3. PARENT APP ---
-app.patch('/api/parents/:id/preferences', async (req, res) => {
-  try {
-    const preferences = JSON.stringify(req.body);
-    const user = await prisma.user.update({
-      where: { id: req.params.id },
-      data: { notificationSettings: preferences }
-    });
-    res.json({ preferences: JSON.parse(user.notificationSettings) });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Internal server error' });
+// ─── Parent APIs ──────────────────────────────────────────
+app.patch('/api/parents/:id/preferences',
+  requireSelfOrRoles('id', 'SUPER_ADMIN'),
+  async (req, res) => {
+    try {
+      const notificationSettings = typeof req.body === 'object' ? req.body : {};
+      const user = await prisma.user.update({
+        where: { id: req.params.id },
+        data: { notificationSettings: JSON.stringify(notificationSettings) },
+      });
+      const prefs = user.notificationSettings
+        ? typeof user.notificationSettings === 'string'
+          ? JSON.parse(user.notificationSettings)
+          : user.notificationSettings
+        : {};
+      res.json({ preferences: prefs });
+    } catch (err) {
+      req.log.error({ err }, 'update parent prefs failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
   }
-});
+);
 
-app.get('/api/parents/:parentId/students', async (req, res) => {
-  try {
-    const students = await prisma.student.findMany({
-      where: { parentId: req.params.parentId },
-      include: { 
-        routeMappings: { 
-          include: { 
-            routeStop: {
-              include: {
-                route: {
-                  include: {
-                    trips: {
-                      where: { status: { in: ["PLANNED", "ON_SCHEDULE", "DELAYED"] } },
-                      include: {
-                        driver: { select: { name: true } },
-                        bus: { select: { licensePlate: true, deviceId: true } }
-                      }
-                    }
-                  }
-                }
-              }
-            } 
-          } 
-        } 
-      }
-    });
-    
-    // Format the response to pull the active trip/driver up for the frontend
-    const formattedStudents = students.map(student => {
-      const activeTrip = student.routeMappings[0]?.routeStop?.route?.trips[0] || null;
-      return {
-        id: student.id,
-        name: student.name,
-        grade: student.grade,
-        photoUrl: student.photoUrl,
-        routeStopName: student.routeMappings[0]?.routeStop?.name || "Unassigned",
-        driverName: activeTrip?.driver?.name || "Unassigned",
-        licensePlate: activeTrip?.bus?.licensePlate || "Unassigned"
-      };
-    });
-    
-    res.json(formattedStudents);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Internal server error' });
+app.get('/api/parents/:parentId/students',
+  requireSelfOrRoles('parentId', 'SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  async (req, res) => {
+    try {
+      const students = await prisma.student.findMany({
+        where: { parentId: req.params.parentId },
+        include: {
+          routeMappings: {
+            include: {
+              routeStop: {
+                include: {
+                  route: {
+                    include: {
+                      trips: {
+                        where: { status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
+                        include: {
+                          driver: { select: { name: true } },
+                          bus: { select: { licensePlate: true, deviceId: true } },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+      const formatted = students.map((s) => {
+        const t = s.routeMappings[0]?.routeStop?.route?.trips[0] || null;
+        return {
+          id: s.id,
+          name: s.name,
+          grade: s.grade,
+          photoUrl: s.photoUrl,
+          routeStopName: s.routeMappings[0]?.routeStop?.name || 'Unassigned',
+          driverName: t?.driver?.name || 'Unassigned',
+          licensePlate: t?.bus?.licensePlate || 'Unassigned',
+        };
+      });
+      res.json(formatted);
+    } catch (err) {
+      req.log.error({ err }, 'list parent students failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
   }
-});
+);
 
-app.post('/api/leaves', async (req, res) => {
+app.post('/api/leaves', validate({ body: S.leaveApp }), async (req, res) => {
   try {
-    const { studentId, startDate, endDate, reason, notes } = req.body;
+    // Parents can only create leaves for their own child; admins for any child in tenant
+    const student = await prisma.student.findUnique({ where: { id: req.body.studentId } });
+    if (!student) return res.status(404).json({ error: 'Student not found' });
+    if (req.user.role === 'PARENT' && student.parentId !== req.user.id) return res.status(403).json({ error: 'Forbidden' });
+    if (req.user.role === 'SCHOOL_ADMIN' && student.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
+    if (!['PARENT', 'SCHOOL_ADMIN', 'SUPER_ADMIN'].includes(req.user.role)) return res.status(403).json({ error: 'Forbidden' });
+
     const leave = await prisma.leaveApplication.create({
-      data: { studentId, startDate: new Date(startDate), endDate: new Date(endDate), reason, notes, status: "PENDING" }
+      data: {
+        studentId: req.body.studentId,
+        startDate: new Date(req.body.startDate),
+        endDate: new Date(req.body.endDate),
+        reason: req.body.reason,
+        notes: req.body.notes || null,
+        status: 'PENDING',
+      },
     });
     res.json(leave);
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'create leave failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-app.get('/api/parents/:parentId/leaves', async (req, res) => {
-  try {
-    const leaves = await prisma.leaveApplication.findMany({
-      where: { student: { parentId: req.params.parentId } },
-      include: { student: { select: { name: true } } },
-      orderBy: { createdAt: 'desc' }
-    });
-    res.json(leaves);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Internal server error' });
+app.get('/api/parents/:parentId/leaves',
+  requireSelfOrRoles('parentId', 'SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  async (req, res) => {
+    try {
+      const leaves = await prisma.leaveApplication.findMany({
+        where: { student: { parentId: req.params.parentId } },
+        include: { student: { select: { name: true } } },
+        orderBy: { createdAt: 'desc' },
+      });
+      res.json(leaves);
+    } catch (err) {
+      req.log.error({ err }, 'list parent leaves failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
   }
-});
+);
 
-app.get('/api/parents/:parentId/notifications', async (req, res) => {
-  try {
-    const notifications = await prisma.notification.findMany({
-      where: { userId: req.params.parentId },
-      orderBy: { createdAt: 'desc' },
-      take: 50
-    });
-    res.json(notifications);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Internal server error' });
+app.get('/api/parents/:parentId/notifications',
+  requireSelfOrRoles('parentId', 'SUPER_ADMIN'),
+  async (req, res) => {
+    try {
+      const notifications = await prisma.notification.findMany({
+        where: { userId: req.params.parentId },
+        orderBy: { createdAt: 'desc' },
+        take: 50,
+      });
+      res.json(notifications);
+    } catch (err) {
+      req.log.error({ err }, 'list parent notifications failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
   }
-});
+);
 
-// --- 4. DRIVER APP ---
-app.post('/api/alerts/sos', async (req, res) => {
+// ─── Driver APIs ──────────────────────────────────────────
+async function sosHandler(req, res) {
   try {
-    const { schoolId, senderId, message, tripId } = req.body;
+    // Enforce: caller must be authenticated. schoolId is derived from token, not body.
+    const schoolId = req.user.schoolId;
+    if (!schoolId && req.user.role !== 'SUPER_ADMIN') return res.status(400).json({ error: 'No school context' });
+
+    const { message, tripId } = req.body;
+    if (tripId) {
+      const trip = await prisma.trip.findUnique({ where: { id: tripId }, include: { route: true } });
+      if (!trip) return res.status(404).json({ error: 'Trip not found' });
+      if (trip.driverId !== req.user.id && req.user.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: 'Forbidden: not your trip' });
+      }
+      if (trip.route.schoolId !== schoolId && req.user.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: 'Forbidden: cross-tenant' });
+      }
+    }
+
     const alert = await prisma.emergencyAlert.create({
-      data: { schoolId, senderId, type: "DRIVER_SOS", message, tripId, status: "ACTIVE" }
+      data: {
+        schoolId: schoolId || 'unknown',
+        senderId: req.user.id,
+        type: 'DRIVER_SOS',
+        message: message || 'Driver triggered SOS',
+        tripId: tripId || null,
+        status: 'ACTIVE',
+      },
     });
-    // Instantly notify admin dashboard
-    io.emit('emergency_alert', alert);
+    syncEmergencyAlertToFirebase(alert);
+    emitToSchool(io, alert.schoolId, 'emergency_alert', alert);
     res.json(alert);
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'sos failed');
     res.status(500).json({ error: 'Internal server error' });
   }
-});
+}
+app.post('/api/alerts/sos', validate({ body: S.sos }), sosHandler);
+app.post('/api/driver/emergency', validate({ body: S.sos }), sosHandler); // doc-parity alias
 
-app.get('/api/drivers/:driverId/trips', async (req, res) => {
-  try {
-    const trips = await prisma.trip.findMany({
-      where: { driverId: req.params.driverId, status: { in: ["PLANNED", "ON_SCHEDULE", "DELAYED"] } },
-      include: {
-        route: {
-          include: {
-            stops: {
-              orderBy: { orderIdx: 'asc' },
-              include: { studentMappings: { include: { student: true } } }
-            }
-          }
+app.get('/api/drivers/:driverId/trips',
+  requireSelfOrRoles('driverId', 'SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  async (req, res) => {
+    try {
+      const trips = await prisma.trip.findMany({
+        where: { driverId: req.params.driverId, status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
+        include: {
+          route: {
+            include: {
+              stops: {
+                orderBy: { orderIdx: 'asc' },
+                include: { studentMappings: { include: { student: true } } },
+              },
+            },
+          },
+          bus: true,
         },
-        bus: true
-      },
-      orderBy: { createdAt: 'asc' }
-    });
-    res.json(trips);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Internal server error' });
+        orderBy: { createdAt: 'asc' },
+      });
+      res.json(trips);
+    } catch (err) {
+      req.log.error({ err }, 'list driver trips failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
   }
-});
+);
 
-app.patch('/api/trips/:tripId/status', async (req, res) => {
+async function ownsTrip(req, res, next) {
+  if (req.user.role === 'SUPER_ADMIN') return next();
+  const trip = await prisma.trip.findUnique({
+    where: { id: req.params.tripId },
+    include: { route: true },
+  });
+  if (!trip) return res.status(404).json({ error: 'Trip not found' });
+  if (req.user.role === 'DRIVER' && trip.driverId === req.user.id) return next();
+  if (req.user.role === 'SCHOOL_ADMIN' && trip.route.schoolId === req.user.schoolId) return next();
+  return res.status(403).json({ error: 'Forbidden' });
+}
+
+app.patch('/api/trips/:tripId/status', ownsTrip, validate({ body: S.tripStatus }), async (req, res) => {
   try {
-    const { status } = req.body;
-    const data = { status };
-    if (status === "ON_SCHEDULE") data.startTime = new Date();
-    if (status === "COMPLETED") data.endTime = new Date();
-
-    const trip = await prisma.trip.update({
-      where: { id: req.params.tripId },
-      data
-    });
+    const data = { status: req.body.status };
+    if (req.body.status === 'ON_SCHEDULE') data.startTime = new Date();
+    if (req.body.status === 'COMPLETED') data.endTime = new Date();
+    const trip = await prisma.trip.update({ where: { id: req.params.tripId }, data });
     res.json(trip);
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'update trip failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-app.post('/api/attendance', async (req, res) => {
+app.post('/api/attendance', validate({ body: S.attendance }), async (req, res) => {
   try {
-    const { studentId, tripId, type } = req.body;
+    const trip = await prisma.trip.findUnique({
+      where: { id: req.body.tripId },
+      include: { route: true },
+    });
+    if (!trip) return res.status(404).json({ error: 'Trip not found' });
+    if (req.user.role === 'DRIVER' && trip.driverId !== req.user.id) return res.status(403).json({ error: 'Forbidden: not your trip' });
+    if (req.user.role === 'SCHOOL_ADMIN' && trip.route.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
+    if (!['DRIVER', 'SCHOOL_ADMIN', 'SUPER_ADMIN'].includes(req.user.role)) return res.status(403).json({ error: 'Forbidden' });
+
+    const student = await prisma.student.findUnique({ where: { id: req.body.studentId } });
+    if (!student) return res.status(404).json({ error: 'Student not found' });
+    if (student.schoolId !== trip.route.schoolId) return res.status(400).json({ error: 'Student not on this trip route' });
+
     const log = await prisma.attendanceLog.create({
-      data: { studentId, tripId, type }
+      data: { studentId: req.body.studentId, tripId: req.body.tripId, type: req.body.type },
     });
     res.json(log);
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'attendance failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-// --- 5. SUPER ADMIN STATS ---
-const getSchoolAdminStats = async (prisma, schoolId) => {
+
+// ─── Admin stats (role-aware) ─────────────────────────────
+const getSchoolAdminStats = async (schoolId) => {
   const fifteenMinsAgo = new Date(Date.now() - 15 * 60000);
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-
   const [
-    totalBuses,
-    totalStudents,
-    totalRoutes,
-    pendingLeaves,
-    activeBusesLogs,
-    busesThisMonth,
-    studentsThisMonth,
-    avgDurationRes,
-    minRouteRes,
-    unoptimizedRoutesCount
+    totalBuses, totalStudents, totalRoutes, pendingLeaves,
+    activeBusesLogs, busesThisMonth, studentsThisMonth,
+    avgDurationRes, minRouteRes, unoptimizedRoutesCount,
   ] = await Promise.all([
     prisma.bus.count({ where: { schoolId } }),
     prisma.student.count({ where: { schoolId } }),
     prisma.route.count({ where: { schoolId } }),
     prisma.leaveApplication.count({ where: { student: { schoolId }, status: 'PENDING' } }),
-    prisma.gpsLog.findMany({
-      where: {
-        bus: { schoolId },
-        timestamp: { gte: fifteenMinsAgo }
-      },
-      distinct: ['busId'],
-      select: { busId: true }
-    }),
+    prisma.gpsLog.findMany({ where: { bus: { schoolId }, timestamp: { gte: fifteenMinsAgo } }, distinct: ['busId'], select: { busId: true } }),
     prisma.bus.count({ where: { schoolId, createdAt: { gte: thirtyDaysAgo } } }),
     prisma.student.count({ where: { schoolId, createdAt: { gte: thirtyDaysAgo } } }),
-    prisma.route.aggregate({
-      _avg: { estimatedDuration: true },
-      where: { schoolId }
-    }),
-    prisma.route.findFirst({
-      where: { schoolId, estimatedDuration: { not: null } },
-      orderBy: { estimatedDuration: 'asc' }
-    }),
-    prisma.route.count({
-      where: { schoolId, stops: { none: {} } }
-    })
+    prisma.route.aggregate({ _avg: { estimatedDuration: true }, where: { schoolId } }),
+    prisma.route.findFirst({ where: { schoolId, estimatedDuration: { not: null } }, orderBy: { estimatedDuration: 'asc' } }),
+    prisma.route.count({ where: { schoolId, stops: { none: {} } } }),
   ]);
 
   const activeDevices = activeBusesLogs.length;
   const offlineDevices = Math.max(0, totalBuses - activeDevices);
-
   const busesBase = totalBuses - busesThisMonth;
-  const busesGrowthPercent = busesBase > 0 ? Math.round((busesThisMonth / busesBase) * 100) : 12;
-
   const studentsBase = totalStudents - studentsThisMonth;
-  const studentsGrowthPercent = studentsBase > 0 ? Math.round((studentsThisMonth / studentsBase) * 100) : 8;
-
-  const averageRouteDuration = avgDurationRes._avg.estimatedDuration ? Math.round(avgDurationRes._avg.estimatedDuration) : 45;
-  const mostEfficientRoute = minRouteRes ? `${minRouteRes.name} (${minRouteRes.estimatedDuration} mins)` : 'Morning Route A (35 mins)';
-  const pendingOptimizations = unoptimizedRoutesCount;
 
   return {
     totalBuses,
@@ -762,342 +885,274 @@ const getSchoolAdminStats = async (prisma, schoolId) => {
     pendingLeaves,
     activeDevices,
     offlineDevices,
-    busesGrowthPercent,
-    studentsGrowthPercent,
-    averageRouteDuration,
-    mostEfficientRoute,
-    pendingOptimizations
+    busesGrowthPercent: busesBase > 0 ? Math.round((busesThisMonth / busesBase) * 100) : null,
+    studentsGrowthPercent: studentsBase > 0 ? Math.round((studentsThisMonth / studentsBase) * 100) : null,
+    averageRouteDuration: avgDurationRes._avg.estimatedDuration ? Math.round(avgDurationRes._avg.estimatedDuration) : null,
+    mostEfficientRoute: minRouteRes ? `${minRouteRes.name} (${minRouteRes.estimatedDuration} mins)` : null,
+    pendingOptimizations: unoptimizedRoutesCount,
   };
 };
 
-const getSuperAdminStats = async (prisma) => {
+const getSuperAdminStats = async () => {
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-  const [
-    totalSchools,
-    totalBuses,
-    totalStudents,
-    schoolsThisMonth,
-    busesThisMonth,
-    activeLogs
-  ] = await Promise.all([
+  const fifteenMinsAgo = new Date(Date.now() - 15 * 60000);
+  const [totalSchools, totalBuses, totalStudents, schoolsThisMonth, busesThisMonth, activeLogs] = await Promise.all([
     prisma.school.count(),
     prisma.bus.count(),
     prisma.student.count(),
     prisma.school.count({ where: { createdAt: { gte: thirtyDaysAgo } } }),
     prisma.bus.count({ where: { createdAt: { gte: thirtyDaysAgo } } }),
-    prisma.gpsLog.findMany({
-      where: { timestamp: { gte: new Date(Date.now() - 15 * 60000) } },
-      distinct: ['busId'],
-      select: { busId: true }
-    })
+    prisma.gpsLog.findMany({ where: { timestamp: { gte: fifteenMinsAgo } }, distinct: ['busId'], select: { busId: true } }),
   ]);
-
   const activeDevices = activeLogs.length;
-  const offlineDevices = 18; // Placeholder matching UI design constraints
-  const stationaryDevices = totalBuses - offlineDevices - activeDevices > 0 ? (totalBuses - offlineDevices - activeDevices) : 2;
-
+  const offlineDevices = Math.max(0, totalBuses - activeDevices);
   const schoolsBase = totalSchools - schoolsThisMonth;
-  const schoolsGrowthPercent = schoolsBase > 0 ? Math.round((schoolsThisMonth / schoolsBase) * 100) : 3;
-
   const busesBase = totalBuses - busesThisMonth;
-  const busesGrowthPercent = busesBase > 0 ? Math.round((busesThisMonth / busesBase) * 100) : 12;
 
   return {
     totalSchools,
     totalBuses,
-    offlineDevices,
     activeDevices,
-    stationaryDevices,
+    offlineDevices,
+    stationaryDevices: 0, // computed only when driven by real state
     totalStudents,
-    schoolsGrowthPercent,
-    busesGrowthPercent
+    schoolsGrowthPercent: schoolsBase > 0 ? Math.round((schoolsThisMonth / schoolsBase) * 100) : null,
+    busesGrowthPercent: busesBase > 0 ? Math.round((busesThisMonth / busesBase) * 100) : null,
   };
 };
 
 app.get(['/api/admin/stats', '/api/stats'], async (req, res) => {
   try {
     const { role, schoolId } = req.user;
-
-    if (role === 'SCHOOL_ADMIN' && schoolId) {
-      const stats = await getSchoolAdminStats(prisma, schoolId);
-      return res.json(stats);
-    } else {
-      // SUPER ADMIN (Global) STATS
-      const stats = await getSuperAdminStats(prisma);
-      return res.json(stats);
-    }
+    if (role === 'SCHOOL_ADMIN' && schoolId) return res.json(await getSchoolAdminStats(schoolId));
+    if (role === 'SUPER_ADMIN') return res.json(await getSuperAdminStats());
+    return res.status(403).json({ error: 'Forbidden' });
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'stats failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// --- 6. SUPER ADMIN DATA ---
-// School Management
-app.get('/api/schools', async (req, res) => {
+// ─── School directory (SUPER_ADMIN) ───────────────────────
+app.get('/api/schools', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 50;
+    const limit = Math.min(parseInt(req.query.limit) || 50, 200);
     const search = req.query.search || '';
-    
-    const where = search ? { name: { contains: search } } : {};
-    
+    const where = search ? { name: { contains: search, mode: 'insensitive' } } : {};
     const [schools, total] = await Promise.all([
-      prisma.school.findMany({
-        where,
-        skip: (page - 1) * limit,
-        take: limit,
-        orderBy: { createdAt: 'desc' }
-      }),
-      prisma.school.count({ where })
+      prisma.school.findMany({ where, skip: (page - 1) * limit, take: limit, orderBy: { createdAt: 'desc' } }),
+      prisma.school.count({ where }),
     ]);
-    
     res.json({ data: schools, total, page, limit });
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'list schools failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 app.get('/api/schools/:id', async (req, res) => {
   try {
+    if (req.user.role !== 'SUPER_ADMIN' && req.user.schoolId !== req.params.id) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
     const school = await prisma.school.findUnique({ where: { id: req.params.id } });
     if (!school) return res.status(404).json({ error: 'School not found' });
     res.json(school);
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'get school failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-app.post('/api/schools', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
+app.post('/api/schools', authorizeRoles('SUPER_ADMIN'), validate({ body: S.createSchool }), async (req, res) => {
   try {
-    const { name, address, contactPerson, city, state, phone, email } = req.body;
-    const school = await prisma.school.create({ 
-      data: { name, address, contactPerson, city, state, phone, email } 
-    });
+    const school = await prisma.school.create({ data: req.body });
     res.json(school);
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'create school failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-app.put('/api/schools/:id', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
+app.put('/api/schools/:id', authorizeRoles('SUPER_ADMIN'), validate({ body: S.updateSchool }), async (req, res) => {
   try {
-    const { name, address, contactPerson, city, state, phone, email } = req.body;
-    const updateData = {};
-    if (name !== undefined) updateData.name = name;
-    if (address !== undefined) updateData.address = address;
-    if (contactPerson !== undefined) updateData.contactPerson = contactPerson;
-    if (city !== undefined) updateData.city = city;
-    if (state !== undefined) updateData.state = state;
-    if (phone !== undefined) updateData.phone = phone;
-    if (email !== undefined) updateData.email = email;
-
-    const school = await prisma.school.update({
-      where: { id: req.params.id }, 
-      data: updateData
-    });
+    const school = await prisma.school.update({ where: { id: req.params.id }, data: req.body });
     res.json(school);
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'update school failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 app.delete('/api/schools/:id', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
-    // Delete related entities first due to foreign keys, or rely on Prisma cascade if configured.
-    // Assuming simple delete for now, if it fails, cascading needs to be explicitly handled.
     await prisma.school.delete({ where: { id: req.params.id } });
     res.json({ success: true });
-  } catch(err) {
-    console.error(err);
-    res.status(500).json({ error: "Cannot delete school with active associations. Please remove devices and routes first." });
+  } catch (err) {
+    req.log.error({ err }, 'delete school failed');
+    res.status(400).json({ error: 'Cannot delete school with active associations. Remove devices and routes first.' });
   }
 });
 
-// Device Provisioning
-app.get('/api/devices', async (req, res) => {
+// ─── Devices ──────────────────────────────────────────────
+app.get('/api/devices', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 50;
+    const limit = Math.min(parseInt(req.query.limit) || 50, 200);
     const search = req.query.search || '';
-    
     const where = {};
-    if (search) {
-      where.OR = [
-        { licensePlate: { contains: search } },
-        { deviceId: { contains: search } }
-      ];
-    }
-    if (req.query.schoolId !== undefined) {
-      where.schoolId = req.query.schoolId === 'null' ? null : req.query.schoolId;
-    }
-
+    if (search) where.OR = [{ licensePlate: { contains: search } }, { deviceId: { contains: search } }];
+    if (req.user.role === 'SCHOOL_ADMIN') where.schoolId = req.user.schoolId;
+    else if (req.query.schoolId !== undefined) where.schoolId = req.query.schoolId === 'null' ? null : req.query.schoolId;
     const [devices, total] = await Promise.all([
-      prisma.bus.findMany({
-        where,
-        include: { school: { select: { name: true } } },
-        skip: (page - 1) * limit,
-        take: limit,
-        orderBy: { licensePlate: 'asc' }
-      }),
-      prisma.bus.count({ where })
+      prisma.bus.findMany({ where, include: { school: { select: { name: true } } }, skip: (page - 1) * limit, take: limit, orderBy: { licensePlate: 'asc' } }),
+      prisma.bus.count({ where }),
     ]);
-    
-    res.json({ data: devices, total, page, limit });
+    // Never return deviceSecret over the wire
+    const scrubbed = devices.map(({ deviceSecret, ...rest }) => rest);
+    res.json({ data: scrubbed, total, page, limit });
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'list devices failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// Initial Map State & Real-time Status
 app.get('/api/devices/locations', async (req, res) => {
   try {
-    let where = {};
-    if (req.query.schoolId) where.schoolId = req.query.schoolId;
+    const where = {};
+    if (req.user.role === 'SCHOOL_ADMIN') where.schoolId = req.user.schoolId;
+    else if (req.query.schoolId) where.schoolId = req.query.schoolId;
 
-    // Get the most recent GPS log for all buses matching the criteria
     const buses = await prisma.bus.findMany({
       where,
-      include: { 
-        gpsLogs: { orderBy: { timestamp: 'desc' }, take: 1 },
-        school: { select: { name: true } }
-      }
+      include: { gpsLogs: { orderBy: { timestamp: 'desc' }, take: 1 }, school: { select: { name: true } } },
     });
-    // Flatten the response for the map markers
-    const locations = buses.map(bus => ({
-      busId: bus.id,
-      licensePlate: bus.licensePlate,
-      schoolName: bus.school?.name || "Unassigned",
-      lastKnownLat: bus.gpsLogs[0]?.lat || null,
-      lastKnownLng: bus.gpsLogs[0]?.lng || null,
-      speed: bus.gpsLogs[0]?.speed || 0,
-      lastUpdate: bus.gpsLogs[0]?.timestamp || null
-    })).filter(b => b.lastKnownLat !== null);
-
+    const locations = buses
+      .map((b) => ({
+        busId: b.id,
+        licensePlate: b.licensePlate,
+        schoolName: b.school?.name || 'Unassigned',
+        lastKnownLat: b.gpsLogs[0]?.lat || null,
+        lastKnownLng: b.gpsLogs[0]?.lng || null,
+        speed: b.gpsLogs[0]?.speed || 0,
+        lastUpdate: b.gpsLogs[0]?.timestamp || null,
+      }))
+      .filter((b) => b.lastKnownLat !== null);
     res.json(locations);
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'list locations failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-app.get('/api/devices/:id', async (req, res) => {
+app.get('/api/devices/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), async (req, res) => {
   try {
     const device = await prisma.bus.findUnique({
       where: { id: req.params.id },
-      include: { school: { select: { name: true } } }
+      include: { school: { select: { name: true } } },
     });
     if (!device) return res.status(404).json({ error: 'Device not found' });
-    res.json(device);
+    if (req.user.role === 'SCHOOL_ADMIN' && device.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
+    const { deviceSecret, ...rest } = device;
+    res.json(rest);
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'get device failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-app.post('/api/devices', async (req, res) => {
+app.post('/api/devices', authorizeRoles('SUPER_ADMIN'), validate({ body: S.createDevice }), async (req, res) => {
   try {
     const { deviceId, licensePlate, capacity, schoolId } = req.body;
-    // Note: schoolId is now optional, so it can be unassigned (null)
+    // Auto-generate device secret for HMAC
+    const deviceSecret = crypto.randomBytes(32).toString('hex');
     const device = await prisma.bus.create({
-      data: { deviceId, licensePlate, capacity: capacity || 40, schoolId: schoolId || null }
+      data: { deviceId, licensePlate, capacity: capacity || 40, schoolId: schoolId || null, deviceSecret },
     });
-    io.emit('device_status_change', { deviceId: device.id, status: 'ONLINE', message: 'New device provisioned' });
-    res.json(device);
+    emitToSchool(io, device.schoolId, 'device_status_change', { deviceId: device.id, status: 'ONLINE', message: 'New device provisioned' });
+    // Return the secret ONCE on creation so ops can flash it to the device
+    res.json({ ...device, deviceSecret });
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'create device failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-app.put('/api/devices/:id', async (req, res) => {
+app.put('/api/devices/:id', authorizeRoles('SUPER_ADMIN'), validate({ body: S.updateDevice }), async (req, res) => {
   try {
-    const { deviceId, licensePlate, capacity, schoolId } = req.body;
-    const device = await prisma.bus.update({
-      where: { id: req.params.id }, data: { deviceId, licensePlate, capacity, schoolId }
-    });
-    io.emit('device_status_change', { deviceId: device.id, status: 'ONLINE', message: 'Device updated' });
-    res.json(device);
+    const { deviceSecret, ...safeBody } = req.body || {};
+    const device = await prisma.bus.update({ where: { id: req.params.id }, data: safeBody });
+    emitToSchool(io, device.schoolId, 'device_status_change', { deviceId: device.id, status: 'ONLINE', message: 'Device updated' });
+    const { deviceSecret: _s, ...rest } = device;
+    res.json(rest);
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'update device failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-app.delete('/api/devices/:id', async (req, res) => {
+app.post('/api/devices/:id/rotate-secret', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
+  try {
+    const deviceSecret = crypto.randomBytes(32).toString('hex');
+    const device = await prisma.bus.update({ where: { id: req.params.id }, data: { deviceSecret } });
+    res.json({ deviceId: device.id, deviceSecret });
+  } catch (err) {
+    req.log.error({ err }, 'rotate device secret failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.delete('/api/devices/:id', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     await prisma.bus.delete({ where: { id: req.params.id } });
-    io.emit('device_status_change', { deviceId: req.params.id, status: 'OFFLINE', message: 'Device decommissioned' });
+    emitToSchool(io, null, 'device_status_change', { deviceId: req.params.id, status: 'OFFLINE', message: 'Device decommissioned' });
     res.json({ success: true });
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'delete device failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-
-
-// Advanced System Logs
+// ─── Admin (super-admin) endpoints ────────────────────────
 app.get('/api/admin/logs', async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 100;
+    const limit = Math.min(parseInt(req.query.limit) || 100, 500);
     const { busId, schoolId, startDate } = req.query;
-    
-    // Build filter
-    let where = {};
+    const where = {};
     if (busId) where.busId = busId;
     if (schoolId) where.bus = { schoolId };
     if (startDate) where.timestamp = { gte: new Date(startDate) };
-    
-    // Fetch logs with pagination
+    // SCHOOL_ADMIN sees only their own school
+    if (req.user.role === 'SCHOOL_ADMIN') where.bus = { schoolId: req.user.schoolId };
     const [logs, total] = await Promise.all([
-      prisma.gpsLog.findMany({
-        where,
-        orderBy: { timestamp: 'desc' },
-        skip: (page - 1) * limit,
-        take: limit,
-        include: { bus: { select: { licensePlate: true } } }
-      }),
-      prisma.gpsLog.count({ where })
+      prisma.gpsLog.findMany({ where, orderBy: { timestamp: 'desc' }, skip: (page - 1) * limit, take: limit, include: { bus: { select: { licensePlate: true } } } }),
+      prisma.gpsLog.count({ where }),
     ]);
-    
     res.json({ data: logs, total, page, limit });
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'list logs failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// Admins Management
+// Admin management
 app.get('/api/admins', async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 50;
+    const limit = Math.min(parseInt(req.query.limit) || 50, 200);
     const { role, schoolId } = req.query;
-
-    let where = { role: { in: ['SUPER_ADMIN', 'SCHOOL_ADMIN'] } };
+    const where = { role: { in: ['SUPER_ADMIN', 'SCHOOL_ADMIN'] } };
     if (role) where.role = role;
     if (schoolId) where.schoolId = schoolId;
-
     const [admins, total] = await Promise.all([
-      prisma.user.findMany({
-        where,
-        select: { id: true, name: true, email: true, role: true, schoolId: true, createdAt: true },
-        skip: (page - 1) * limit,
-        take: limit,
-        orderBy: { createdAt: 'desc' }
-      }),
-      prisma.user.count({ where })
+      prisma.user.findMany({ where, select: { id: true, name: true, email: true, role: true, schoolId: true, createdAt: true }, skip: (page - 1) * limit, take: limit, orderBy: { createdAt: 'desc' } }),
+      prisma.user.count({ where }),
     ]);
     res.json({ data: admins, total, page, limit });
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'list admins failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -1106,311 +1161,198 @@ app.get('/api/admins/:id', async (req, res) => {
   try {
     const admin = await prisma.user.findUnique({
       where: { id: req.params.id },
-      select: { id: true, name: true, email: true, role: true, schoolId: true, createdAt: true }
+      select: { id: true, name: true, email: true, role: true, schoolId: true, createdAt: true },
     });
     if (!admin) return res.status(404).json({ error: 'Admin not found' });
     res.json(admin);
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'get admin failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-app.post('/api/admins', async (req, res) => {
+app.post('/api/admins', validate({ body: S.createAdmin }), async (req, res) => {
   try {
     const { name, email, password, role, schoolId } = req.body;
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const hashed = await bcrypt.hash(password, 10);
     const admin = await prisma.user.create({
-      data: { name, email, password: hashedPassword, role, schoolId },
-      select: { id: true, name: true, email: true, role: true }
+      data: { name, email, password: hashed, role, schoolId },
+      select: { id: true, name: true, email: true, role: true, schoolId: true },
     });
     res.json(admin);
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'create admin failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-app.put('/api/admins/:id', async (req, res) => {
+app.put('/api/admins/:id', validate({ body: S.updateAdmin }), async (req, res) => {
   try {
-    const updateData = {
-      name: req.body.name,
-      email: req.body.email,
-      role: req.body.role,
-      schoolId: req.body.schoolId
-    };
-    if (req.body.password) {
-      updateData.password = await bcrypt.hash(req.body.password, 10);
+    // Self-elevation guard: role/schoolId changes require SUPER_ADMIN AND are not self-modifications
+    // that grant more power than the caller has.
+    if (req.body.role || req.body.schoolId !== undefined) {
+      if (req.user.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: 'Only SUPER_ADMIN may change role or school assignment' });
+      }
+      if (req.params.id === req.user.id && req.body.role && req.body.role !== req.user.role) {
+        return res.status(403).json({ error: 'Cannot change your own role' });
+      }
     }
-    
+    const data = { ...req.body };
+    if (data.password) data.password = await bcrypt.hash(data.password, 10);
     const admin = await prisma.user.update({
-      where: { id: req.params.id }, 
-      data: updateData,
-      select: { id: true, name: true, email: true, role: true }
+      where: { id: req.params.id },
+      data,
+      select: { id: true, name: true, email: true, role: true, schoolId: true },
     });
     res.json(admin);
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'update admin failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 app.delete('/api/admins/:id', async (req, res) => {
   try {
+    if (req.params.id === req.user.id) return res.status(403).json({ error: 'Cannot delete yourself' });
     await prisma.user.delete({ where: { id: req.params.id } });
     res.json({ success: true });
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'delete admin failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// Settings Management
-app.get('/api/settings', async (req, res) => {
+// ─── Settings ─────────────────────────────────────────────
+app.get('/api/settings', async (_req, res) => {
   try {
-    let settings = await prisma.globalSettings.findUnique({ where: { id: "global" } });
-    if (!settings) {
-      settings = await prisma.globalSettings.create({ data: { id: "global" } });
-    }
+    let settings = await prisma.globalSettings.findUnique({ where: { id: 'global' } });
+    if (!settings) settings = await prisma.globalSettings.create({ data: { id: 'global' } });
     res.json(settings);
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-app.put('/api/settings', async (req, res) => {
+app.put('/api/settings', validate({ body: S.globalSettings }), async (req, res) => {
   try {
-    const { maintenanceMode, mapCenterLat, mapCenterLng } = req.body;
-    const settingsData = { maintenanceMode, mapCenterLat, mapCenterLng };
     const settings = await prisma.globalSettings.upsert({
-      where: { id: "global" },
-      update: settingsData,
-      create: { id: "global", ...settingsData }
+      where: { id: 'global' },
+      update: req.body,
+      create: { id: 'global', ...req.body },
     });
     res.json(settings);
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// Global Search API
+// ─── Global search ────────────────────────────────────────
 app.get('/api/search', async (req, res) => {
   try {
-    const q = req.query.q || '';
-    if (!q) {
-      return res.json({ results: [], schools: [], devices: [], admins: [] });
-    }
-
+    const q = String(req.query.q || '').trim();
+    if (!q) return res.json({ results: [], schools: [], devices: [], admins: [] });
     const { role, schoolId } = req.user;
 
     if (role === 'SCHOOL_ADMIN' && schoolId) {
-      // SCHOOL ADMIN SEARCH (Students, Drivers, Buses, Routes)
       const [students, drivers, buses, routes] = await Promise.all([
-        prisma.student.findMany({
-          where: { schoolId, name: { contains: q } },
-          include: { routeMappings: { include: { routeStop: { include: { route: true } } } } },
-          take: 10
-        }),
-        prisma.user.findMany({
-          where: { schoolId, role: 'DRIVER', name: { contains: q } },
-          include: { driverTrips: { include: { bus: true } } },
-          take: 10
-        }),
-        prisma.bus.findMany({
-          where: { schoolId, licensePlate: { contains: q } },
-          take: 10
-        }),
-        prisma.route.findMany({
-          where: { schoolId, name: { contains: q } },
-          take: 10
-        })
+        prisma.student.findMany({ where: { schoolId, name: { contains: q } }, include: { routeMappings: { include: { routeStop: { include: { route: true } } } } }, take: 10 }),
+        prisma.user.findMany({ where: { schoolId, role: 'DRIVER', name: { contains: q } }, include: { driverTrips: { include: { bus: true } } }, take: 10 }),
+        prisma.bus.findMany({ where: { schoolId, licensePlate: { contains: q } }, take: 10 }),
+        prisma.route.findMany({ where: { schoolId, name: { contains: q } }, take: 10 }),
       ]);
-
       const results = [];
-      students.forEach(s => {
-        const routeName = s.routeMappings[0]?.routeStop?.route?.name || 'Unassigned Route';
-        results.push({ id: s.id, type: 'student', name: s.name, detail: `Grade: ${s.grade || 'N/A'} | ${routeName}` });
-      });
-      drivers.forEach(d => {
-        const activeTrip = d.driverTrips[0];
-        const detail = activeTrip ? `Assigned to Bus: ${activeTrip.bus?.licensePlate}` : 'Idle / Unassigned';
-        results.push({ id: d.id, type: 'driver', name: d.name, detail });
-      });
-      buses.forEach(b => {
-        results.push({ id: b.id, type: 'bus', name: b.licensePlate, detail: `Capacity: ${b.capacity} | Device: ${b.deviceId}` });
-      });
-      routes.forEach(r => {
-        results.push({ id: r.id, type: 'route', name: r.name, detail: `Est Duration: ${r.estimatedDuration || 0} mins` });
-      });
-
+      students.forEach((s) => results.push({ id: s.id, type: 'student', name: s.name, detail: `Grade: ${s.grade || 'N/A'} | ${s.routeMappings[0]?.routeStop?.route?.name || 'Unassigned Route'}` }));
+      drivers.forEach((d) => results.push({ id: d.id, type: 'driver', name: d.name, detail: d.driverTrips[0] ? `Assigned to Bus: ${d.driverTrips[0].bus?.licensePlate}` : 'Idle / Unassigned' }));
+      buses.forEach((b) => results.push({ id: b.id, type: 'bus', name: b.licensePlate, detail: `Capacity: ${b.capacity} | Device: ${b.deviceId}` }));
+      routes.forEach((r) => results.push({ id: r.id, type: 'route', name: r.name, detail: `Est Duration: ${r.estimatedDuration || 0} mins` }));
       return res.json({ results });
-    } else {
-      // SUPER ADMIN SEARCH (Schools, Devices, Admins)
-      const [schools, devices, admins] = await Promise.all([
-        prisma.school.findMany({
-          where: {
-            OR: [
-              { name: { contains: q } },
-              { city: { contains: q } },
-              { state: { contains: q } }
-            ]
-          },
-          take: 20
-        }),
-        prisma.bus.findMany({
-          where: {
-            OR: [
-              { licensePlate: { contains: q } },
-              { deviceId: { contains: q } }
-            ]
-          },
-          take: 20
-        }),
-        prisma.user.findMany({
-          where: {
-            role: { in: ['SUPER_ADMIN', 'SCHOOL_ADMIN'] },
-            OR: [
-              { name: { contains: q } },
-              { email: { contains: q } }
-            ]
-          },
-          select: { id: true, name: true, email: true, role: true },
-          take: 20
-        })
-      ]);
+    }
 
+    if (role === 'SUPER_ADMIN') {
+      const [schools, devices, admins] = await Promise.all([
+        prisma.school.findMany({ where: { OR: [{ name: { contains: q } }, { city: { contains: q } }, { state: { contains: q } }] }, take: 20 }),
+        prisma.bus.findMany({ where: { OR: [{ licensePlate: { contains: q } }, { deviceId: { contains: q } }] }, take: 20, select: { id: true, licensePlate: true, deviceId: true, capacity: true, schoolId: true, createdAt: true, updatedAt: true } }),
+        prisma.user.findMany({ where: { role: { in: ['SUPER_ADMIN', 'SCHOOL_ADMIN'] }, OR: [{ name: { contains: q } }, { email: { contains: q } }] }, select: { id: true, name: true, email: true, role: true }, take: 20 }),
+      ]);
       return res.json({ schools, devices, admins, results: [] });
     }
+
+    return res.status(403).json({ error: 'Forbidden' });
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'search failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// Notifications API
+// ─── Notifications ────────────────────────────────────────
 app.get('/api/notifications', async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit) || 20;
+    const limit = Math.min(parseInt(req.query.limit) || 20, 200);
     const { id: userId, role } = req.user;
 
     if (role === 'SUPER_ADMIN') {
-      // Super Admin notifications (SOS + System warnings)
-      const realAlerts = await prisma.emergencyAlert.findMany({
-        orderBy: { createdAt: 'desc' },
-        take: limit
-      });
-
-      const formattedRealAlerts = realAlerts.map(alert => ({
-        id: alert.id,
-        type: 'DRIVER_SOS',
-        title: 'Emergency SOS',
-        message: alert.message || 'Driver triggered SOS alert',
-        status: alert.status,
-        isRead: alert.status === 'RESOLVED',
-        createdAt: alert.createdAt
+      const realAlerts = await prisma.emergencyAlert.findMany({ orderBy: { createdAt: 'desc' }, take: limit });
+      const formatted = realAlerts.map((a) => ({
+        id: a.id, type: 'DRIVER_SOS', title: 'Emergency SOS',
+        message: a.message || 'Driver triggered SOS alert',
+        status: a.status, isRead: a.status === 'RESOLVED', createdAt: a.createdAt,
       }));
-
-      const simulatedAlerts = getSimulatedAlerts();
-
-      const allAlerts = [...formattedRealAlerts, ...simulatedAlerts]
-        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-        .slice(0, limit);
-
-      return res.json(allAlerts);
-    } else {
-      // SCHOOL_ADMIN & PARENT notifications (targeted at user ID)
-      let notifications = await prisma.notification.findMany({
-        where: { userId },
-        orderBy: { createdAt: 'desc' },
-        take: limit
-      });
-
-      // Inject mock notifications if database is empty for testing UI bell dropdown
-      if (notifications.length === 0) {
-        notifications = getMockNotifications(userId);
+      if (config.ENABLE_MOCK_DATA) {
+        const sim = getSimulatedAlerts();
+        return res.json([...formatted, ...sim].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, limit));
       }
-
-      return res.json(notifications);
+      return res.json(formatted);
     }
+
+    let notifications = await prisma.notification.findMany({ where: { userId }, orderBy: { createdAt: 'desc' }, take: limit });
+    if (notifications.length === 0 && config.ENABLE_MOCK_DATA) {
+      notifications = getMockNotifications(userId);
+    }
+    res.json(notifications);
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'list notifications failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// Mark All Notifications as Read
 app.post('/api/notifications/mark-read', async (req, res) => {
   try {
-    const { id: userId } = req.user;
-    await prisma.notification.updateMany({
-      where: { userId },
-      data: { isRead: true }
-    });
-    res.json({ success: true, message: 'All notifications marked as read' });
+    await prisma.notification.updateMany({ where: { userId: req.user.id }, data: { isRead: true } });
+    res.json({ success: true });
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// Mark Single Notification as Read
 app.post('/api/notifications/:id/read', async (req, res) => {
   try {
     const { id } = req.params;
-    if (id.startsWith('mock-') || id.startsWith('sys-')) {
-      return res.json({ success: true, id, isRead: true });
-    }
-
-    try {
-      const updatedNotif = await prisma.notification.update({
-        where: { id },
-        data: { isRead: true }
-      });
-      return res.json({ success: true, id: updatedNotif.id, isRead: updatedNotif.isRead });
-    } catch (dbErr) {
-      return res.status(404).json({ error: 'Notification not found' });
-    }
+    if (id.startsWith('mock-') || id.startsWith('sys-')) return res.json({ success: true, id, isRead: true });
+    const notif = await prisma.notification.findUnique({ where: { id } });
+    if (!notif) return res.status(404).json({ error: 'Notification not found' });
+    if (notif.userId !== req.user.id && req.user.role !== 'SUPER_ADMIN') return res.status(403).json({ error: 'Forbidden' });
+    const updated = await prisma.notification.update({ where: { id }, data: { isRead: true } });
+    res.json({ success: true, id: updated.id, isRead: updated.isRead });
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'mark read failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// Resolve Notification API
-app.post('/api/notifications/:id/resolve', async (req, res) => {
+app.post('/api/notifications/:id/resolve', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), async (req, res) => {
   try {
     const { id } = req.params;
-    
-    // If it's a simulated alert, return success instantly
-    if (id.startsWith('sys-') || id.startsWith('mock-')) {
-      return res.json({ success: true, id, status: 'RESOLVED' });
-    }
-
-    // Try to update the real database alert
-    try {
-      const updatedAlert = await prisma.emergencyAlert.update({
-        where: { id },
-        data: { status: 'RESOLVED' }
-      });
-      return res.json({ success: true, id: updatedAlert.id, status: updatedAlert.status });
-    } catch (dbErr) {
-      return res.status(404).json({ error: 'Alert not found' });
-    }
+    if (id.startsWith('sys-') || id.startsWith('mock-')) return res.json({ success: true, id, status: 'RESOLVED' });
+    const alert = await prisma.emergencyAlert.findUnique({ where: { id } });
+    if (!alert) return res.status(404).json({ error: 'Alert not found' });
+    if (req.user.role === 'SCHOOL_ADMIN' && alert.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
+    const updated = await prisma.emergencyAlert.update({ where: { id }, data: { status: 'RESOLVED' } });
+    res.json({ success: true, id: updated.id, status: updated.status });
   } catch (err) {
-    console.error(err);
+    req.log.error({ err }, 'resolve alert failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-
-io.on('connection', (socket) => {
-  console.log('New Client Connected:', socket.id);
-});
-
-if (require.main === module) {
-  const PORT = process.env.PORT || 3000;
-  server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-}
 
 module.exports = { app, server, io, prisma };

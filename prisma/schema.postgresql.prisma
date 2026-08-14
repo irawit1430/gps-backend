@@ -8,29 +8,81 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ─── Enums ──────────────────────────────────────────────────────────────
+enum Role {
+  SUPER_ADMIN
+  SCHOOL_ADMIN
+  DRIVER
+  PARENT
+}
+
+enum TripStatus {
+  PLANNED
+  ON_SCHEDULE
+  DELAYED
+  COMPLETED
+  CANCELLED
+}
+
+enum LeaveStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum AttendanceType {
+  BOARDED
+  ALIGHTED
+}
+
+enum EmergencyType {
+  DRIVER_SOS
+  HARDWARE_SOS
+  ADMIN_BROADCAST
+  DELAY
+}
+
+enum EmergencyStatus {
+  ACTIVE
+  RESOLVED
+}
+
+enum NotificationType {
+  ARRIVAL
+  BOARDING
+  DELAY
+  SYSTEM
+  LEAVE
+  SOS
+}
+
+// ─── Models ─────────────────────────────────────────────────────────────
 model User {
   id                   String   @id @default(uuid())
   email                String   @unique
   password             String
-  role                 String // "SUPER_ADMIN", "SCHOOL_ADMIN", "DRIVER", "PARENT"
+  role                 Role
   name                 String
   photoUrl             String?
-  notificationSettings String? // JSON string storing toggle states
+  notificationSettings Json?
+  mustResetPassword    Boolean  @default(false)
   schoolId             String?
   school               School?  @relation(fields: [schoolId], references: [id])
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
 
-  // Relational mappings
-  parentStudents Student[]       @relation("ParentStudents")
-  driverTrips    Trip[]          @relation("DriverTrips")
+  parentStudents Student[]      @relation("ParentStudents")
+  driverTrips    Trip[]         @relation("DriverTrips")
   notifications  Notification[]
-  createdAt      DateTime        @default(now())
-  updatedAt      DateTime        @updatedAt
+
+  @@index([schoolId])
+  @@index([role])
 }
 
 model School {
   id            String   @id @default(uuid())
   name          String
-  address       String
+  address       String?
   contactPerson String?
   city          String?
   state         String?
@@ -39,10 +91,10 @@ model School {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
-  users         User[]
-  buses         Bus[]
-  routes        Route[]
-  students      Student[]
+  users    User[]
+  buses    Bus[]
+  routes   Route[]
+  students Student[]
 }
 
 model Bus {
@@ -51,12 +103,15 @@ model Bus {
   school       School?  @relation(fields: [schoolId], references: [id])
   licensePlate String   @unique
   capacity     Int
-  deviceId     String?  @unique // Blackbox TM-100 Hardware Tracker IMEI
+  deviceId     String   @unique
+  deviceSecret String?  // HMAC secret for /api/telemetry authentication
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
   trips   Trip[]
   gpsLogs GpsLog[]
+
+  @@index([schoolId])
 }
 
 model Route {
@@ -64,12 +119,14 @@ model Route {
   schoolId          String
   school            School   @relation(fields: [schoolId], references: [id])
   name              String
-  estimatedDuration Int?     // Estimated travel time in minutes
+  estimatedDuration Int?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
   stops RouteStop[]
   trips Trip[]
+
+  @@index([schoolId])
 }
 
 model RouteStop {
@@ -84,6 +141,8 @@ model RouteStop {
   updatedAt DateTime @updatedAt
 
   studentMappings StudentRouteMapping[]
+
+  @@index([routeId, orderIdx])
 }
 
 model Student {
@@ -102,87 +161,126 @@ model Student {
   routeMappings     StudentRouteMapping[]
   attendanceLogs    AttendanceLog[]
   leaveApplications LeaveApplication[]
+
+  @@index([schoolId])
+  @@index([parentId])
 }
 
 model StudentRouteMapping {
   id          String    @id @default(uuid())
   studentId   String
-  student     Student   @relation(fields: [studentId], references: [id])
+  student     Student   @relation(fields: [studentId], references: [id], onDelete: Cascade)
   routeStopId String
-  routeStop   RouteStop @relation(fields: [routeStopId], references: [id])
+  routeStop   RouteStop @relation(fields: [routeStopId], references: [id], onDelete: Cascade)
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
   @@unique([studentId, routeStopId])
+  @@index([routeStopId])
 }
 
 model Trip {
-  id        String   @id @default(uuid())
-  routeId   String
-  route     Route    @relation(fields: [routeId], references: [id])
-  busId     String
-  bus       Bus      @relation(fields: [busId], references: [id])
-  driverId  String
-  driver    User     @relation("DriverTrips", fields: [driverId], references: [id])
-  status    String   // "PLANNED", "ON_SCHEDULE", "DELAYED", "COMPLETED"
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                String     @id @default(uuid())
+  routeId           String
+  route             Route      @relation(fields: [routeId], references: [id])
+  busId             String
+  bus               Bus        @relation(fields: [busId], references: [id])
+  driverId          String
+  driver            User       @relation("DriverTrips", fields: [driverId], references: [id])
+  status            TripStatus @default(PLANNED)
+  progressPercent   Int        @default(0)
+  delayMinutes      Int        @default(0)
+  currentEtaMessage String?
+  startTime         DateTime?
+  endTime           DateTime?
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
 
   gpsLogs        GpsLog[]
   attendanceLogs AttendanceLog[]
+
+  @@index([driverId, status])
+  @@index([busId, status])
+  @@index([routeId, status])
 }
 
 model GpsLog {
   id        String   @id @default(uuid())
   busId     String
-  bus       Bus      @relation(fields: [busId], references: [id])
+  bus       Bus      @relation(fields: [busId], references: [id], onDelete: Cascade)
   tripId    String?
   trip      Trip?    @relation(fields: [tripId], references: [id])
   lat       Float
   lng       Float
-  speed     Float
+  speed     Float    @default(0)
   timestamp DateTime @default(now())
+
+  @@index([busId, timestamp(sort: Desc)])
+  @@index([timestamp])
 }
 
 model AttendanceLog {
-  id        String   @id @default(uuid())
+  id        String         @id @default(uuid())
   studentId String
-  student   Student  @relation(fields: [studentId], references: [id])
+  student   Student        @relation(fields: [studentId], references: [id])
   tripId    String
-  trip      Trip     @relation(fields: [tripId], references: [id])
-  type      String   // "BOARDED", "LEFT"
-  timestamp DateTime @default(now())
+  trip      Trip           @relation(fields: [tripId], references: [id])
+  type      AttendanceType
+  timestamp DateTime       @default(now())
+
+  @@index([studentId, timestamp])
+  @@index([tripId, timestamp])
 }
 
 model LeaveApplication {
-  id        String   @id @default(uuid())
+  id        String      @id @default(uuid())
   studentId String
-  student   Student  @relation(fields: [studentId], references: [id])
+  student   Student     @relation(fields: [studentId], references: [id])
   startDate DateTime
   endDate   DateTime
   reason    String
-  status    String   // "PENDING", "APPROVED", "REJECTED"
   notes     String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}
+  status    LeaveStatus @default(PENDING)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
 
-model Notification {
-  id        String   @id @default(uuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id])
-  title     String
-  message   String
-  isRead    Boolean  @default(false)
-  status    String   @default("ACTIVE") // "ACTIVE", "RESOLVED"
-  createdAt DateTime @default(now())
+  @@index([studentId, status])
+  @@index([status, createdAt(sort: Desc)])
 }
 
 model EmergencyAlert {
-  id        String   @id @default(uuid())
+  id        String          @id @default(uuid())
   schoolId  String
-  type      String   // "HARDWARE_SOS", "DRIVER_SOS", "DELAY"
+  type      EmergencyType
+  message   String?
+  senderId  String?
+  tripId    String?
+  status    EmergencyStatus @default(ACTIVE)
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  @@index([schoolId, status])
+  @@index([createdAt(sort: Desc)])
+}
+
+model Notification {
+  id        String           @id @default(uuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
   message   String
-  status    String   @default("ACTIVE") // "ACTIVE", "RESOLVED"
-  createdAt DateTime @default(now())
+  type      NotificationType @default(SYSTEM)
+  isRead    Boolean          @default(false)
+  createdAt DateTime         @default(now())
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([userId, isRead])
+}
+
+model GlobalSettings {
+  id              String   @id @default("global")
+  maintenanceMode Boolean  @default(false)
+  mapCenterLat    Float    @default(28.7041)
+  mapCenterLng    Float    @default(77.1025)
+  updatedAt       DateTime @updatedAt
 }

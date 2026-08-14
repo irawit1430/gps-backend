@@ -1,45 +1,19 @@
 const { initializeApp, cert, getApps } = require('firebase-admin/app');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { getMessaging } = require('firebase-admin/messaging');
-const fs = require('fs');
-const path = require('path');
-require('dotenv').config();
+const config = require('./config');
+const logger = require('./logger');
 
 let serviceAccount = null;
 
-// 1. Try reading from FIREBASE_SERVICE_ACCOUNT environment variable (JSON string or base64)
-if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+if (config.FIREBASE_SERVICE_ACCOUNT) {
   try {
-    const rawEnv = process.env.FIREBASE_SERVICE_ACCOUNT.trim();
-    if (rawEnv.startsWith('{')) {
-      serviceAccount = JSON.parse(rawEnv);
-    } else {
-      // Decode Base64 string
-      const decoded = Buffer.from(rawEnv, 'base64').toString('utf8');
-      serviceAccount = JSON.parse(decoded);
-    }
+    const raw = config.FIREBASE_SERVICE_ACCOUNT.trim();
+    serviceAccount = raw.startsWith('{')
+      ? JSON.parse(raw)
+      : JSON.parse(Buffer.from(raw, 'base64').toString('utf8'));
   } catch (err) {
-    console.warn('[Firebase] Failed to parse FIREBASE_SERVICE_ACCOUNT env var:', err.message);
-  }
-}
-
-// 2. Fallback to local service account key file
-if (!serviceAccount) {
-  const possiblePaths = [
-    path.join(__dirname, 'firebase-key.json'),
-    'C:\\Users\\ANURAG TIWARI\\Downloads\\lost-and-found-29d1f-firebase-adminsdk-fbsvc-9d5054f63d.json'
-  ];
-
-  for (const p of possiblePaths) {
-    if (fs.existsSync(p)) {
-      try {
-        serviceAccount = JSON.parse(fs.readFileSync(p, 'utf8'));
-        console.log(`[Firebase] Loaded Service Account Key from: ${p}`);
-        break;
-      } catch (err) {
-        console.warn(`[Firebase] Error reading key file ${p}:`, err.message);
-      }
-    }
+    logger.warn({ err: err.message }, 'FIREBASE_SERVICE_ACCOUNT parse failed');
   }
 }
 
@@ -50,96 +24,153 @@ let messaging = null;
 if (serviceAccount) {
   try {
     const apps = getApps();
-    if (!apps.length) {
-      app = initializeApp({
-        credential: cert(serviceAccount),
-        projectId: serviceAccount.project_id || 'lost-and-found-29d1f'
-      });
-    } else {
-      app = apps[0];
-    }
+    app = apps.length
+      ? apps[0]
+      : initializeApp({ credential: cert(serviceAccount), projectId: serviceAccount.project_id });
     db = getFirestore(app);
     messaging = getMessaging(app);
-    console.log(`[Firebase] Cloud Firestore & FCM initialized for project: ${serviceAccount.project_id}`);
+    logger.info({ projectId: serviceAccount.project_id }, 'Firebase initialized');
   } catch (err) {
-    console.error('[Firebase] Initialization error:', err.message);
+    logger.error({ err: err.message }, 'Firebase initialization failed');
   }
 } else {
-  console.warn('[Firebase] No Service Account credentials found. Firestore cloud sync will be disabled.');
+  logger.warn('Firebase disabled — no FIREBASE_SERVICE_ACCOUNT configured');
 }
 
-/**
- * Sync GPS location telemetry log to Firestore
- */
-async function syncGpsLogToFirebase(data) {
-  if (!db) return;
-  try {
-    // 1. Add log to 'gps_logs' collection
-    await db.collection('gps_logs').add({
-      busId: data.busId || 'unknown',
-      licensePlate: data.licensePlate || 'unassigned',
-      lat: data.lat,
-      lng: data.lng,
-      speed: data.speed || 0.0,
-      timestamp: data.timestamp ? new Date(data.timestamp).toISOString() : new Date().toISOString(),
-      createdAt: FieldValue.serverTimestamp()
-    });
-
-    // 2. Update latest location in 'buses' collection
-    if (data.busId) {
-      await db.collection('buses').doc(data.busId).set({
-        busId: data.busId,
-        licensePlate: data.licensePlate || 'unassigned',
-        lastKnownLat: data.lat,
-        lastKnownLng: data.lng,
-        speed: data.speed || 0.0,
-        status: 'ONLINE',
-        lastUpdate: FieldValue.serverTimestamp()
-      }, { merge: true });
+// ─── Retry helper ──────────────────────────────────────────
+async function withRetry(fn, attempts = 3, baseDelayMs = 200) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      await new Promise((r) => setTimeout(r, baseDelayMs * 2 ** i));
     }
+  }
+  throw lastErr;
+}
+
+// ─── Per-bus debouncer: coalesce gps_logs writes to at most one per 15s ──
+// The `buses/{id}` merge always runs on every packet (cheap, idempotent).
+const GPS_LOG_INTERVAL_MS = 15000;
+const pendingGpsLogWrites = new Map(); // busId → { timer, latest }
+
+function scheduleGpsLogFlush(busId) {
+  const entry = pendingGpsLogWrites.get(busId);
+  if (!entry || entry.timer) return;
+  entry.timer = setTimeout(async () => {
+    const data = entry.latest;
+    pendingGpsLogWrites.delete(busId);
+    if (!db || !data) return;
+    try {
+      await withRetry(() =>
+        db.collection('gps_logs').add({
+          busId: data.busId,
+          licensePlate: data.licensePlate || 'unassigned',
+          lat: data.lat,
+          lng: data.lng,
+          speed: data.speed || 0,
+          timestamp: data.timestamp ? new Date(data.timestamp).toISOString() : new Date().toISOString(),
+          createdAt: FieldValue.serverTimestamp(),
+        })
+      );
+    } catch (err) {
+      logger.error({ err: err.message, busId }, 'Firestore gps_log write failed after retries');
+    }
+  }, GPS_LOG_INTERVAL_MS);
+}
+
+async function syncGpsLogToFirebase(data) {
+  if (!db || !data?.busId) return;
+
+  // 1. Debounced append to gps_logs
+  const entry = pendingGpsLogWrites.get(data.busId) || { timer: null, latest: null };
+  entry.latest = data;
+  pendingGpsLogWrites.set(data.busId, entry);
+  scheduleGpsLogFlush(data.busId);
+
+  // 2. Always-fresh `buses/{id}` snapshot (single doc merge — cheap & idempotent)
+  try {
+    await withRetry(() =>
+      db.collection('buses').doc(data.busId).set(
+        {
+          busId: data.busId,
+          licensePlate: data.licensePlate || 'unassigned',
+          lastKnownLat: data.lat,
+          lastKnownLng: data.lng,
+          speed: data.speed || 0,
+          status: 'ONLINE',
+          lastUpdate: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      )
+    );
   } catch (err) {
-    console.error('[Firebase Sync Error] GpsLog:', err.message);
+    logger.error({ err: err.message, busId: data.busId }, 'Firestore bus snapshot write failed');
   }
 }
 
-/**
- * Sync Emergency SOS Alert to Firestore
- */
 async function syncEmergencyAlertToFirebase(alertData) {
   if (!db) return;
   try {
-    await db.collection('emergency_alerts').add({
-      schoolId: alertData.schoolId || 'unknown',
-      type: alertData.type || 'HARDWARE_SOS',
-      message: alertData.message || 'SOS Triggered',
-      status: alertData.status || 'ACTIVE',
-      createdAt: FieldValue.serverTimestamp()
-    });
-    console.log('[Firebase Sync] Emergency Alert written to Cloud Firestore');
+    await withRetry(() =>
+      db.collection('emergency_alerts').add({
+        schoolId: alertData.schoolId || 'unknown',
+        type: alertData.type || 'HARDWARE_SOS',
+        message: alertData.message || 'SOS Triggered',
+        status: alertData.status || 'ACTIVE',
+        createdAt: FieldValue.serverTimestamp(),
+      })
+    );
   } catch (err) {
-    console.error('[Firebase Sync Error] EmergencyAlert:', err.message);
+    logger.error({ err: err.message }, 'Firestore emergency alert write failed');
   }
 }
 
-/**
- * Sync Student Profile to Firestore
- */
 async function syncStudentToFirebase(studentData) {
   if (!db) return;
   try {
-    await db.collection('students').doc(studentData.id).set({
-      studentId: studentData.id,
-      schoolId: studentData.schoolId,
-      name: studentData.name,
-      rfidTag: studentData.rfidTag,
-      grade: studentData.grade || 'General',
-      parentId: studentData.parentId || null,
-      updatedAt: FieldValue.serverTimestamp()
-    }, { merge: true });
-    console.log(`[Firebase Sync] Student '${studentData.name}' synced to Cloud Firestore`);
+    await withRetry(() =>
+      db.collection('students').doc(studentData.id).set(
+        {
+          studentId: studentData.id,
+          schoolId: studentData.schoolId,
+          name: studentData.name,
+          rfidTag: studentData.rfidTag,
+          grade: studentData.grade || 'General',
+          parentId: studentData.parentId || null,
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      )
+    );
   } catch (err) {
-    console.error('[Firebase Sync Error] Student:', err.message);
+    logger.error({ err: err.message }, 'Firestore student write failed');
   }
+}
+
+// Flush pending Firestore writes (called during graceful shutdown).
+async function flushFirestore() {
+  for (const [busId, entry] of pendingGpsLogWrites.entries()) {
+    if (entry.timer) clearTimeout(entry.timer);
+    if (db && entry.latest) {
+      try {
+        await db.collection('gps_logs').add({
+          busId: entry.latest.busId,
+          licensePlate: entry.latest.licensePlate || 'unassigned',
+          lat: entry.latest.lat,
+          lng: entry.latest.lng,
+          speed: entry.latest.speed || 0,
+          timestamp: new Date().toISOString(),
+          createdAt: FieldValue.serverTimestamp(),
+        });
+      } catch (err) {
+        logger.warn({ err: err.message, busId }, 'Firestore flush failed');
+      }
+    }
+  }
+  pendingGpsLogWrites.clear();
 }
 
 module.exports = {
@@ -148,5 +179,6 @@ module.exports = {
   messaging,
   syncGpsLogToFirebase,
   syncEmergencyAlertToFirebase,
-  syncStudentToFirebase
+  syncStudentToFirebase,
+  flushFirestore,
 };

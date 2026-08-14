@@ -1,0 +1,31 @@
+# /etc/systemd/system/pm2-voltava.service
+# Idiomatic PM2 startup unit. Install with:
+#   sudo cp deploy/pm2-voltava.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable pm2-voltava
+#   sudo systemctl start pm2-voltava
+
+[Unit]
+Description=PM2 process manager for Voltava Fleet
+Documentation=https://pm2.keymetrics.io/
+After=network.target
+
+[Service]
+Type=forking
+User=voltava
+Group=voltava
+LimitNOFILE=infinity
+LimitNPROC=infinity
+LimitCORE=infinity
+Environment=PATH=/usr/bin:/usr/local/bin:/home/voltava/.npm-global/bin:/home/voltava/.pm2/modules
+Environment=PM2_HOME=/home/voltava/.pm2
+
+ExecStart=/usr/local/bin/pm2 resurrect
+ExecReload=/usr/local/bin/pm2 reload all
+ExecStop=/usr/local/bin/pm2 kill
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

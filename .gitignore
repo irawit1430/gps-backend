@@ -5,3 +5,10 @@ node_modules
 /generated/prisma
 *.db
 *.db-journal
+
+# Secrets / credentials — never commit
+firebase-key.json
+*firebase-adminsdk*.json
+
+# Logs
+*.log

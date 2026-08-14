@@ -23,7 +23,7 @@ function calculateCRC32(msgStr) {
  * @param {string} rawString 
  * @returns {object|null} Parsed packet details
  */
-function parseBlackboxPacket(rawString) {
+function parseBlackboxPacket(rawString, { verifyCrc = false } = {}) {
   if (!rawString || typeof rawString !== 'string') return null;
 
   // Clean string
@@ -34,6 +34,16 @@ function parseBlackboxPacket(rawString) {
   const content = cleaned.endsWith('*') ? cleaned.slice(0, -1) : cleaned;
   const parts = content.split(',');
   if (parts.length === 0) return null;
+
+  // Optional CRC32 verification: last field is expected checksum
+  if (verifyCrc && parts.length >= 2) {
+    const receivedCrc = parts[parts.length - 1];
+    const signedContent = parts.slice(0, -1).join(',');
+    const expected = calculateCRC32(signedContent);
+    if (String(receivedCrc).toUpperCase() !== expected) {
+      return { __crcFailed: true, expected, received: receivedCrc };
+    }
+  }
 
   const header = parts[0];
 

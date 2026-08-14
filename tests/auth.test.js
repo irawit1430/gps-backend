@@ -78,6 +78,7 @@ describe('POST /api/auth/login', () => {
       name: 'Test User',
       email: 'user@test.com',
       schoolId: 10,
+      mustResetPassword: false,
       preferences: {}
     });
 

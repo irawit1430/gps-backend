@@ -1,3 +1,8 @@
+// SQLite schema for local / staging.
+// The canonical schema is prisma/schema.postgresql.prisma.
+// Kept structurally in sync; SQLite lacks Prisma enum + Json support so those
+// fields are String here and validated at the application layer.
+
 generator client {
   provider   = "prisma-client-js"
   engineType = "library"
@@ -12,19 +17,22 @@ model User {
   id                   String   @id @default(uuid())
   email                String   @unique
   password             String
-  role                 String // "SUPER_ADMIN", "SCHOOL_ADMIN", "DRIVER", "PARENT"
+  role                 String // "SUPER_ADMIN" | "SCHOOL_ADMIN" | "DRIVER" | "PARENT"
   name                 String
   photoUrl             String?
-  notificationSettings String? // JSON string storing toggle states
+  notificationSettings String? // JSON string
+  mustResetPassword    Boolean  @default(false)
   schoolId             String?
   school               School?  @relation(fields: [schoolId], references: [id])
   createdAt            DateTime @default(now())
   updatedAt            DateTime @updatedAt
 
-  // Relations for specific roles
   parentStudents Student[]      @relation("ParentStudents")
   driverTrips    Trip[]         @relation("DriverTrips")
   notifications  Notification[]
+
+  @@index([schoolId])
+  @@index([role])
 }
 
 model School {
@@ -51,7 +59,8 @@ model Bus {
   school       School?  @relation(fields: [schoolId], references: [id])
   licensePlate String   @unique
   capacity     Int
-  deviceId     String   @unique // IMEI of TM-100
+  deviceId     String   @unique
+  deviceSecret String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -66,7 +75,7 @@ model Route {
   schoolId          String
   school            School   @relation(fields: [schoolId], references: [id])
   name              String
-  estimatedDuration Int? // In minutes
+  estimatedDuration Int?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
@@ -79,14 +88,17 @@ model Route {
 model RouteStop {
   id        String   @id @default(uuid())
   routeId   String
-  route     Route    @relation(fields: [routeId], references: [id])
+  route     Route    @relation(fields: [routeId], references: [id], onDelete: Cascade)
   name      String
   lat       Float
   lng       Float
   orderIdx  Int
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   studentMappings StudentRouteMapping[]
+
+  @@index([routeId, orderIdx])
 }
 
 model Student {
@@ -113,11 +125,14 @@ model Student {
 model StudentRouteMapping {
   id          String    @id @default(uuid())
   studentId   String
-  student     Student   @relation(fields: [studentId], references: [id])
+  student     Student   @relation(fields: [studentId], references: [id], onDelete: Cascade)
   routeStopId String
-  routeStop   RouteStop @relation(fields: [routeStopId], references: [id])
+  routeStop   RouteStop @relation(fields: [routeStopId], references: [id], onDelete: Cascade)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
   @@unique([studentId, routeStopId])
+  @@index([routeStopId])
 }
 
 model Trip {
@@ -128,22 +143,27 @@ model Trip {
   bus               Bus       @relation(fields: [busId], references: [id])
   driverId          String
   driver            User      @relation("DriverTrips", fields: [driverId], references: [id])
-  status            String    @default("PLANNED") // "PLANNED", "ON_SCHEDULE", "DELAYED", "COMPLETED"
+  status            String    @default("PLANNED")
   progressPercent   Int       @default(0)
   delayMinutes      Int       @default(0)
   currentEtaMessage String?
   startTime         DateTime?
   endTime           DateTime?
   createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
   gpsLogs        GpsLog[]
   attendanceLogs AttendanceLog[]
+
+  @@index([driverId, status])
+  @@index([busId, status])
+  @@index([routeId, status])
 }
 
 model GpsLog {
   id        String   @id @default(uuid())
   busId     String
-  bus       Bus      @relation(fields: [busId], references: [id])
+  bus       Bus      @relation(fields: [busId], references: [id], onDelete: Cascade)
   tripId    String?
   trip      Trip?    @relation(fields: [tripId], references: [id])
   lat       Float
@@ -152,6 +172,7 @@ model GpsLog {
   timestamp DateTime @default(now())
 
   @@index([busId, timestamp(sort: Desc)])
+  @@index([timestamp])
 }
 
 model AttendanceLog {
@@ -160,8 +181,11 @@ model AttendanceLog {
   student   Student  @relation(fields: [studentId], references: [id])
   tripId    String
   trip      Trip     @relation(fields: [tripId], references: [id])
-  type      String // "BOARDED", "ALIGHTED"
+  type      String
   timestamp DateTime @default(now())
+
+  @@index([studentId, timestamp])
+  @@index([tripId, timestamp])
 }
 
 model LeaveApplication {
@@ -171,32 +195,42 @@ model LeaveApplication {
   startDate DateTime
   endDate   DateTime
   reason    String
-  notes     String? // Optional text from parent
-  status    String   @default("PENDING") // PENDING, APPROVED, REJECTED
+  notes     String?
+  status    String   @default("PENDING")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([studentId, status])
+  @@index([status, createdAt(sort: Desc)])
 }
 
 model EmergencyAlert {
   id        String   @id @default(uuid())
   schoolId  String
-  type      String // "DRIVER_SOS", "ADMIN_BROADCAST"
+  type      String
   message   String?
-  senderId  String
+  senderId  String?
   tripId    String?
-  status    String   @default("ACTIVE") // ACTIVE, RESOLVED
+  status    String   @default("ACTIVE")
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([schoolId, status])
+  @@index([createdAt(sort: Desc)])
 }
 
 model Notification {
   id        String   @id @default(uuid())
-  userId    String // Parent ID
-  user      User     @relation(fields: [userId], references: [id])
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   title     String
   message   String
-  type      String // "ARRIVAL", "BOARDING", "DELAY", "SYSTEM"
+  type      String   @default("SYSTEM")
   isRead    Boolean  @default(false)
   createdAt DateTime @default(now())
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([userId, isRead])
 }
 
 model GlobalSettings {

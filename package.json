@@ -1,34 +1,54 @@
 {
   "name": "gps-backend",
   "version": "1.0.0",
-  "description": "",
-  "main": "server.js",
+  "description": "Voltava Fleet - Real-time multi-tenant school bus GPS tracking backend.",
+  "main": "index.js",
+  "engines": {
+    "node": ">=22 <23"
+  },
   "scripts": {
     "start": "node index.js",
-    "build": "npx prisma generate",
-    "db:postgres": "npx prisma db push --schema=prisma/schema.postgresql.prisma",
-    "db:sqlite": "npx prisma db push --schema=prisma/schema.prisma",
-    "test": "jest"
+    "dev": "nodemon index.js",
+    "build": "prisma generate --schema=prisma/schema.postgresql.prisma",
+    "build:sqlite": "prisma generate --schema=prisma/schema.prisma",
+    "migrate:deploy": "prisma migrate deploy --schema=prisma/schema.postgresql.prisma",
+    "migrate:dev": "prisma migrate dev --schema=prisma/schema.postgresql.prisma",
+    "db:postgres": "prisma db push --schema=prisma/schema.postgresql.prisma",
+    "db:sqlite": "prisma db push --schema=prisma/schema.prisma",
+    "seed": "node seed-admin.js",
+    "test": "jest --runInBand"
   },
-  "keywords": [],
+  "keywords": [
+    "gps",
+    "fleet",
+    "school-bus",
+    "ais-140",
+    "prisma",
+    "socket.io"
+  ],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
     "@prisma/client": "^5.22.0",
-    "axios": "^1.18.1",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "express-rate-limit": "^7.4.1",
     "firebase-admin": "^14.2.0",
+    "helmet": "^8.0.0",
     "jsonwebtoken": "^9.0.3",
-    "localtunnel": "^2.0.2",
-    "socket.io": "^4.8.3"
+    "pino": "^9.5.0",
+    "pino-http": "^10.3.0",
+    "socket.io": "^4.8.3",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
+    "axios": "^1.18.1",
     "jest": "^30.4.2",
     "nodemon": "^3.1.14",
+    "pino-pretty": "^11.3.0",
     "prisma": "^5.22.0",
     "supertest": "^7.2.2"
   }
