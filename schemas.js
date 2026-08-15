@@ -102,12 +102,51 @@ exports.leaveStatus = z.object({
   status: z.enum(LEAVE_STATUS),
 });
 
+const stopInput = z.object({
+  name: z.string().min(1).max(200),
+  address: z.string().max(500).optional().nullable(),
+  lat,
+  lng,
+  orderIdx: z.number().int().min(0).max(1000),
+  expectedArrivalMinutes: z.number().int().min(0).max(1440).optional().nullable(),
+});
+
 exports.createRoute = z.object({
   name: z.string().min(1).max(200),
   estimatedDuration: z.number().int().positive().max(1440).optional().nullable(),
+  distanceKm: z.number().nonnegative().max(1000).optional().nullable(),
+  geometry: z.string().max(65535).optional().nullable(),
+  stops: z
+    .array(stopInput)
+    .min(2, 'A route needs at least 2 stops')
+    .max(100)
+    .refine(
+      (arr) => new Set(arr.map((s) => s.orderIdx)).size === arr.length,
+      { message: 'stops.orderIdx values must be unique' }
+    ),
 });
 
-exports.updateRoute = exports.createRoute.partial();
+exports.updateRoute = z.object({
+  name: z.string().min(1).max(200).optional(),
+  estimatedDuration: z.number().int().positive().max(1440).optional().nullable(),
+  distanceKm: z.number().nonnegative().max(1000).optional().nullable(),
+  geometry: z.string().max(65535).optional().nullable(),
+});
+
+exports.createStop = stopInput;
+exports.updateStop = stopInput.partial();
+exports.reorderStops = z
+  .array(z.object({ id: uuid, orderIdx: z.number().int().min(0).max(1000) }))
+  .min(1)
+  .max(100)
+  .refine(
+    (arr) => new Set(arr.map((s) => s.id)).size === arr.length,
+    { message: 'reorder items must have unique ids' }
+  )
+  .refine(
+    (arr) => new Set(arr.map((s) => s.orderIdx)).size === arr.length,
+    { message: 'reorder orderIdx values must be unique' }
+  );
 
 exports.sos = z.object({
   schoolId: uuid.optional(),

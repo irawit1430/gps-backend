@@ -331,8 +331,32 @@ app.post('/api/schools/:schoolId/routes',
   validate({ body: S.createRoute }),
   async (req, res) => {
     try {
-      const route = await prisma.route.create({
-        data: { schoolId: req.params.schoolId, name: req.body.name, estimatedDuration: req.body.estimatedDuration ?? null },
+      const { name, estimatedDuration, distanceKm, geometry, stops } = req.body;
+      const route = await prisma.$transaction(async (tx) => {
+        const r = await tx.route.create({
+          data: {
+            schoolId: req.params.schoolId,
+            name,
+            estimatedDuration: estimatedDuration ?? null,
+            distanceKm: distanceKm ?? null,
+            geometry: geometry ?? null,
+          },
+        });
+        await tx.routeStop.createMany({
+          data: stops.map((s) => ({
+            routeId: r.id,
+            name: s.name,
+            address: s.address ?? null,
+            lat: s.lat,
+            lng: s.lng,
+            orderIdx: s.orderIdx,
+            expectedArrivalMinutes: s.expectedArrivalMinutes ?? null,
+          })),
+        });
+        return tx.route.findUnique({
+          where: { id: r.id },
+          include: { stops: { orderBy: { orderIdx: 'asc' } } },
+        });
       });
       res.json(route);
     } catch (err) {
@@ -367,6 +391,14 @@ app.put('/api/routes/:id',
 
 app.delete('/api/routes/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), ownsRoute, async (req, res) => {
   try {
+    const activeTrips = await prisma.trip.count({
+      where: { routeId: req.params.id, status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
+    });
+    if (activeTrips > 0) {
+      return res.status(400).json({
+        error: `Cannot delete route: ${activeTrips} active trip(s) still assigned. Complete or cancel them first.`,
+      });
+    }
     await prisma.route.delete({ where: { id: req.params.id } });
     res.json({ success: true });
   } catch (err) {
@@ -374,6 +406,112 @@ app.delete('/api/routes/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), own
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+// ─── RouteStop CRUD ─────────────────────────────────────
+// Tenant guard: route must belong to caller's school (SUPER_ADMIN bypasses).
+async function ownsRouteByParam(req, res, next) {
+  if (req.user.role === 'SUPER_ADMIN') return next();
+  const route = await prisma.route.findUnique({ where: { id: req.params.routeId }, select: { schoolId: true } });
+  if (!route) return res.status(404).json({ error: 'Route not found' });
+  if (req.user.role === 'SCHOOL_ADMIN' && route.schoolId === req.user.schoolId) return next();
+  return res.status(403).json({ error: 'Forbidden' });
+}
+
+app.post('/api/routes/:routeId/stops',
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  ownsRouteByParam,
+  validate({ body: S.createStop }),
+  async (req, res) => {
+    try {
+      const stop = await prisma.routeStop.create({
+        data: {
+          routeId: req.params.routeId,
+          name: req.body.name,
+          address: req.body.address ?? null,
+          lat: req.body.lat,
+          lng: req.body.lng,
+          orderIdx: req.body.orderIdx,
+          expectedArrivalMinutes: req.body.expectedArrivalMinutes ?? null,
+        },
+      });
+      res.json(stop);
+    } catch (err) {
+      req.log.error({ err }, 'create stop failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
+app.put('/api/routes/:routeId/stops/:id',
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  ownsRouteByParam,
+  validate({ body: S.updateStop }),
+  async (req, res) => {
+    try {
+      const existing = await prisma.routeStop.findUnique({ where: { id: req.params.id } });
+      if (!existing || existing.routeId !== req.params.routeId) {
+        return res.status(404).json({ error: 'Stop not found on this route' });
+      }
+      const stop = await prisma.routeStop.update({ where: { id: req.params.id }, data: req.body });
+      res.json(stop);
+    } catch (err) {
+      req.log.error({ err }, 'update stop failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
+app.delete('/api/routes/:routeId/stops/:id',
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  ownsRouteByParam,
+  async (req, res) => {
+    try {
+      const existing = await prisma.routeStop.findUnique({ where: { id: req.params.id } });
+      if (!existing || existing.routeId !== req.params.routeId) {
+        return res.status(404).json({ error: 'Stop not found on this route' });
+      }
+      await prisma.routeStop.delete({ where: { id: req.params.id } });
+      res.json({ success: true });
+    } catch (err) {
+      req.log.error({ err }, 'delete stop failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
+app.put('/api/routes/:routeId/stops/reorder',
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  ownsRouteByParam,
+  validate({ body: S.reorderStops }),
+  async (req, res) => {
+    try {
+      const ids = req.body.map((r) => r.id);
+      const stops = await prisma.routeStop.findMany({ where: { id: { in: ids } } });
+      if (stops.length !== ids.length || stops.some((s) => s.routeId !== req.params.routeId)) {
+        return res.status(400).json({ error: 'Some stops do not belong to this route' });
+      }
+      // Two-phase update to avoid transient unique-collisions on (routeId, orderIdx)
+      // if you ever add such a constraint later. For now the index is non-unique so a
+      // single pass would work, but two-phase is safer.
+      await prisma.$transaction([
+        ...req.body.map((r, i) =>
+          prisma.routeStop.update({ where: { id: r.id }, data: { orderIdx: 1000000 + i } })
+        ),
+        ...req.body.map((r) =>
+          prisma.routeStop.update({ where: { id: r.id }, data: { orderIdx: r.orderIdx } })
+        ),
+      ]);
+      const updated = await prisma.routeStop.findMany({
+        where: { routeId: req.params.routeId },
+        orderBy: { orderIdx: 'asc' },
+      });
+      res.json(updated);
+    } catch (err) {
+      req.log.error({ err }, 'reorder stops failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
 
 // Drivers
 app.get('/api/schools/:schoolId/drivers', requireTenant('schoolId'), async (req, res) => {

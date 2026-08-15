@@ -76,6 +76,8 @@ model Route {
   school            School   @relation(fields: [schoolId], references: [id])
   name              String
   estimatedDuration Int?
+  distanceKm        Float?
+  geometry          String?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
@@ -86,15 +88,17 @@ model Route {
 }
 
 model RouteStop {
-  id        String   @id @default(uuid())
-  routeId   String
-  route     Route    @relation(fields: [routeId], references: [id], onDelete: Cascade)
-  name      String
-  lat       Float
-  lng       Float
-  orderIdx  Int
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                     String   @id @default(uuid())
+  routeId                String
+  route                  Route    @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  name                   String
+  address                String?
+  lat                    Float
+  lng                    Float
+  orderIdx               Int
+  expectedArrivalMinutes Int?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
 
   studentMappings StudentRouteMapping[]
 

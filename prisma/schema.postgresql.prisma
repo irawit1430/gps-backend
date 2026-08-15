@@ -119,7 +119,9 @@ model Route {
   schoolId          String
   school            School   @relation(fields: [schoolId], references: [id])
   name              String
-  estimatedDuration Int?
+  estimatedDuration Int?     // minutes, whole route
+  distanceKm        Float?   // total driving distance
+  geometry          String?  // OSRM-encoded polyline for map rendering
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
@@ -130,15 +132,17 @@ model Route {
 }
 
 model RouteStop {
-  id        String   @id @default(uuid())
-  routeId   String
-  route     Route    @relation(fields: [routeId], references: [id], onDelete: Cascade)
-  name      String
-  lat       Float
-  lng       Float
-  orderIdx  Int
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                      String   @id @default(uuid())
+  routeId                 String
+  route                   Route    @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  name                    String
+  address                 String?  // reverse-geocoded human-readable address
+  lat                     Float
+  lng                     Float
+  orderIdx                Int
+  expectedArrivalMinutes  Int?     // offset from trip start
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
 
   studentMappings StudentRouteMapping[]
 
