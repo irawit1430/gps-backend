@@ -77,6 +77,7 @@ const authorizeRoles = (...roles) => {
 app.use('/api/admin', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'));
 app.use('/api/admins', authorizeRoles('SUPER_ADMIN'));
 app.use('/api/settings', authorizeRoles('SUPER_ADMIN'));
+app.use('/api/devices', authorizeRoles('SUPER_ADMIN'));
 
 
 
