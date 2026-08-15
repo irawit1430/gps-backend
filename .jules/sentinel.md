@@ -19,3 +19,7 @@
 **Vulnerability:** The login endpoint (`/api/auth/login`) lacked rate limiting.
 **Learning:** This leaves the endpoint vulnerable to brute-force attacks.
 **Prevention:** Use `express-rate-limit` to limit requests to authentication endpoints.
+## 2025-02-23 - Missing Role-Based Access Control on Device Provisioning Routes
+**Vulnerability:** The `/api/devices` endpoints lacked explicit role-based access checks, allowing any authenticated user to view, create, update, or delete devices.
+**Learning:** Always verify that all operational and sensitive admin routes are protected by explicit authorization middleware (like \`authorizeRoles\`), as standard authentication middleware only checks for a valid token, not the user's role.
+**Prevention:** Apply `authorizeRoles('SUPER_ADMIN')` (or equivalent) either individually on route definitions or via a unified `app.use` prefix for all related admin endpoints.
