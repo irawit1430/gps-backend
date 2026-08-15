@@ -26,14 +26,27 @@ function startTcpServer(io, tcpPort = 5000) {
             console.log(`[TCP Server] Parsed ${parsed.header} packet from IMEI ${parsed.imei}: Lat=${parsed.lat}, Lng=${parsed.lng}, Speed=${parsed.speed}`);
 
             // Find bus by IMEI (deviceId in DB)
-            const bus = await prisma.bus.findFirst({
-              where: {
-                OR: [
-                  { deviceId: parsed.imei },
-                  { deviceId: { contains: parsed.imei } }
-                ]
+            let bus = null;
+            const CACHE_TTL_MS = 60000; // 1 minute TTL
+            // Ensure global cache exists
+            if (!global.tcpBusCache) global.tcpBusCache = new Map();
+            const cached = global.tcpBusCache.get(parsed.imei);
+
+            if (cached && (Date.now() - cached.timestamp < CACHE_TTL_MS)) {
+              bus = cached.data;
+            } else {
+              bus = await prisma.bus.findFirst({
+                where: {
+                  OR: [
+                    { deviceId: parsed.imei },
+                    { deviceId: { contains: parsed.imei } }
+                  ]
+                }
+              });
+              if (bus) {
+                global.tcpBusCache.set(parsed.imei, { data: bus, timestamp: Date.now() });
               }
-            });
+            }
 
             if (bus) {
               // 1. Log GPS Position in DB
