@@ -10,3 +10,6 @@
 ## 2024-05-19 - Optimizing "Active Device" counting
 **Learning:** Fetching distinct rows (using `findMany` with `distinct`) just to get the count of items that have associated time-series records is inefficient as it downloads an array of objects into memory.
 **Action:** Use relational counts like `bus.count({ where: { gpsLogs: { some: { timestamp: { gte: ... } } } } })` instead to let the database handle the aggregation efficiently without pulling rows into Node.js.
+## 2024-08-15 - Caching Telemetry Data in TCP Server
+**Learning:** The TCP server processes high-frequency telemetry data, hitting the database on every packet to find the bus by IMEI.
+**Action:** Introduce a simple Map cache with a TTL to prevent querying the database for the same bus for high-frequency telemetry endpoints.
