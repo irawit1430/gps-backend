@@ -63,6 +63,8 @@ function scheduleGpsLogFlush(busId) {
     const data = entry.latest;
     pendingGpsLogWrites.delete(busId);
     if (!db || !data) return;
+    
+    // 1. Append to gps_logs
     try {
       await withRetry(() =>
         db.collection('gps_logs').add({
@@ -78,37 +80,37 @@ function scheduleGpsLogFlush(busId) {
     } catch (err) {
       logger.error({ err: err.message, busId }, 'Firestore gps_log write failed after retries');
     }
+
+    // 2. Update buses snapshot (debounced together to save huge costs)
+    try {
+      await withRetry(() =>
+        db.collection('buses').doc(data.busId).set(
+          {
+            busId: data.busId,
+            licensePlate: data.licensePlate || 'unassigned',
+            lastKnownLat: data.lat,
+            lastKnownLng: data.lng,
+            speed: data.speed || 0,
+            status: 'ONLINE',
+            lastUpdate: FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        )
+      );
+    } catch (err) {
+      logger.error({ err: err.message, busId: data.busId }, 'Firestore bus snapshot write failed');
+    }
   }, GPS_LOG_INTERVAL_MS);
 }
 
 async function syncGpsLogToFirebase(data) {
   if (!db || !data?.busId) return;
 
-  // 1. Debounced append to gps_logs
+  // Debounced append to gps_logs and buses snapshot
   const entry = pendingGpsLogWrites.get(data.busId) || { timer: null, latest: null };
   entry.latest = data;
   pendingGpsLogWrites.set(data.busId, entry);
   scheduleGpsLogFlush(data.busId);
-
-  // 2. Always-fresh `buses/{id}` snapshot (single doc merge — cheap & idempotent)
-  try {
-    await withRetry(() =>
-      db.collection('buses').doc(data.busId).set(
-        {
-          busId: data.busId,
-          licensePlate: data.licensePlate || 'unassigned',
-          lastKnownLat: data.lat,
-          lastKnownLng: data.lng,
-          speed: data.speed || 0,
-          status: 'ONLINE',
-          lastUpdate: FieldValue.serverTimestamp(),
-        },
-        { merge: true }
-      )
-    );
-  } catch (err) {
-    logger.error({ err: err.message, busId: data.busId }, 'Firestore bus snapshot write failed');
-  }
 }
 
 async function syncEmergencyAlertToFirebase(alertData) {
