@@ -19,3 +19,7 @@
 **Vulnerability:** The login endpoint (`/api/auth/login`) lacked rate limiting.
 **Learning:** This leaves the endpoint vulnerable to brute-force attacks.
 **Prevention:** Use `express-rate-limit` to limit requests to authentication endpoints.
+## 2025-02-23 - Insecure Direct Object Reference (IDOR) on Parent Routes
+**Vulnerability:** Parent endpoints (`/api/parents/:id/*` and `/api/parents/:parentId/*`) lacked authorization checks, allowing authenticated users to access and modify data belonging to other users.
+**Learning:** Global authentication middleware (`authenticate`) ensures a user is logged in, but it does not ensure they own the resource they are requesting. Authorization must be explicitly handled.
+**Prevention:** Always verify `req.user.id` against resource owner IDs (like route parameters) for sensitive user-specific endpoints, typically via a custom authorization middleware or inline checks.

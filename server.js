@@ -73,6 +73,14 @@ const authorizeRoles = (...roles) => {
   };
 };
 
+const authorizeParentResource = (req, res, next) => {
+  const targetId = req.params.id || req.params.parentId;
+  if (req.user.role !== 'SUPER_ADMIN' && req.user.id !== targetId) {
+    return res.status(403).json({ error: 'Forbidden: Cannot access another user\'s resources' });
+  }
+  next();
+};
+
 // Apply RBAC to Admin routes
 app.use('/api/admin', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'));
 app.use('/api/admins', authorizeRoles('SUPER_ADMIN'));
@@ -510,7 +518,7 @@ app.get('/api/schools/:schoolId/stats', async (req, res) => {
 });
 
 // --- 3. PARENT APP ---
-app.patch('/api/parents/:id/preferences', async (req, res) => {
+app.patch('/api/parents/:id/preferences', authorizeParentResource, async (req, res) => {
   try {
     const preferences = JSON.stringify(req.body);
     const user = await prisma.user.update({
@@ -524,7 +532,7 @@ app.patch('/api/parents/:id/preferences', async (req, res) => {
   }
 });
 
-app.get('/api/parents/:parentId/students', async (req, res) => {
+app.get('/api/parents/:parentId/students', authorizeParentResource, async (req, res) => {
   try {
     const students = await prisma.student.findMany({
       where: { parentId: req.params.parentId },
@@ -585,7 +593,7 @@ app.post('/api/leaves', async (req, res) => {
   }
 });
 
-app.get('/api/parents/:parentId/leaves', async (req, res) => {
+app.get('/api/parents/:parentId/leaves', authorizeParentResource, async (req, res) => {
   try {
     const leaves = await prisma.leaveApplication.findMany({
       where: { student: { parentId: req.params.parentId } },
@@ -599,7 +607,7 @@ app.get('/api/parents/:parentId/leaves', async (req, res) => {
   }
 });
 
-app.get('/api/parents/:parentId/notifications', async (req, res) => {
+app.get('/api/parents/:parentId/notifications', authorizeParentResource, async (req, res) => {
   try {
     const notifications = await prisma.notification.findMany({
       where: { userId: req.params.parentId },
