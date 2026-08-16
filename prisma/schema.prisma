@@ -25,6 +25,9 @@ model User {
   parentStudents Student[]      @relation("ParentStudents")
   driverTrips    Trip[]         @relation("DriverTrips")
   notifications  Notification[]
+
+  // ⚡ Bolt: Added index to prevent full table scans on heavily filtered foreign key
+  @@index([schoolId])
 }
 
 model School {
@@ -87,6 +90,9 @@ model RouteStop {
   createdAt DateTime @default(now())
 
   studentMappings StudentRouteMapping[]
+
+  // ⚡ Bolt: Added index to prevent full table scans on heavily filtered foreign key
+  @@index([routeId])
 }
 
 model Student {
@@ -138,6 +144,11 @@ model Trip {
 
   gpsLogs        GpsLog[]
   attendanceLogs AttendanceLog[]
+
+  // ⚡ Bolt: Added index to prevent full table scans on heavily filtered foreign key
+  @@index([routeId])
+  @@index([busId])
+  @@index([driverId])
 }
 
 model GpsLog {
@@ -162,6 +173,10 @@ model AttendanceLog {
   trip      Trip     @relation(fields: [tripId], references: [id])
   type      String // "BOARDED", "ALIGHTED"
   timestamp DateTime @default(now())
+
+  // ⚡ Bolt: Added index to prevent full table scans on heavily filtered foreign key
+  @@index([studentId])
+  @@index([tripId])
 }
 
 model LeaveApplication {
@@ -175,6 +190,9 @@ model LeaveApplication {
   status    String   @default("PENDING") // PENDING, APPROVED, REJECTED
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  // ⚡ Bolt: Added index to prevent full table scans on heavily filtered foreign key
+  @@index([studentId])
 }
 
 model EmergencyAlert {
@@ -197,6 +215,9 @@ model Notification {
   type      String // "ARRIVAL", "BOARDING", "DELAY", "SYSTEM"
   isRead    Boolean  @default(false)
   createdAt DateTime @default(now())
+
+  // ⚡ Bolt: Added index to prevent full table scans on heavily filtered foreign key
+  @@index([userId])
 }
 
 model GlobalSettings {
