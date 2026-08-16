@@ -1078,13 +1078,33 @@ app.get('/api/schools', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
     const limit = Math.min(parseInt(req.query.limit) || 50, 200);
     const search = req.query.search || '';
     const where = search ? { name: { contains: search, mode: 'insensitive' } } : {};
+    if (req.query.status) where.status = req.query.status;
+    
+    let orderBy = { createdAt: 'desc' };
+    if (req.query.sort) orderBy = { [req.query.sort]: req.query.order === 'asc' ? 'asc' : 'desc' };
+    
     const [schools, total] = await Promise.all([
-      prisma.school.findMany({ where, skip: (page - 1) * limit, take: limit, orderBy: { createdAt: 'desc' } }),
+      prisma.school.findMany({ where, skip: (page - 1) * limit, take: limit, orderBy }),
       prisma.school.count({ where }),
     ]);
     res.json({ data: schools, total, page, limit });
   } catch (err) {
     req.log.error({ err }, 'list schools failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+
+app.get('/api/schools/summary', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
+  try {
+    const [total, active, pending, suspended] = await Promise.all([
+      prisma.school.count(),
+      prisma.school.count({ where: { status: 'ACTIVE' } }),
+      prisma.school.count({ where: { status: 'PENDING' } }),
+      prisma.school.count({ where: { status: 'SUSPENDED' } })
+    ]);
+    res.json({ total, active, pending, suspended });
+  } catch (err) {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -1143,6 +1163,8 @@ app.get('/api/devices', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), async (re
     if (search) where.OR = [{ licensePlate: { contains: search } }, { deviceId: { contains: search } }];
     if (req.user.role === 'SCHOOL_ADMIN') where.schoolId = req.user.schoolId;
     else if (req.query.schoolId !== undefined) where.schoolId = req.query.schoolId === 'null' ? null : req.query.schoolId;
+    if (req.query.assigned === 'false') where.schoolId = null;
+    if (req.query.status) where.status = req.query.status;
     const [devices, total] = await Promise.all([
       prisma.bus.findMany({ where, include: { school: { select: { name: true } } }, skip: (page - 1) * limit, take: limit, orderBy: { licensePlate: 'asc' } }),
       prisma.bus.count({ where }),
@@ -1180,6 +1202,23 @@ app.get('/api/devices/locations', async (req, res) => {
     res.json(locations);
   } catch (err) {
     req.log.error({ err }, 'list locations failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+
+app.get('/api/devices/summary', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), async (req, res) => {
+  try {
+    const where = req.user.role === 'SCHOOL_ADMIN' ? { schoolId: req.user.schoolId } : {};
+    const staleTime = new Date(Date.now() - 30 * 60 * 1000);
+    const [total, online, offline, staleOver30m] = await Promise.all([
+      prisma.bus.count({ where }),
+      prisma.bus.count({ where: { ...where, status: 'ONLINE' } }),
+      prisma.bus.count({ where: { ...where, status: 'OFFLINE' } }),
+      prisma.bus.count({ where: { ...where, updatedAt: { lt: staleTime } } })
+    ]);
+    res.json({ total, online, offline, staleOver30m });
+  } catch (err) {
     res.status(500).json({ error: 'Internal server error' });
   }
 });

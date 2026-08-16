@@ -24,6 +24,7 @@ model User {
   mustResetPassword    Boolean  @default(false)
   schoolId             String?
   school               School?  @relation(fields: [schoolId], references: [id])
+  lastLoginAt   DateTime?
   createdAt            DateTime @default(now())
   updatedAt            DateTime @updatedAt
 
@@ -44,6 +45,13 @@ model School {
   state         String?
   phone         String?
   email         String?
+  contactEmail  String?
+  contactPhone  String?
+  website       String?
+  pincode       String?
+  latitude      Float?
+  longitude     Float?
+  status        String   @default("ACTIVE")
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -61,6 +69,7 @@ model Bus {
   capacity     Int
   deviceId     String   @unique
   deviceSecret String?
+  status        String   @default("ONLINE")
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -242,5 +251,9 @@ model GlobalSettings {
   maintenanceMode Boolean  @default(false)
   mapCenterLat    Float    @default(28.7041)
   mapCenterLng    Float    @default(77.1025)
+  mapDefaultZoom      Int?
+  overspeedLimitKph   Int?
+  offlineAlertMinutes Int?
+  alertEmail          String?
   updatedAt       DateTime @updatedAt
 }

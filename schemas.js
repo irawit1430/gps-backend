@@ -31,6 +31,13 @@ exports.createSchool = z.object({
   state: z.string().max(100).optional().nullable(),
   phone: z.string().max(30).optional().nullable(),
   email: z.string().email().optional().nullable(),
+  contactEmail: z.string().email().optional().nullable(),
+  contactPhone: z.string().max(30).optional().nullable(),
+  website: z.string().max(200).optional().nullable(),
+  pincode: z.string().max(20).optional().nullable(),
+  latitude: lat.optional().nullable(),
+  longitude: lng.optional().nullable(),
+  status: z.enum(["ACTIVE", "PENDING", "SUSPENDED"]).optional(),
 });
 
 exports.updateSchool = exports.createSchool.partial();
@@ -49,6 +56,7 @@ exports.createDevice = z.object({
   licensePlate: z.string().min(1).max(32),
   capacity: z.number().int().positive().max(200).optional(),
   schoolId: uuid.optional().nullable(),
+  status: z.enum(["ONLINE", "OFFLINE"]).optional(),
 });
 
 exports.updateDevice = exports.createDevice.partial();
@@ -64,6 +72,7 @@ exports.createAdmin = z.object({
   password: z.string().min(12).max(200),
   role: z.enum(['SUPER_ADMIN', 'SCHOOL_ADMIN']),
   schoolId: uuid.optional().nullable(),
+  status: z.enum(["ONLINE", "OFFLINE"]).optional(),
 });
 
 exports.updateAdmin = z.object({
@@ -72,6 +81,7 @@ exports.updateAdmin = z.object({
   password: z.string().min(12).max(200).optional(),
   role: z.enum(['SUPER_ADMIN', 'SCHOOL_ADMIN']).optional(),
   schoolId: uuid.optional().nullable(),
+  status: z.enum(["ONLINE", "OFFLINE"]).optional(),
 });
 
 exports.createTrip = z.object({
@@ -163,6 +173,10 @@ exports.globalSettings = z.object({
   maintenanceMode: z.boolean().optional(),
   mapCenterLat: lat.optional(),
   mapCenterLng: lng.optional(),
+  mapDefaultZoom: z.number().int().optional(),
+  overspeedLimitKph: z.number().int().optional(),
+  offlineAlertMinutes: z.number().int().optional(),
+  alertEmail: z.string().email().optional(),
 });
 
 exports.ROLES = ROLES;
