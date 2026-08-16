@@ -9,12 +9,12 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "build": "prisma generate --schema=prisma/schema.postgresql.prisma",
-    "build:sqlite": "prisma generate --schema=prisma/schema.prisma",
-    "migrate:deploy": "prisma migrate deploy --schema=prisma/schema.postgresql.prisma",
-    "migrate:dev": "prisma migrate dev --schema=prisma/schema.postgresql.prisma",
-    "db:postgres": "prisma db push --schema=prisma/schema.postgresql.prisma",
-    "db:sqlite": "prisma db push --schema=prisma/schema.prisma",
+    "build": "prisma generate",
+    "build:sqlite": "prisma generate",
+    "migrate:deploy": "prisma migrate deploy",
+    "migrate:dev": "prisma migrate dev",
+    "db:postgres": "prisma db push",
+    "db:sqlite": "prisma db push",
     "seed": "node seed-admin.js",
     "test": "jest --runInBand"
   },
