@@ -1,4 +1,4 @@
-﻿-- AlterTable
+-- AlterTable
 ALTER TABLE "School" ADD COLUMN "contactEmail" TEXT;
 ALTER TABLE "School" ADD COLUMN "contactPhone" TEXT;
 ALTER TABLE "School" ADD COLUMN "website" TEXT;
