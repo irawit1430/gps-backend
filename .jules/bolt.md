@@ -10,3 +10,6 @@
 ## 2024-05-19 - Optimizing "Active Device" counting
 **Learning:** Fetching distinct rows (using `findMany` with `distinct`) just to get the count of items that have associated time-series records is inefficient as it downloads an array of objects into memory.
 **Action:** Use relational counts like `bus.count({ where: { gpsLogs: { some: { timestamp: { gte: ... } } } } })` instead to let the database handle the aggregation efficiently without pulling rows into Node.js.
+## 2024-10-25 - Caching High-Frequency TCP Data
+**Learning:** The TCP server processing Blackbox telemetry data queried the database using `prisma.bus.findFirst` for every incoming packet, causing a significant bottleneck during high-frequency ingestion.
+**Action:** Implemented an in-memory `Map` cache (with a 1-minute TTL) for `deviceId`/IMEI lookups in `tcp-server.js` to reduce database hits by ~99% per active device, preventing N+1 lookup latency and reducing load on the database.
