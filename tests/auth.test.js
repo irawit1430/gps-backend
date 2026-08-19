@@ -8,6 +8,7 @@ jest.mock('@prisma/client', () => {
   const mockPrisma = {
     user: {
       findUnique: jest.fn(),
+      update: jest.fn(),
     },
   };
   return { PrismaClient: jest.fn(() => mockPrisma) };
