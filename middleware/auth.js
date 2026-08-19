@@ -1,14 +1,24 @@
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 
+// In-memory token denylist (lost on PM2 restart, but sufficient for 24h JWTs)
+const tokenDenylist = new Set();
+function logoutToken(token) {
+  tokenDenylist.add(token);
+}
+
 function authenticate(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Unauthorized: missing or invalid token' });
   }
   const token = authHeader.slice(7);
+  if (tokenDenylist.has(token)) {
+    return res.status(401).json({ error: 'Unauthorized: token has been revoked' });
+  }
   try {
     req.user = jwt.verify(token, config.JWT_SECRET, { algorithms: ['HS256'] });
+    req.token = token;
     return next();
   } catch (err) {
     return res.status(401).json({ error: 'Unauthorized: invalid token' });
@@ -50,4 +60,4 @@ function requireSelfOrRoles(paramName, ...allowedRoles) {
   };
 }
 
-module.exports = { authenticate, authorizeRoles, requireTenant, requireSelfOrRoles };
+module.exports = { authenticate, authorizeRoles, requireTenant, requireSelfOrRoles, logoutToken };

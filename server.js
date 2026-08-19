@@ -14,7 +14,7 @@ const config = require('./config');
 const logger = require('./logger');
 const S = require('./schemas');
 const { validate } = require('./middleware/validate');
-const { authenticate, authorizeRoles, requireTenant, requireSelfOrRoles } = require('./middleware/auth');
+const { authenticate, authorizeRoles, requireTenant, requireSelfOrRoles, logoutToken } = require('./middleware/auth');
 const { telemetryHmac } = require('./middleware/telemetryHmac');
 const { attachSocketAuth, emitToSchool, emitToUser } = require('./middleware/socketAuth');
 const { getSimulatedAlerts, getMockNotifications } = require('./mock-data');
@@ -115,6 +115,18 @@ app.post('/api/auth/login', loginLimiter, validate({ body: S.login }), async (re
       { expiresIn: config.JWT_EX_IN || config.JWT_EXPIRES_IN || '24h' }
     );
 
+    let deviceId, deviceSecret;
+    if (user.role === 'DRIVER') {
+      const activeTrip = await prisma.trip.findFirst({
+        where: { driverId: user.id, status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
+        include: { bus: true }
+      });
+      if (activeTrip && activeTrip.bus) {
+        deviceId = activeTrip.bus.deviceId;
+        deviceSecret = activeTrip.bus.deviceSecret;
+      }
+    }
+
     let preferences = {};
     if (user.notificationSettings) {
       preferences =
@@ -134,6 +146,8 @@ app.post('/api/auth/login', loginLimiter, validate({ body: S.login }), async (re
         mustResetPassword: user.mustResetPassword || false,
         preferences,
       },
+      deviceId,
+      deviceSecret,
     });
   } catch (err) {
     req.log.error({ err }, 'login failed');
@@ -975,6 +989,7 @@ app.get('/api/drivers/:driverId/trips',
             },
           },
           bus: true,
+          attendanceLogs: true,
         },
         orderBy: { createdAt: 'asc' },
       });
