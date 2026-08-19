@@ -1,10 +1,25 @@
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 
-// In-memory token denylist (lost on PM2 restart, but sufficient for 24h JWTs)
+// In-memory revocation state (lost on PM2 restart, but sufficient for 24h JWTs).
+// NOTE: for multi-instance / restart-safe revocation, back these with Redis or a
+// `tokenVersion` column on the user row.
+//
+//  - tokenDenylist: exact tokens revoked on explicit logout (self only).
+//  - userInvalidatedAt: userId → unix-seconds cutoff. Any token for that user whose
+//    `iat` (issued-at) is at or before the cutoff is rejected. Used to revoke a user's
+//    *existing* tokens when they are deleted or their role/school/password changes —
+//    cases where we do not hold the actual token string.
 const tokenDenylist = new Set();
+const userInvalidatedAt = new Map();
+
 function logoutToken(token) {
-  tokenDenylist.add(token);
+  if (token) tokenDenylist.add(token);
+}
+
+// Revoke every token issued to a user up to now (delete / role / school / password change).
+function invalidateUser(userId) {
+  if (userId) userInvalidatedAt.set(userId, Math.floor(Date.now() / 1000));
 }
 
 function authenticate(req, res, next) {
@@ -13,11 +28,17 @@ function authenticate(req, res, next) {
     return res.status(401).json({ error: 'Unauthorized: missing or invalid token' });
   }
   const token = authHeader.slice(7);
+  // Explicitly logged-out token.
   if (tokenDenylist.has(token)) {
     return res.status(401).json({ error: 'Unauthorized: token has been revoked' });
   }
   try {
     req.user = jwt.verify(token, config.JWT_SECRET, { algorithms: ['HS256'] });
+    // Token issued before this user was invalidated (deleted / demoted / moved / pw change).
+    const cutoff = userInvalidatedAt.get(req.user.id);
+    if (cutoff && typeof req.user.iat === 'number' && req.user.iat <= cutoff) {
+      return res.status(401).json({ error: 'Unauthorized: token has been revoked' });
+    }
     req.token = token;
     return next();
   } catch (err) {
@@ -60,4 +81,4 @@ function requireSelfOrRoles(paramName, ...allowedRoles) {
   };
 }
 
-module.exports = { authenticate, authorizeRoles, requireTenant, requireSelfOrRoles, logoutToken };
+module.exports = { authenticate, authorizeRoles, requireTenant, requireSelfOrRoles, logoutToken, invalidateUser };

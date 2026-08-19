@@ -103,3 +103,32 @@ describe('POST /api/auth/login', () => {
     expect(res.body).toEqual({ error: 'Internal server error' });
   });
 });
+
+describe('POST /api/auth/logout (token revocation)', () => {
+  const sign = () =>
+    jwt.sign({ id: 'u-logout', role: 'SUPER_ADMIN', schoolId: null }, process.env.JWT_SECRET, {
+      algorithm: 'HS256',
+      expiresIn: '1h',
+    });
+
+  it('should return 401 without a token', async () => {
+    const res = await request(app).post('/api/auth/logout');
+    expect(res.status).toBe(401);
+  });
+
+  it('should logout and then reject the same token on the next request', async () => {
+    const token = sign();
+
+    const ok = await request(app)
+      .post('/api/auth/logout')
+      .set('Authorization', `Bearer ${token}`);
+    expect(ok.status).toBe(200);
+
+    // Re-using the now-revoked token must fail.
+    const reused = await request(app)
+      .post('/api/auth/logout')
+      .set('Authorization', `Bearer ${token}`);
+    expect(reused.status).toBe(401);
+    expect(reused.body).toEqual({ error: 'Unauthorized: token has been revoked' });
+  });
+});
