@@ -96,18 +96,23 @@ app.get('/readyz', async (_req, res) => {
 });
 
 // Login (rate-limited, unauthenticated)
+const DUMMY_HASH = '$2a$10$e8wWwFkWyVb0f4pL7pTDe.a9B6gZ7rV5rY6f8rG8g8g8g8g8g8g8g';
 app.post('/api/auth/login', loginLimiter, validate({ body: S.login }), async (req, res) => {
   try {
     const { email, password } = req.body;
     const user = await prisma.user.findUnique({ where: { email } });
-    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+    if (!user) {
+      await bcrypt.compare(password, DUMMY_HASH);
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
     const ok = await bcrypt.compare(password, user.password);
     if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
 
+    await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
     const token = jwt.sign(
       { id: user.id, role: user.role, schoolId: user.schoolId },
       config.JWT_SECRET,
-      { expiresIn: config.JWT_EXPIRES_IN }
+      { expiresIn: config.JWT_EX_IN || config.JWT_EXPIRES_IN || '24h' }
     );
 
     let preferences = {};
@@ -132,6 +137,27 @@ app.post('/api/auth/login', loginLimiter, validate({ body: S.login }), async (re
     });
   } catch (err) {
     req.log.error({ err }, 'login failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Change Password (authenticated)
+app.post('/api/auth/change-password', authenticate, validate({ body: S.changePassword }), async (req, res) => {
+  try {
+    const { oldPassword, newPassword } = req.body;
+    const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    const ok = await bcrypt.compare(oldPassword, user.password);
+    if (!ok) return res.status(401).json({ error: 'Incorrect current password' });
+
+    const hashed = await bcrypt.hash(newPassword, 10);
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { password: hashed, mustResetPassword: false },
+    });
+    res.json({ message: 'Password updated successfully' });
+  } catch (err) {
+    req.log.error({ err }, 'change password failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -164,6 +190,11 @@ app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => 
 
       const log = await prisma.gpsLog.create({
         data: { busId: bus.id, lat, lng, speed: speed || 0, timestamp: timestamp ? new Date(timestamp) : new Date() },
+      });
+
+      await prisma.bus.update({
+        where: { id: bus.id },
+        data: { status: 'ONLINE' },
       });
 
       syncGpsLogToFirebase({
@@ -745,9 +776,10 @@ app.get('/api/schools/:schoolId/stats', requireTenant('schoolId'), async (req, r
 // ─── Parent APIs ──────────────────────────────────────────
 app.patch('/api/parents/:id/preferences',
   requireSelfOrRoles('id', 'SUPER_ADMIN'),
+  validate({ body: S.preferences }),
   async (req, res) => {
     try {
-      const notificationSettings = typeof req.body === 'object' ? req.body : {};
+      const notificationSettings = req.body || {};
       const user = await prisma.user.update({
         where: { id: req.params.id },
         data: { notificationSettings: JSON.stringify(notificationSettings) },
@@ -1180,9 +1212,52 @@ app.get('/api/devices', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), async (re
 
 app.get('/api/devices/locations', async (req, res) => {
   try {
-    const where = {};
-    if (req.user.role === 'SCHOOL_ADMIN') where.schoolId = req.user.schoolId;
-    else if (req.query.schoolId) where.schoolId = req.query.schoolId;
+    let where = {};
+    if (req.user.role === 'SUPER_ADMIN') {
+      if (req.query.schoolId) where.schoolId = req.query.schoolId;
+    } else if (req.user.role === 'SCHOOL_ADMIN') {
+      where.schoolId = req.user.schoolId;
+    } else if (req.user.role === 'DRIVER') {
+      const activeTrips = await prisma.trip.findMany({
+        where: { driverId: req.user.id, status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
+        select: { busId: true },
+      });
+      const busIds = activeTrips.map((t) => t.busId);
+      where.id = { in: busIds };
+    } else if (req.user.role === 'PARENT') {
+      const children = await prisma.student.findMany({
+        where: { parentId: req.user.id },
+        include: {
+          routeMappings: {
+            include: {
+              routeStop: {
+                include: {
+                  route: {
+                    include: {
+                      trips: {
+                        where: { status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
+                        select: { busId: true },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+      const busIds = new Set();
+      for (const child of children) {
+        for (const rm of child.routeMappings || []) {
+          for (const trip of rm.routeStop?.route?.trips || []) {
+            if (trip.busId) busIds.add(trip.busId);
+          }
+        }
+      }
+      where.id = { in: Array.from(busIds) };
+    } else {
+      return res.status(403).json({ error: 'Forbidden: unrecognized role' });
+    }
 
     const buses = await prisma.bus.findMany({
       where,

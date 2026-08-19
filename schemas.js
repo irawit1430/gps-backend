@@ -179,8 +179,22 @@ exports.globalSettings = z.object({
   alertEmail: z.string().email().optional(),
 });
 
+exports.changePassword = z.object({
+  oldPassword: z.string().min(1).max(200),
+  newPassword: z.string().min(8).max(200),
+});
+
+exports.preferences = z.object({
+  emailAlerts: z.boolean().optional(),
+  smsAlerts: z.boolean().optional(),
+  pushNotifications: z.boolean().optional(),
+  geofenceAlerts: z.boolean().optional(),
+  delayAlerts: z.boolean().optional(),
+}).passthrough();
+
 exports.ROLES = ROLES;
 exports.TRIP_STATUS = TRIP_STATUS;
 exports.LEAVE_STATUS = LEAVE_STATUS;
 exports.ATTENDANCE_TYPE = ATTENDANCE_TYPE;
 exports.EMERGENCY_TYPE = EMERGENCY_TYPE;
+

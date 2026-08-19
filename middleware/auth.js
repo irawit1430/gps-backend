@@ -8,7 +8,7 @@ function authenticate(req, res, next) {
   }
   const token = authHeader.slice(7);
   try {
-    req.user = jwt.verify(token, config.JWT_SECRET);
+    req.user = jwt.verify(token, config.JWT_SECRET, { algorithms: ['HS256'] });
     return next();
   } catch (err) {
     return res.status(401).json({ error: 'Unauthorized: invalid token' });

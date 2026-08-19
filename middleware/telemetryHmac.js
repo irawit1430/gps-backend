@@ -14,7 +14,7 @@ async function telemetryHmac(prisma) {
   return async function (req, res, next) {
     if (!config.TELEMETRY_HMAC_ENFORCE) return next();
 
-    const { deviceId, lat, lng } = req.body || {};
+    const { deviceId, lat, lng, speed } = req.body || {};
     const sig = req.headers['x-device-signature'];
     const ts = req.headers['x-device-timestamp'];
 
@@ -38,7 +38,7 @@ async function telemetryHmac(prisma) {
 
     const expected = crypto
       .createHmac('sha256', bus.deviceSecret)
-      .update(`${deviceId}.${ts}.${lat}.${lng}`)
+      .update(`${deviceId}.${ts}.${lat}.${lng}.${speed || 0}`)
       .digest('hex');
 
     const sigBuf = Buffer.from(String(sig), 'hex');

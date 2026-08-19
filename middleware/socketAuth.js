@@ -15,7 +15,7 @@ function attachSocketAuth(io) {
     const token = socket.handshake.auth?.token || socket.handshake.query?.token;
     if (!token) return next(new Error('Unauthorized: missing token'));
     try {
-      const user = jwt.verify(token, config.JWT_SECRET);
+      const user = jwt.verify(token, config.JWT_SECRET, { algorithms: ['HS256'] });
       socket.data.user = user;
       if (user.schoolId) socket.join(`school:${user.schoolId}`);
       if (user.role === 'SUPER_ADMIN') socket.join('super:all');
