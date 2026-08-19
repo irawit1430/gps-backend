@@ -193,10 +193,17 @@ app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => 
         data: { busId: bus.id, tripId: activeTrip?.id || null, lat, lng, speed: speed || 0, timestamp: timestamp ? new Date(timestamp) : new Date() },
       });
 
-      await prisma.bus.update({
-        where: { id: bus.id },
-        data: { status: 'ONLINE' },
-      });
+      const now = Date.now();
+      const lastStatusWrite = bus.lastStatusWrite || 0;
+      if (bus.status !== 'ONLINE' || now - lastStatusWrite > 5 * 60 * 1000) {
+        await prisma.bus.update({
+          where: { id: bus.id },
+          data: { status: 'ONLINE' },
+        });
+        bus.status = 'ONLINE';
+        bus.lastStatusWrite = now;
+        telemetryCache.set(deviceId, bus);
+      }
 
       syncGpsLogToFirebase({
         busId: bus.id,
@@ -207,7 +214,6 @@ app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => 
         timestamp: log.timestamp,
       });
 
-      const activeTrip = bus.trips?.[0];
       emitToSchool(io, bus.schoolId, 'location_update', {
         busId: bus.id,
         licensePlate: bus.licensePlate,

@@ -72,6 +72,16 @@ function startTcpServer(io, tcpPort = config.TCP_PORT) {
             const log = await prisma.gpsLog.create({
               data: { busId: bus.id, tripId: bus.trips?.[0]?.id || null, lat: parsed.lat, lng: parsed.lng, speed: parsed.speed || 0, timestamp: parsed.timestamp || new Date() },
             });
+            
+            const now = Date.now();
+            const lastWrite = tcpThrottleCache.get(bus.id) || 0;
+            if (bus.status !== 'ONLINE' || now - lastWrite > 5 * 60 * 1000) {
+              await prisma.bus.update({
+                where: { id: bus.id },
+                data: { status: 'ONLINE' }
+              });
+              tcpThrottleCache.set(bus.id, now);
+            }
 
             syncGpsLogToFirebase({
               busId: bus.id,
