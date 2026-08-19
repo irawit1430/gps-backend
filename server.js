@@ -1018,7 +1018,7 @@ app.post('/api/attendance', validate({ body: S.attendance }), async (req, res) =
 
     const student = await prisma.student.findUnique({ 
       where: { id: req.body.studentId },
-      include: { parent: { select: { id: true, fcmToken: true, preferences: true } } }
+      include: { parent: { select: { id: true, notificationSettings: true } } }
     });
     if (!student) return res.status(404).json({ error: 'Student not found' });
     if (student.schoolId !== trip.route.schoolId) return res.status(400).json({ error: 'Student not on this trip route' });
@@ -1028,22 +1028,15 @@ app.post('/api/attendance', validate({ body: S.attendance }), async (req, res) =
     });
     
     if (student.parentId) {
+      const typeEnum = req.body.type === 'BOARDED' ? 'BOARDING' : 'ARRIVAL';
       const title = `Student ${req.body.type}`;
-      const body = `${student.name} has been marked ${req.body.type}.`;
+      const message = `${student.name} has been marked ${req.body.type}.`;
       
       const notif = await prisma.notification.create({
-        data: { userId: student.parentId, title, body, type: 'INFO' }
+        data: { userId: student.parentId, title, message, type: typeEnum }
       });
       
-      emitToParent(io, student.parentId, 'notification', notif);
-      
-      const { messaging } = require('./firebase.js');
-      if (student.parent?.fcmToken && messaging && student.parent.preferences?.pushNotifications !== false) {
-        messaging.send({
-          token: student.parent.fcmToken,
-          notification: { title, body }
-        }).catch(e => req.log.error({ err: e }, 'FCM send failed'));
-      }
+      emitToUser(io, student.parentId, 'notification', notif);
     }
     
     res.json(log);

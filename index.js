@@ -34,6 +34,20 @@ try {
   logger.error({ err: err.message }, 'Failed to start TCP listener');
 }
 
+// Stale bus sweep (15 mins)
+setInterval(async () => {
+  try {
+    const cutoff = new Date(Date.now() - 15 * 60 * 1000);
+    const result = await prisma.bus.updateMany({
+      where: { status: 'ONLINE', updatedAt: { lt: cutoff } },
+      data: { status: 'OFFLINE' }
+    });
+    if (result.count > 0) logger.info({ count: result.count }, 'Marked stale buses OFFLINE');
+  } catch(err) {
+    logger.error({err}, 'Stale bus sweep failed');
+  }
+}, 5 * 60 * 1000);
+
 // ─── Graceful shutdown ─────────────────────────────────────
 let shuttingDown = false;
 async function shutdown(signal) {
