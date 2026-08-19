@@ -1,7 +1,17 @@
 # Voltava Fleet — GCP Deployment Runbook
 
-Greenfield deploy to a Google Cloud Compute Engine VM with Cloud SQL Postgres.
+Greenfield deploy to a Google Cloud Compute Engine VM running a self-hosted
+PostgreSQL on the same VM.
 Target scale: 10–50 schools / ~500 buses. **Hard cut** from the Render staging URL.
+
+> **Architecture note (current):** Cloud SQL is **no longer used** — Postgres now
+> runs directly on the Compute Engine VM to remove the managed-DB cost line item.
+> Section 3 ("Cloud SQL Postgres") and the Cloud SQL Auth Proxy steps are kept
+> **for reference only**. For the self-hosted setup, install PostgreSQL on the VM
+> (`sudo apt-get install -y postgresql`), create the `voltava` DB/user, and set
+> `DATABASE_URL=postgresql://voltava:<PASS>@localhost:5432/voltava_fleet?schema=public`.
+> Cost now tracks the **VM size + disk** — keep the 30-day `GpsLog` retention cron
+> (Section 10, "Ongoing operations") enabled so disk usage stays bounded.
 
 > **Ops prerequisite for the hard cut:** every Blackbox TM-100 SIM must be
 > reconfigured to point its Secondary IP (SIP) at the new static IP **before**

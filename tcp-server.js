@@ -12,6 +12,10 @@ const MAX_BUFFER_BYTES = 4 * 1024;
 const MAX_CONCURRENT_CONNECTIONS = 500;
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 
+// Throttles Bus.status='ONLINE' writes per bus so a live TCP device refreshes
+// updatedAt (for the stale-sweep) without a DB write on every packet.
+const tcpThrottleCache = new Map(); // busId → last status-write epoch ms
+
 let activeConnections = 0;
 
 function startTcpServer(io, tcpPort = config.TCP_PORT) {

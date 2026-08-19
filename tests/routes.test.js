@@ -8,6 +8,9 @@ jest.mock('@prisma/client', () => {
       delete: jest.fn(),
       findUnique: jest.fn(),
     },
+    trip: {
+      count: jest.fn(),
+    },
   };
   return { PrismaClient: jest.fn(() => mockPrisma) };
 });
@@ -20,6 +23,7 @@ describe('DELETE /api/routes/:id', () => {
   const superToken = () => jwt.sign({ id: '1', role: 'SUPER_ADMIN' }, SECRET);
 
   it('should successfully delete a route (SUPER_ADMIN bypasses ownership)', async () => {
+    prisma.trip.count.mockResolvedValue(0);
     prisma.route.delete.mockResolvedValue({ id: '1', name: 'Route 1' });
     const res = await request(app).delete('/api/routes/1').set('Authorization', `Bearer ${superToken()}`);
     expect(res.status).toBe(200);

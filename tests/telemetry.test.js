@@ -6,6 +6,7 @@ jest.mock('@prisma/client', () => {
   const mockPrisma = {
     bus: {
       findUnique: jest.fn(),
+      update: jest.fn(),
     },
     gpsLog: {
       create: jest.fn(),
