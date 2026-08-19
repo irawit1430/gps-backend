@@ -7,7 +7,7 @@ RUN npm ci --omit=dev --ignore-scripts \
     && npm ci --ignore-scripts
 COPY prisma ./prisma
 # Generate the Postgres Prisma client (bundled into node_modules)
-RUN npx prisma generate --schema=prisma/schema.postgresql.prisma
+RUN npx prisma generate --schema=prisma/schema.prisma
 
 FROM node:22-alpine AS runner
 ENV NODE_ENV=production

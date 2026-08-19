@@ -29,7 +29,15 @@ async function telemetryHmac(prisma) {
 
     let bus;
     try {
-      bus = await prisma.bus.findUnique({ where: { deviceId }, select: { id: true, deviceSecret: true, schoolId: true, licensePlate: true, capacity: true } });
+      bus = await prisma.bus.findUnique({ 
+        where: { deviceId },
+        include: {
+          trips: {
+            where: { status: 'ON_SCHEDULE' },
+            include: { driver: { select: { name: true } }, route: { select: { name: true } } },
+          },
+        },
+      });
     } catch (err) {
       return res.status(500).json({ error: 'Device lookup failed' });
     }

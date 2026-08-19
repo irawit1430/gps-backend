@@ -72,7 +72,6 @@ exports.createAdmin = z.object({
   password: z.string().min(12).max(200),
   role: z.enum(['SUPER_ADMIN', 'SCHOOL_ADMIN']),
   schoolId: uuid.optional().nullable(),
-  status: z.enum(["ONLINE", "OFFLINE"]).optional(),
 });
 
 exports.updateAdmin = z.object({
@@ -81,7 +80,6 @@ exports.updateAdmin = z.object({
   password: z.string().min(12).max(200).optional(),
   role: z.enum(['SUPER_ADMIN', 'SCHOOL_ADMIN']).optional(),
   schoolId: uuid.optional().nullable(),
-  status: z.enum(["ONLINE", "OFFLINE"]).optional(),
 });
 
 exports.createTrip = z.object({

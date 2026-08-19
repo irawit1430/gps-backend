@@ -8,7 +8,7 @@ const logger = require('./logger');
 if (config.RUN_MIGRATIONS) {
   const schemaFlag = config.DATABASE_URL.startsWith('file:')
     ? '--schema=prisma/schema.prisma'
-    : '--schema=prisma/schema.postgresql.prisma';
+    : '--schema=prisma/schema.prisma';
   try {
     logger.info({ schemaFlag }, 'Running prisma migrate deploy');
     execSync(`npx prisma migrate deploy ${schemaFlag}`, { stdio: 'inherit' });
@@ -21,6 +21,7 @@ if (config.RUN_MIGRATIONS) {
 
 const { server, io, prisma } = require('./server.js');
 const { startTcpServer } = require('./tcp-server.js');
+const { flushFirestore } = require('./firebase.js');
 
 const httpServer = server.listen(config.PORT, () => {
   logger.info({ port: config.PORT }, 'HTTP + Socket.IO server listening');
@@ -50,6 +51,12 @@ async function shutdown(signal) {
 
   await Promise.race([Promise.all(closers), timeout]);
 
+  try {
+    await flushFirestore();
+  } catch(err) {
+    logger.warn({ err: err.message }, 'flushFirestore errored');
+  }
+  
   try {
     await prisma.$disconnect();
   } catch (err) {

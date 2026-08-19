@@ -59,7 +59,10 @@ function startTcpServer(io, tcpPort = config.TCP_PORT) {
 
           logger.debug({ ip: clientAddress, header: parsed.header, imei: parsed.imei, lat: parsed.lat, lng: parsed.lng }, 'TCP packet');
 
-          const bus = await prisma.bus.findUnique({ where: { deviceId: parsed.imei } });
+          const bus = await prisma.bus.findUnique({ 
+            where: { deviceId: parsed.imei },
+            include: { trips: { where: { status: 'ON_SCHEDULE' }, select: { id: true } } }
+          });
           if (!bus) {
             logger.warn({ ip: clientAddress, imei: parsed.imei }, 'TCP: unregistered IMEI');
             continue;
@@ -67,7 +70,7 @@ function startTcpServer(io, tcpPort = config.TCP_PORT) {
 
           if (parsed.lat !== undefined && parsed.lng !== undefined && (parsed.lat !== 0 || parsed.lng !== 0)) {
             const log = await prisma.gpsLog.create({
-              data: { busId: bus.id, lat: parsed.lat, lng: parsed.lng, speed: parsed.speed || 0, timestamp: parsed.timestamp || new Date() },
+              data: { busId: bus.id, tripId: bus.trips?.[0]?.id || null, lat: parsed.lat, lng: parsed.lng, speed: parsed.speed || 0, timestamp: parsed.timestamp || new Date() },
             });
 
             syncGpsLogToFirebase({

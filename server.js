@@ -188,8 +188,9 @@ app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => 
       }
       if (!bus) return res.status(404).json({ error: 'Bus not found' });
 
+      const activeTrip = bus.trips?.[0];
       const log = await prisma.gpsLog.create({
-        data: { busId: bus.id, lat, lng, speed: speed || 0, timestamp: timestamp ? new Date(timestamp) : new Date() },
+        data: { busId: bus.id, tripId: activeTrip?.id || null, lat, lng, speed: speed || 0, timestamp: timestamp ? new Date(timestamp) : new Date() },
       });
 
       await prisma.bus.update({
@@ -473,6 +474,40 @@ app.post('/api/routes/:routeId/stops',
   }
 );
 
+app.put('/api/routes/:routeId/stops/reorder',
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  ownsRouteByParam,
+  validate({ body: S.reorderStops }),
+  async (req, res) => {
+    try {
+      const ids = req.body.map((r) => r.id);
+      const stops = await prisma.routeStop.findMany({ where: { id: { in: ids } } });
+      if (stops.length !== ids.length || stops.some((s) => s.routeId !== req.params.routeId)) {
+        return res.status(400).json({ error: 'Some stops do not belong to this route' });
+      }
+      // Two-phase update to avoid transient unique-collisions on (routeId, orderIdx)
+      // if you ever add such a constraint later. For now the index is non-unique so a
+      // single pass would work, but two-phase is safer.
+      await prisma.$transaction([
+        ...req.body.map((r, i) =>
+          prisma.routeStop.update({ where: { id: r.id }, data: { orderIdx: 1000000 + i } })
+        ),
+        ...req.body.map((r) =>
+          prisma.routeStop.update({ where: { id: r.id }, data: { orderIdx: r.orderIdx } })
+        ),
+      ]);
+      const updated = await prisma.routeStop.findMany({
+        where: { routeId: req.params.routeId },
+        orderBy: { orderIdx: 'asc' },
+      });
+      res.json(updated);
+    } catch (err) {
+      req.log.error({ err }, 'reorder stops failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
 app.put('/api/routes/:routeId/stops/:id',
   authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
   ownsRouteByParam,
@@ -505,40 +540,6 @@ app.delete('/api/routes/:routeId/stops/:id',
       res.json({ success: true });
     } catch (err) {
       req.log.error({ err }, 'delete stop failed');
-      res.status(500).json({ error: 'Internal server error' });
-    }
-  }
-);
-
-app.put('/api/routes/:routeId/stops/reorder',
-  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
-  ownsRouteByParam,
-  validate({ body: S.reorderStops }),
-  async (req, res) => {
-    try {
-      const ids = req.body.map((r) => r.id);
-      const stops = await prisma.routeStop.findMany({ where: { id: { in: ids } } });
-      if (stops.length !== ids.length || stops.some((s) => s.routeId !== req.params.routeId)) {
-        return res.status(400).json({ error: 'Some stops do not belong to this route' });
-      }
-      // Two-phase update to avoid transient unique-collisions on (routeId, orderIdx)
-      // if you ever add such a constraint later. For now the index is non-unique so a
-      // single pass would work, but two-phase is safer.
-      await prisma.$transaction([
-        ...req.body.map((r, i) =>
-          prisma.routeStop.update({ where: { id: r.id }, data: { orderIdx: 1000000 + i } })
-        ),
-        ...req.body.map((r) =>
-          prisma.routeStop.update({ where: { id: r.id }, data: { orderIdx: r.orderIdx } })
-        ),
-      ]);
-      const updated = await prisma.routeStop.findMany({
-        where: { routeId: req.params.routeId },
-        orderBy: { orderIdx: 'asc' },
-      });
-      res.json(updated);
-    } catch (err) {
-      req.log.error({ err }, 'reorder stops failed');
       res.status(500).json({ error: 'Internal server error' });
     }
   }
@@ -601,7 +602,14 @@ app.post('/api/schools/:schoolId/trips',
       if (!route || route.schoolId !== req.params.schoolId) return res.status(400).json({ error: 'Route not in this school' });
       if (!bus || (bus.schoolId && bus.schoolId !== req.params.schoolId)) return res.status(400).json({ error: 'Bus not in this school' });
       if (!driver || driver.role !== 'DRIVER' || driver.schoolId !== req.params.schoolId) return res.status(400).json({ error: 'Driver not in this school' });
-
+      
+      const activeTrips = await prisma.trip.findMany({
+        where: {
+          OR: [{ busId: req.body.busId }, { driverId: req.body.driverId }],
+          status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] },
+        }
+      });
+      if (activeTrips.length > 0) return res.status(400).json({ error: 'Bus or Driver is already assigned to an active trip' });
       const trip = await prisma.trip.create({
         data: { routeId: req.body.routeId, busId: req.body.busId, driverId: req.body.driverId, status: 'PLANNED' },
       });
@@ -1008,13 +1016,36 @@ app.post('/api/attendance', validate({ body: S.attendance }), async (req, res) =
     if (req.user.role === 'SCHOOL_ADMIN' && trip.route.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
     if (!['DRIVER', 'SCHOOL_ADMIN', 'SUPER_ADMIN'].includes(req.user.role)) return res.status(403).json({ error: 'Forbidden' });
 
-    const student = await prisma.student.findUnique({ where: { id: req.body.studentId } });
+    const student = await prisma.student.findUnique({ 
+      where: { id: req.body.studentId },
+      include: { parent: { select: { id: true, fcmToken: true, preferences: true } } }
+    });
     if (!student) return res.status(404).json({ error: 'Student not found' });
     if (student.schoolId !== trip.route.schoolId) return res.status(400).json({ error: 'Student not on this trip route' });
 
     const log = await prisma.attendanceLog.create({
       data: { studentId: req.body.studentId, tripId: req.body.tripId, type: req.body.type },
     });
+    
+    if (student.parentId) {
+      const title = `Student ${req.body.type}`;
+      const body = `${student.name} has been marked ${req.body.type}.`;
+      
+      const notif = await prisma.notification.create({
+        data: { userId: student.parentId, title, body, type: 'INFO' }
+      });
+      
+      emitToParent(io, student.parentId, 'notification', notif);
+      
+      const { messaging } = require('./firebase.js');
+      if (student.parent?.fcmToken && messaging && student.parent.preferences?.pushNotifications !== false) {
+        messaging.send({
+          token: student.parent.fcmToken,
+          notification: { title, body }
+        }).catch(e => req.log.error({ err: e }, 'FCM send failed'));
+      }
+    }
+    
     res.json(log);
   } catch (err) {
     req.log.error({ err }, 'attendance failed');
@@ -1605,6 +1636,16 @@ app.post('/api/notifications/:id/resolve', authorizeRoles('SUPER_ADMIN', 'SCHOOL
     req.log.error({ err }, 'resolve alert failed');
     res.status(500).json({ error: 'Internal server error' });
   }
+});
+// Global 404 Handler
+app.use((req, res, next) => {
+  res.status(404).json({ error: 'Endpoint not found' });
+});
+
+// Global Error Handler
+app.use((err, req, res, next) => {
+  req.log.error({ err }, 'Unhandled application error');
+  res.status(500).json({ error: 'Internal server error' });
 });
 
 module.exports = { app, server, io, prisma };
