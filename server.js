@@ -207,7 +207,6 @@ app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => 
         timestamp: log.timestamp,
       });
 
-      const activeTrip = bus.trips?.[0];
       emitToSchool(io, bus.schoolId, 'location_update', {
         busId: bus.id,
         licensePlate: bus.licensePlate,
