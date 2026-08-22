@@ -112,7 +112,7 @@ app.post('/api/auth/login', loginLimiter, validate({ body: S.login }), async (re
     const token = jwt.sign(
       { id: user.id, role: user.role, schoolId: user.schoolId },
       config.JWT_SECRET,
-      { expiresIn: config.JWT_EX_IN || config.JWT_EXPIRES_IN || '24h' }
+      { expiresIn: config.JWT_EXPIRES_IN || '24h' }
     );
 
     let deviceId, deviceSecret;
@@ -697,6 +697,7 @@ app.post('/api/schools/:schoolId/trips',
 // Students & attendance
 
 app.put('/api/trips/:tripId',
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
   ownsTrip,
   validate({ body: S.updateTrip }),
   async (req, res) => {
@@ -859,6 +860,9 @@ app.put('/api/students/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), vali
     });
     res.json(updated);
   } catch (err) {
+    if (err.code === 'P2002') {
+      return res.status(400).json({ error: 'RFID Tag is already assigned to another student.' });
+    }
     req.log.error({ err }, 'update student failed');
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -1147,6 +1151,8 @@ app.put('/api/drivers/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), valid
       where: { id: req.params.id },
       data
     });
+    // A password reset must revoke the driver's existing tokens.
+    if (req.body.password) invalidateUser(req.params.id);
     delete updated.password;
     res.json(updated);
   } catch (err) {
@@ -1574,10 +1580,12 @@ app.post('/api/devices', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), validate
 });
 
 app.put('/api/devices/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), validate({ body: S.updateDevice }), async (req, res) => {
-  const device = await prisma.bus.findUnique({ where: { id: req.params.id } });
-  if (req.user.role === 'SCHOOL_ADMIN' && (!device || device.schoolId !== req.user.schoolId)) return res.status(403).json({ error: 'Forbidden' });
-  if (req.user.role === 'SCHOOL_ADMIN') req.body.schoolId = req.user.schoolId;
   try {
+    if (req.user.role === 'SCHOOL_ADMIN') {
+      const existing = await prisma.bus.findUnique({ where: { id: req.params.id } });
+      if (!existing || existing.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
+      req.body.schoolId = req.user.schoolId;
+    }
     const { deviceSecret, ...safeBody } = req.body || {};
     const device = await prisma.bus.update({ where: { id: req.params.id }, data: safeBody });
     emitToSchool(io, device.schoolId, 'device_status_change', { deviceId: device.id, status: 'ONLINE', message: 'Device updated' });
@@ -1601,9 +1609,11 @@ app.post('/api/devices/:id/rotate-secret', authorizeRoles('SUPER_ADMIN'), async 
 });
 
 app.delete('/api/devices/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), async (req, res) => {
-  const device = await prisma.bus.findUnique({ where: { id: req.params.id } });
-  if (req.user.role === 'SCHOOL_ADMIN' && (!device || device.schoolId !== req.user.schoolId)) return res.status(403).json({ error: 'Forbidden' });
   try {
+    if (req.user.role === 'SCHOOL_ADMIN') {
+      const existing = await prisma.bus.findUnique({ where: { id: req.params.id } });
+      if (!existing || existing.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
+    }
     await prisma.bus.delete({ where: { id: req.params.id } });
     emitToSchool(io, null, 'device_status_change', { deviceId: req.params.id, status: 'OFFLINE', message: 'Device decommissioned' });
     res.json({ success: true });

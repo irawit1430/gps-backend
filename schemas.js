@@ -51,7 +51,16 @@ exports.createStudent = z.object({
   parentName: z.string().max(200).optional().nullable(),
 });
 
-exports.updateStudent = exports.createStudent.partial();
+// Only real Student columns are updatable. createStudent also carries
+// parentEmail/parentName/schoolId (used for provisioning / tenant), which are NOT
+// direct Student columns — passing them to student.update would 500, and letting a
+// SCHOOL_ADMIN change schoolId would move the student cross-tenant. So whitelist here.
+exports.updateStudent = z.object({
+  name: z.string().min(1).max(200).optional(),
+  grade: z.string().max(50).optional().nullable(),
+  rfidTag: z.string().min(1).max(64).optional(),
+  photoUrl: z.string().max(500).optional().nullable(),
+});
 
 exports.updateDriver = z.object({
   name: z.string().min(1).max(200).optional(),
