@@ -51,6 +51,15 @@ exports.createStudent = z.object({
   parentName: z.string().max(200).optional().nullable(),
 });
 
+exports.updateStudent = exports.createStudent.partial();
+
+exports.updateDriver = z.object({
+  name: z.string().min(1).max(200).optional(),
+  email: z.string().email().optional(),
+  password: z.string().min(8).max(200).optional(),
+});
+
+
 exports.createDevice = z.object({
   deviceId: z.string().min(1).max(64),
   licensePlate: z.string().min(1).max(32),

@@ -805,6 +805,37 @@ async function studentCreateHandler(req, res) {
 app.post('/api/schools/:schoolId/students', requireTenant('schoolId'), validate({ body: S.createStudent }), studentCreateHandler);
 app.post('/api/students', validate({ body: S.createStudent }), studentCreateHandler);
 
+app.put('/api/students/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), validate({ body: S.updateStudent }), async (req, res) => {
+  try {
+    const student = await prisma.student.findUnique({ where: { id: req.params.id } });
+    if (!student) return res.status(404).json({ error: 'Student not found' });
+    if (req.user.role === 'SCHOOL_ADMIN' && student.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
+    
+    const updated = await prisma.student.update({
+      where: { id: req.params.id },
+      data: req.body
+    });
+    res.json(updated);
+  } catch (err) {
+    req.log.error({ err }, 'update student failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.delete('/api/students/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), async (req, res) => {
+  try {
+    const student = await prisma.student.findUnique({ where: { id: req.params.id } });
+    if (!student) return res.status(404).json({ error: 'Student not found' });
+    if (req.user.role === 'SCHOOL_ADMIN' && student.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
+    
+    await prisma.student.delete({ where: { id: req.params.id } });
+    res.status(204).send();
+  } catch (err) {
+    req.log.error({ err }, 'delete student failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Student → route stop
 app.post('/api/student-route-mappings',
   authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
@@ -1041,6 +1072,43 @@ async function sosHandler(req, res) {
 }
 app.post('/api/alerts/sos', validate({ body: S.sos }), sosHandler);
 app.post('/api/driver/emergency', validate({ body: S.sos }), sosHandler); // doc-parity alias
+
+app.put('/api/drivers/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), validate({ body: S.updateDriver }), async (req, res) => {
+  try {
+    const driver = await prisma.user.findUnique({ where: { id: req.params.id, role: 'DRIVER' } });
+    if (!driver) return res.status(404).json({ error: 'Driver not found' });
+    if (req.user.role === 'SCHOOL_ADMIN' && driver.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
+    
+    const data = { ...req.body };
+    if (data.password) {
+      data.password = await bcrypt.hash(data.password, 10);
+      data.mustResetPassword = true;
+    }
+    const updated = await prisma.user.update({
+      where: { id: req.params.id },
+      data
+    });
+    delete updated.password;
+    res.json(updated);
+  } catch (err) {
+    req.log.error({ err }, 'update driver failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.delete('/api/drivers/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), async (req, res) => {
+  try {
+    const driver = await prisma.user.findUnique({ where: { id: req.params.id, role: 'DRIVER' } });
+    if (!driver) return res.status(404).json({ error: 'Driver not found' });
+    if (req.user.role === 'SCHOOL_ADMIN' && driver.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
+    
+    await prisma.user.delete({ where: { id: req.params.id } });
+    res.status(204).send();
+  } catch (err) {
+    req.log.error({ err }, 'delete driver failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 app.get('/api/drivers/:driverId/trips',
   requireSelfOrRoles('driverId', 'SUPER_ADMIN', 'SCHOOL_ADMIN'),
@@ -1428,7 +1496,8 @@ app.get('/api/devices/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), async
   }
 });
 
-app.post('/api/devices', authorizeRoles('SUPER_ADMIN'), validate({ body: S.createDevice }), async (req, res) => {
+app.post('/api/devices', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), validate({ body: S.createDevice }), async (req, res) => {
+  if (req.user.role === 'SCHOOL_ADMIN') req.body.schoolId = req.user.schoolId;
   try {
     const { deviceId, licensePlate, capacity, schoolId } = req.body;
     // Auto-generate device secret for HMAC
@@ -1445,7 +1514,10 @@ app.post('/api/devices', authorizeRoles('SUPER_ADMIN'), validate({ body: S.creat
   }
 });
 
-app.put('/api/devices/:id', authorizeRoles('SUPER_ADMIN'), validate({ body: S.updateDevice }), async (req, res) => {
+app.put('/api/devices/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), validate({ body: S.updateDevice }), async (req, res) => {
+  const device = await prisma.bus.findUnique({ where: { id: req.params.id } });
+  if (req.user.role === 'SCHOOL_ADMIN' && (!device || device.schoolId !== req.user.schoolId)) return res.status(403).json({ error: 'Forbidden' });
+  if (req.user.role === 'SCHOOL_ADMIN') req.body.schoolId = req.user.schoolId;
   try {
     const { deviceSecret, ...safeBody } = req.body || {};
     const device = await prisma.bus.update({ where: { id: req.params.id }, data: safeBody });
@@ -1469,7 +1541,9 @@ app.post('/api/devices/:id/rotate-secret', authorizeRoles('SUPER_ADMIN'), async 
   }
 });
 
-app.delete('/api/devices/:id', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
+app.delete('/api/devices/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), async (req, res) => {
+  const device = await prisma.bus.findUnique({ where: { id: req.params.id } });
+  if (req.user.role === 'SCHOOL_ADMIN' && (!device || device.schoolId !== req.user.schoolId)) return res.status(403).json({ error: 'Forbidden' });
   try {
     await prisma.bus.delete({ where: { id: req.params.id } });
     emitToSchool(io, null, 'device_status_change', { deviceId: req.params.id, status: 'OFFLINE', message: 'Device decommissioned' });
