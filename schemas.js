@@ -221,3 +221,17 @@ exports.LEAVE_STATUS = LEAVE_STATUS;
 exports.ATTENDANCE_TYPE = ATTENDANCE_TYPE;
 exports.EMERGENCY_TYPE = EMERGENCY_TYPE;
 
+
+exports.broadcast = z.object({
+  message: z.string().min(1).max(1000),
+  routeId: uuid.optional(),
+  tripId: uuid.optional(),
+});
+
+exports.bulkStudents = z.array(exports.createStudent).min(1).max(2000);
+
+exports.updateMe = z.object({
+  name: z.string().min(1).max(200).optional(),
+  photoUrl: z.string().url().max(1000).optional().nullable(),
+  password: z.string().min(8).max(200).optional(),
+});

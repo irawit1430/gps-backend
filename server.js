@@ -852,6 +852,70 @@ async function studentCreateHandler(req, res) {
 }
 
 app.post('/api/schools/:schoolId/students', requireTenant('schoolId'), validate({ body: S.createStudent }), studentCreateHandler);
+app.post('/api/schools/:schoolId/broadcast', requireTenant('schoolId'), authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), validate({ body: S.broadcast }), async (req, res) => {
+  try {
+    const alert = await prisma.emergencyAlert.create({
+      data: {
+        schoolId: req.params.schoolId,
+        type: 'ADMIN_BROADCAST',
+        message: req.body.message,
+        routeId: req.body.routeId,
+        tripId: req.body.tripId,
+      }
+    });
+    
+    // Broadcast via socket to school room
+    if (io) emitToSchool(io, req.params.schoolId, 'emergency_alert', alert);
+    
+    res.json(alert);
+  } catch (err) {
+    req.log.error({ err }, 'broadcast failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.post('/api/schools/:schoolId/students/bulk', requireTenant('schoolId'), authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), validate({ body: S.bulkStudents }), async (req, res) => {
+  try {
+    const students = req.body;
+    let createdCount = 0;
+    
+    // Process in transaction
+    await prisma.$transaction(async (tx) => {
+      for (const st of students) {
+        let parent = null;
+        if (st.parentEmail) {
+          parent = await tx.user.upsert({
+            where: { email: st.parentEmail },
+            update: {},
+            create: {
+              email: st.parentEmail,
+              name: st.parentName || 'Parent',
+              password: await bcrypt.hash('password123', 10),
+              role: 'PARENT',
+              schoolId: req.params.schoolId,
+              mustResetPassword: true,
+            }
+          });
+        }
+        await tx.student.create({
+          data: {
+            schoolId: req.params.schoolId,
+            rfidTag: st.rfidTag,
+            name: st.name,
+            grade: st.grade,
+            parentId: parent ? parent.id : null,
+          }
+        });
+        createdCount++;
+      }
+    });
+    res.json({ success: true, message: `Created ${createdCount} students successfully.` });
+  } catch (err) {
+    req.log.error({ err }, 'bulk student import failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 app.post('/api/students', validate({ body: S.createStudent }), studentCreateHandler);
 
 app.put('/api/students/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), validate({ body: S.updateStudent }), async (req, res) => {
@@ -1160,6 +1224,33 @@ app.get('/api/driver/telemetry-credentials', async (req, res) => {
     res.json({ deviceId: activeTrip.bus.deviceId, deviceSecret: activeTrip.bus.deviceSecret });
   } catch (err) {
     req.log.error({ err }, 'telemetry credentials failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Self Profile Management
+app.get('/api/users/me', async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    delete user.password;
+    res.json(user);
+  } catch (err) {
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.put('/api/users/me', validate({ body: S.updateMe }), async (req, res) => {
+  try {
+    const data = { ...req.body };
+    if (data.password) {
+      data.password = await bcrypt.hash(data.password, 10);
+      data.mustResetPassword = false;
+    }
+    const updated = await prisma.user.update({ where: { id: req.user.id }, data });
+    delete updated.password;
+    res.json(updated);
+  } catch (err) {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
