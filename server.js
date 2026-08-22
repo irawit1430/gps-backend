@@ -615,6 +615,8 @@ app.put('/api/parents/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), valid
       where: { id: req.params.id },
       data
     });
+    // A password reset must revoke the parent's existing tokens.
+    if (req.body.password) invalidateUser(req.params.id);
     delete updated.password;
     res.json(updated);
   } catch (err) {
