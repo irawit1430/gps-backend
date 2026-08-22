@@ -184,6 +184,7 @@ exports.sos = z.object({
   schoolId: uuid.optional(),
   message: z.string().max(500).optional().nullable(),
   tripId: uuid.optional().nullable(),
+  type: z.enum(EMERGENCY_TYPE).optional(),
 });
 
 exports.mapping = z.object({

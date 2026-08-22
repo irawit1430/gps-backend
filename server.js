@@ -683,7 +683,7 @@ app.post('/api/schools/:schoolId/trips',
       const activeTrips = await prisma.trip.findMany({
         where: {
           OR: [{ busId: req.body.busId }, { driverId: req.body.driverId }],
-          status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] },
+          status: { in: ['ON_SCHEDULE', 'DELAYED'] },
         }
       });
       if (activeTrips.length > 0) return res.status(400).json({ error: 'Bus or Driver is already assigned to an active trip' });
@@ -721,7 +721,7 @@ app.put('/api/trips/:tripId',
           where: {
             id: { not: tripId },
             OR: [{ busId: checkBus }, { driverId: checkDriver }],
-            status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] },
+            status: { in: ['ON_SCHEDULE', 'DELAYED'] },
           }
         });
         if (activeTrips.length > 0) return res.status(400).json({ error: 'New Bus or Driver is already assigned to an active trip' });
@@ -1123,7 +1123,7 @@ async function sosHandler(req, res) {
       data: {
         schoolId: schoolId || 'unknown',
         senderId: req.user.id,
-        type: 'DRIVER_SOS',
+        type: req.body.type || 'DRIVER_SOS',
         message: message || 'Driver triggered SOS',
         tripId: tripId || null,
         status: 'ACTIVE',
@@ -1835,7 +1835,7 @@ app.get('/api/notifications', async (req, res) => {
     if (role === 'SUPER_ADMIN') {
       const realAlerts = await prisma.emergencyAlert.findMany({ orderBy: { createdAt: 'desc' }, take: limit });
       const formatted = realAlerts.map((a) => ({
-        id: a.id, type: 'DRIVER_SOS', title: 'Emergency SOS',
+        id: a.id, type: req.body.type || 'DRIVER_SOS', title: 'Emergency SOS',
         message: a.message || 'Driver triggered SOS alert',
         status: a.status, isRead: a.status === 'RESOLVED', createdAt: a.createdAt,
       }));

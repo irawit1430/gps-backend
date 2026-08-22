@@ -14,7 +14,13 @@ async function telemetryHmac(prisma) {
   return async function (req, res, next) {
     if (!config.TELEMETRY_HMAC_ENFORCE) return next();
 
-    const { deviceId, lat, lng, speed } = req.body || {};
+    let { deviceId, lat, lng, speed, logs } = req.body || {};
+    // For bulk uploads, use the first log in the array to verify the signature
+    if (logs && Array.isArray(logs) && logs.length > 0 && lat === undefined) {
+      lat = logs[0].lat;
+      lng = logs[0].lng;
+      speed = logs[0].speed;
+    }
     const sig = req.headers['x-device-signature'];
     const ts = req.headers['x-device-timestamp'];
 
