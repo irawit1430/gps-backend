@@ -1937,7 +1937,7 @@ app.get('/api/notifications', async (req, res) => {
     if (role === 'SUPER_ADMIN') {
       const realAlerts = await prisma.emergencyAlert.findMany({ orderBy: { createdAt: 'desc' }, take: limit });
       const formatted = realAlerts.map((a) => ({
-        id: a.id, type: req.body.type || 'DRIVER_SOS', title: 'Emergency SOS',
+        id: a.id, type: a.type || 'DRIVER_SOS', title: 'Emergency SOS',
         message: a.message || 'Driver triggered SOS alert',
         status: a.status, isRead: a.status === 'RESOLVED', createdAt: a.createdAt,
       }));
