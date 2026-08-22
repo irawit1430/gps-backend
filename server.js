@@ -642,6 +642,64 @@ app.post('/api/schools/:schoolId/trips',
 );
 
 // Students & attendance
+
+app.put('/api/trips/:tripId',
+  ownsTrip,
+  validate({ body: S.updateTrip }),
+  async (req, res) => {
+    try {
+      const tripId = req.params.tripId;
+      const { busId, driverId, routeId } = req.body;
+      
+      const existingTrip = await prisma.trip.findUnique({ where: { id: tripId }, include: { route: true } });
+      if (!existingTrip) return res.status(404).json({ error: 'Trip not found' });
+      
+      // If bus or driver is changing, ensure they aren't on another active trip
+      if (busId || driverId) {
+        const checkBus = busId || existingTrip.busId;
+        const checkDriver = driverId || existingTrip.driverId;
+        
+        const activeTrips = await prisma.trip.findMany({
+          where: {
+            id: { not: tripId },
+            OR: [{ busId: checkBus }, { driverId: checkDriver }],
+            status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] },
+          }
+        });
+        if (activeTrips.length > 0) return res.status(400).json({ error: 'New Bus or Driver is already assigned to an active trip' });
+      }
+
+      // If updating route, bus, or driver, ensure they belong to the same school
+      const schoolId = existingTrip.route.schoolId;
+      if (routeId && routeId !== existingTrip.routeId) {
+        const route = await prisma.route.findUnique({ where: { id: routeId } });
+        if (!route || route.schoolId !== schoolId) return res.status(400).json({ error: 'Route not in this school' });
+      }
+      if (busId && busId !== existingTrip.busId) {
+        const bus = await prisma.bus.findUnique({ where: { id: busId } });
+        if (!bus || (bus.schoolId && bus.schoolId !== schoolId)) return res.status(400).json({ error: 'Bus not in this school' });
+      }
+      if (driverId && driverId !== existingTrip.driverId) {
+        const driver = await prisma.user.findUnique({ where: { id: driverId } });
+        if (!driver || driver.role !== 'DRIVER' || driver.schoolId !== schoolId) return res.status(400).json({ error: 'Driver not in this school' });
+      }
+
+      const updated = await prisma.trip.update({
+        where: { id: tripId },
+        data: {
+          ...(busId && { busId }),
+          ...(driverId && { driverId }),
+          ...(routeId && { routeId })
+        }
+      });
+      res.json(updated);
+    } catch (err) {
+      req.log.error({ err }, 'update trip failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
 app.get('/api/schools/:schoolId/students', requireTenant('schoolId'), async (req, res) => {
   try {
     const students = await prisma.student.findMany({

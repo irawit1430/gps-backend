@@ -88,6 +88,12 @@ exports.createTrip = z.object({
   driverId: uuid,
 });
 
+exports.updateTrip = z.object({
+  routeId: uuid.optional(),
+  busId: uuid.optional(),
+  driverId: uuid.optional(),
+});
+
 exports.tripStatus = z.object({
   status: z.enum(TRIP_STATUS),
 });
