@@ -25,6 +25,7 @@
 
 | Commit | What | Verdict | Follow-up |
 |--------|------|---------|-----------|
+| `71c266d` | CSV bulk import, broadcast, self-profile | 🔴 broadcast wrote `routeId` (not an EmergencyAlert column → 500); 🟡 `PUT /api/users/me` pw change didn't revoke tokens; 🔴 bulk import hardcodes parent pw `password123` | broadcast + users/me fixed (this commit); bulk pw = Open Item 8 |
 | `a36c9c4` | Double-booking, bulk telemetry, SOS types | 🔴 GET /api/notifications read `req.body.type` (mislabeled all alerts); 🟡 double-booking narrowed to active-only; 🟡 bulk telemetry half-wired | notifications fixed (this commit); see Open Items 6–7 |
 | `793aa58` | Parent mgmt APIs + student route unmapping | 🟡 parent password reset didn't revoke tokens | fixed in `63327f7` |
 | `303c53b` | School-admin CRUD (students/drivers/devices) | 🔴 `PUT /api/students/:id` 500 + cross-tenant via schoolId; devices pre-try DB call | fixed in `a911bca` |
@@ -73,6 +74,13 @@
    will 400 at validation. To finish: allow `logs` in the schema (single OR bulk) and
    iterate `logs` in the handler (createMany + emit). Also note: signing only `logs[0]`
    leaves the rest of the batch unsigned — sign the whole batch when completing this.
+8. **Bulk student import gives every parent the password `password123`**
+   (`POST /api/schools/:schoolId/students/bulk` in `server.js`). The single-student
+   flow generates a random password and returns it; bulk hardcodes a known weak one.
+   Needs a product decision: generate a random password per parent and return a
+   credentials list to the admin, or require the forced-reset flow. NOT changed yet
+   (changing it affects how imported parents first log in). The `.agents/AGENTS.md`
+   `password123` exemption is for pre-seeded TEST users only — not for real imports.
 
 ## Key file addresses
 - API + routes: `server.js`

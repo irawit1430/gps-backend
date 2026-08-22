@@ -857,13 +857,15 @@ async function studentCreateHandler(req, res) {
 app.post('/api/schools/:schoolId/students', requireTenant('schoolId'), validate({ body: S.createStudent }), studentCreateHandler);
 app.post('/api/schools/:schoolId/broadcast', requireTenant('schoolId'), authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), validate({ body: S.broadcast }), async (req, res) => {
   try {
+    // NOTE: EmergencyAlert has no routeId column — only tripId. Passing routeId
+    // would throw. senderId records who broadcast it.
     const alert = await prisma.emergencyAlert.create({
       data: {
         schoolId: req.params.schoolId,
+        senderId: req.user.id,
         type: 'ADMIN_BROADCAST',
         message: req.body.message,
-        routeId: req.body.routeId,
-        tripId: req.body.tripId,
+        tripId: req.body.tripId || null,
       }
     });
     
@@ -1251,6 +1253,11 @@ app.put('/api/users/me', validate({ body: S.updateMe }), async (req, res) => {
       data.mustResetPassword = false;
     }
     const updated = await prisma.user.update({ where: { id: req.user.id }, data });
+    // A self password change revokes existing sessions (consistency with change-password).
+    if (req.body.password) {
+      invalidateUser(req.user.id);
+      logoutToken(req.token);
+    }
     delete updated.password;
     res.json(updated);
   } catch (err) {

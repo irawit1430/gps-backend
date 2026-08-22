@@ -224,7 +224,7 @@ exports.EMERGENCY_TYPE = EMERGENCY_TYPE;
 
 exports.broadcast = z.object({
   message: z.string().min(1).max(1000),
-  routeId: uuid.optional(),
+  // routeId intentionally omitted: EmergencyAlert has no routeId column.
   tripId: uuid.optional(),
 });
 
