@@ -33,21 +33,22 @@ describe('GET /api/schools/:schoolId/drivers', () => {
 
   it('should return 200 and a list of drivers when authorized', async () => {
     const mockDrivers = [
-      { id: 1, name: 'Driver 1', role: 'DRIVER', schoolId: 'school-1' },
-      { id: 2, name: 'Driver 2', role: 'DRIVER', schoolId: 'school-1' },
+      { id: 1, name: 'Driver 1', role: 'DRIVER', schoolId: 'school-1', driverTrips: [] },
+      { id: 2, name: 'Driver 2', role: 'DRIVER', schoolId: 'school-1', driverTrips: [] },
     ];
     prisma.user.findMany.mockResolvedValue(mockDrivers);
 
     const res = await request(app).get('/api/schools/school-1/drivers').set('Authorization', `Bearer ${token}`);
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual(mockDrivers);
+    // Handler adds isAvailable = (no active/planned trips)
+    expect(res.body).toEqual(mockDrivers.map((d) => ({ ...d, isAvailable: true })));
     expect(prisma.user.findMany).toHaveBeenCalledWith({
       where: { schoolId: 'school-1', role: 'DRIVER' },
       select: {
         id: true, name: true, email: true, role: true, photoUrl: true,
         notificationSettings: true, schoolId: true, createdAt: true, updatedAt: true,
-        driverTrips: { where: { status: { in: ['PLANNED', 'ON_SCHEDULE'] } }, include: { bus: true, route: true } },
+        driverTrips: { where: { status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } }, include: { bus: true, route: true } },
       },
     });
   });
