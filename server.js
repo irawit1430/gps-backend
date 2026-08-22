@@ -115,6 +115,10 @@ app.post('/api/auth/login', loginLimiter, validate({ body: S.login }), async (re
       { expiresIn: config.JWT_EXPIRES_IN || '24h' }
     );
 
+    // DEPRECATED: shipping the long-lived HMAC deviceSecret in every login response
+    // is a security smell. Clients should migrate to GET /api/driver/telemetry-credentials
+    // (fetched only when phone-GPS is needed). These fields will be removed once the
+    // driver app has switched over.
     let deviceId, deviceSecret;
     if (user.role === 'DRIVER') {
       const activeTrip = await prisma.trip.findFirst({
@@ -1135,6 +1139,28 @@ async function sosHandler(req, res) {
 }
 app.post('/api/alerts/sos', validate({ body: S.sos }), sosHandler);
 app.post('/api/driver/emergency', validate({ body: S.sos }), sosHandler); // doc-parity alias
+
+// Phone-GPS telemetry credentials for the authenticated driver's assigned bus.
+// Preferred over the (deprecated) login-response deviceSecret: fetch this only when
+// starting phone-based tracking, so the HMAC secret is not shipped on every login.
+// Returns the secret only to the DRIVER, only for their own active-trip bus.
+app.get('/api/driver/telemetry-credentials', async (req, res) => {
+  try {
+    if (req.user.role !== 'DRIVER') return res.status(403).json({ error: 'Forbidden: drivers only' });
+    const activeTrip = await prisma.trip.findFirst({
+      where: { driverId: req.user.id, status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
+      include: { bus: { select: { deviceId: true, deviceSecret: true } } },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (!activeTrip || !activeTrip.bus) {
+      return res.status(404).json({ error: 'No active trip with an assigned device' });
+    }
+    res.json({ deviceId: activeTrip.bus.deviceId, deviceSecret: activeTrip.bus.deviceSecret });
+  } catch (err) {
+    req.log.error({ err }, 'telemetry credentials failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 app.put('/api/drivers/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), validate({ body: S.updateDriver }), async (req, res) => {
   try {

@@ -82,11 +82,19 @@ POST /api/telemetry
 🔑 Sign as:
 ```
 HMAC_SHA256( key = deviceSecret,
-             msg = `${deviceId}.${timestamp}.${lat}.${lng}` )  → hex
+             msg = `${deviceId}.${timestamp}.${lat}.${lng}.${speed || 0}` )  → hex
 ```
-The `deviceSecret` is issued **once** when a bus is created (Super Admin
-Console). It must be provisioned into the phone (config screen for the driver,
-QR code, etc.) — the app cannot fetch it later from the API.
+**Getting the `deviceSecret`:** call the dedicated endpoint when phone-GPS starts:
+```
+GET /api/driver/telemetry-credentials     (Authorization: Bearer <jwt>)
+→ { deviceId, deviceSecret }              // for the driver's active-trip bus
+404 → no active trip with an assigned device
+```
+Fetch it only when you actually begin phone-based tracking, store in secure
+storage, and clear on logout.
+
+> ⚠️ The login response also returns `deviceId`/`deviceSecret` today, but that is
+> **deprecated** and will be removed — migrate to the endpoint above.
 
 Timestamp skew tolerance: **300 seconds**. Use the phone clock.
 
@@ -96,7 +104,7 @@ import crypto from 'crypto';
 const timestamp = Math.floor(Date.now() / 1000);
 const signature = crypto
   .createHmac('sha256', deviceSecret)
-  .update(`${deviceId}.${timestamp}.${lat}.${lng}`)
+  .update(`${deviceId}.${timestamp}.${lat}.${lng}.${speed || 0}`)
   .digest('hex');
 
 await fetch(`${API_BASE}/api/telemetry`, {
@@ -106,14 +114,15 @@ await fetch(`${API_BASE}/api/telemetry`, {
     'X-Device-Signature': signature,
     'X-Device-Timestamp': String(timestamp),
   },
-  body: JSON.stringify({ deviceId, lat, lng, speed }),
+  body: JSON.stringify({ deviceId, lat, lng, speed: speed || 0 }),
 });
 ```
 
 **Flutter example:**
 ```dart
 final ts = (DateTime.now().millisecondsSinceEpoch ~/ 1000).toString();
-final body = '$deviceId.$ts.$lat.$lng';
+final spd = speed ?? 0;
+final body = '$deviceId.$ts.$lat.$lng.$spd';
 final sig = Hmac(sha256, utf8.encode(deviceSecret))
     .convert(utf8.encode(body))
     .toString();
@@ -124,7 +133,7 @@ await http.post(
     'X-Device-Signature': sig,
     'X-Device-Timestamp': ts,
   },
-  body: jsonEncode({'deviceId': deviceId, 'lat': lat, 'lng': lng, 'speed': speed}),
+  body: jsonEncode({'deviceId': deviceId, 'lat': lat, 'lng': lng, 'speed': spd}),
 );
 ```
 
