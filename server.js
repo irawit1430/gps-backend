@@ -620,6 +620,9 @@ app.put('/api/parents/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), valid
     delete updated.password;
     res.json(updated);
   } catch (err) {
+    if (err.code === 'P2002' && err.meta?.target?.includes('email')) {
+      return res.status(400).json({ error: 'Email already in use' });
+    }
     req.log.error({ err }, 'update parent failed');
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -1251,6 +1254,9 @@ app.put('/api/users/me', validate({ body: S.updateMe }), async (req, res) => {
     delete updated.password;
     res.json(updated);
   } catch (err) {
+    if (err.code === 'P2002' && err.meta?.target?.includes('email')) {
+      return res.status(400).json({ error: 'Email already in use' });
+    }
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -1275,6 +1281,9 @@ app.put('/api/drivers/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), valid
     delete updated.password;
     res.json(updated);
   } catch (err) {
+    if (err.code === 'P2002' && err.meta?.target?.includes('email')) {
+      return res.status(400).json({ error: 'Email already in use' });
+    }
     req.log.error({ err }, 'update driver failed');
     res.status(500).json({ error: 'Internal server error' });
   }
