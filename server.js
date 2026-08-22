@@ -274,15 +274,16 @@ app.get('/api/schools/:schoolId/buses', requireTenant('schoolId'), async (req, r
       include: {
         gpsLogs: { orderBy: { timestamp: 'desc' }, take: 1 },
         trips: {
-          where: { status: { in: ['ON_SCHEDULE', 'DELAYED'] } },
+          where: { status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
           include: { driver: { select: { name: true } }, route: { select: { name: true } } },
         },
       },
     });
     res.json(
       buses.map((b) => {
-        const t = b.trips[0];
-        return { ...b, driverName: t?.driver?.name || 'Unassigned', routeName: t?.route?.name || 'Off-Route' };
+        const t = b.trips.find(x => x.status === 'ON_SCHEDULE' || x.status === 'DELAYED');
+        const isAvailable = b.trips.length === 0;
+        return { ...b, driverName: t?.driver?.name || 'Unassigned', routeName: t?.route?.name || 'Off-Route', isAvailable };
       })
     );
   } catch (err) {
@@ -584,12 +585,12 @@ app.get('/api/schools/:schoolId/drivers', requireTenant('schoolId'), async (req,
         id: true, name: true, email: true, role: true, photoUrl: true,
         notificationSettings: true, schoolId: true, createdAt: true, updatedAt: true,
         driverTrips: {
-          where: { status: { in: ['PLANNED', 'ON_SCHEDULE'] } },
+          where: { status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
           include: { bus: true, route: true },
         },
       },
     });
-    res.json(drivers);
+    res.json(drivers.map(d => ({ ...d, isAvailable: d.driverTrips.length === 0 })));
   } catch (err) {
     req.log.error({ err }, 'list drivers failed');
     res.status(500).json({ error: 'Internal server error' });
