@@ -25,6 +25,7 @@
 
 | Commit | What | Verdict | Follow-up |
 |--------|------|---------|-----------|
+| `a36c9c4` | Double-booking, bulk telemetry, SOS types | 🔴 GET /api/notifications read `req.body.type` (mislabeled all alerts); 🟡 double-booking narrowed to active-only; 🟡 bulk telemetry half-wired | notifications fixed (this commit); see Open Items 6–7 |
 | `793aa58` | Parent mgmt APIs + student route unmapping | 🟡 parent password reset didn't revoke tokens | fixed in `63327f7` |
 | `303c53b` | School-admin CRUD (students/drivers/devices) | 🔴 `PUT /api/students/:id` 500 + cross-tenant via schoolId; devices pre-try DB call | fixed in `a911bca` |
 | `332ab5d` | `isAvailable` flag on buses/drivers GET | ✅ correct | test updated in `b0a1927` |
@@ -59,6 +60,19 @@
 5. **HMAC telemetry replay.** `middleware/telemetryHmac.js` signs
    `deviceId.ts.lat.lng.speed` but has no nonce/dedup — a captured signed packet can
    be replayed within the 300s skew window.
+6. **Double-booking now only enforced against ACTIVE trips** (`a36c9c4` narrowed the
+   create/reassign check to `ON_SCHEDULE`/`DELAYED`, dropping `PLANNED`). Two PLANNED
+   trips for the same bus/driver can now coexist, and `PATCH /api/trips/:tripId/status`
+   does NOT re-check on start — so two trips can both go ON_SCHEDULE for one bus.
+   If multiple-PLANNED is intentional (pre-planning), add the conflict check to the
+   status-transition to close the runtime hole.
+7. **Bulk telemetry is only half-wired.** `middleware/telemetryHmac.js` now reads a
+   `logs[]` array (signs `logs[0]`), but `S.telemetry` (`schemas.js`) still *requires*
+   top-level `lat`/`lng` and has no `logs`, and the `POST /api/telemetry` handler
+   (`server.js`) only saves a single point. A bulk `{ deviceId, logs:[...] }` payload
+   will 400 at validation. To finish: allow `logs` in the schema (single OR bulk) and
+   iterate `logs` in the handler (createMany + emit). Also note: signing only `logs[0]`
+   leaves the rest of the batch unsigned — sign the whole batch when completing this.
 
 ## Key file addresses
 - API + routes: `server.js`
