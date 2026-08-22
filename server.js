@@ -577,6 +577,48 @@ app.delete('/api/routes/:routeId/stops/:id',
 );
 
 // Drivers
+app.get('/api/schools/:schoolId/parents', requireTenant('schoolId'), async (req, res) => {
+  try {
+    const parents = await prisma.user.findMany({
+      where: { schoolId: req.params.schoolId, role: 'PARENT' },
+      select: {
+        id: true, name: true, email: true, role: true, photoUrl: true,
+        createdAt: true, updatedAt: true,
+        parentStudents: {
+          include: { routeMappings: { include: { routeStop: { include: { route: true } } } } }
+        }
+      },
+    });
+    res.json(parents);
+  } catch (err) {
+    req.log.error({ err }, 'list parents failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.put('/api/parents/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), validate({ body: S.updateDriver }), async (req, res) => {
+  try {
+    const parent = await prisma.user.findUnique({ where: { id: req.params.id, role: 'PARENT' } });
+    if (!parent) return res.status(404).json({ error: 'Parent not found' });
+    if (req.user.role === 'SCHOOL_ADMIN' && parent.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
+    
+    const data = { ...req.body };
+    if (data.password) {
+      data.password = await bcrypt.hash(data.password, 10);
+      data.mustResetPassword = true;
+    }
+    const updated = await prisma.user.update({
+      where: { id: req.params.id },
+      data
+    });
+    delete updated.password;
+    res.json(updated);
+  } catch (err) {
+    req.log.error({ err }, 'update parent failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 app.get('/api/schools/:schoolId/drivers', requireTenant('schoolId'), async (req, res) => {
   try {
     const drivers = await prisma.user.findMany({
@@ -837,6 +879,23 @@ app.delete('/api/students/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), a
 });
 
 // Student → route stop
+app.delete('/api/student-route-mappings/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), async (req, res) => {
+  try {
+    const mapping = await prisma.studentRouteMapping.findUnique({
+      where: { id: req.params.id },
+      include: { student: true }
+    });
+    if (!mapping) return res.status(404).json({ error: 'Mapping not found' });
+    if (req.user.role === 'SCHOOL_ADMIN' && mapping.student.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
+    
+    await prisma.studentRouteMapping.delete({ where: { id: req.params.id } });
+    res.status(204).send();
+  } catch (err) {
+    req.log.error({ err }, 'delete mapping failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 app.post('/api/student-route-mappings',
   authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
   validate({ body: S.mapping }),
