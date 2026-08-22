@@ -49,9 +49,8 @@
    `deviceId`/`deviceSecret` for drivers (marked DEPRECATED in `server.js`). Remove
    these fields **once the driver app switches to `GET /api/driver/telemetry-credentials`.**
    App team confirmed they will migrate; ping the review agent when done.
-2. **P2002 on email updates.** `PUT /api/parents/:id` and `PUT /api/drivers/:id`
-   (`server.js`) return 500 instead of 400 when a new email collides with an existing
-   user. Low priority.
+2. ~~**P2002 on email updates.**~~ ✅ RESOLVED in `c55f6e5` — parents/drivers/users
+   PUT now return 400 "Email already in use" on a duplicate-email collision.
 3. **JWT revocation is in-memory** (`middleware/auth.js`) — per-instance, resets on
    restart. Fine for single-VM; needs Redis or a `tokenVersion` column for
    multi-instance / restart-safe revocation.
