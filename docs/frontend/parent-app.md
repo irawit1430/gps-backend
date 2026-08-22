@@ -76,7 +76,18 @@ Body: { "oldPassword": "<temp>", "newPassword": "<min 8 chars>" }
 200 → { "message": "Password updated successfully" }
 401 → { "error": "Incorrect current password" }
 ```
-On success the server clears `mustResetPassword`; continue into the app.
+On success the server clears `mustResetPassword` **and revokes all existing
+sessions for this user — including the current token.** After a `200`, send the
+user back to Login to sign in with the new password (your global 401 handler will
+also catch the now-revoked token on the next request).
+
+### 1.4 Logout
+```
+POST /api/auth/logout        (requires Authorization header)
+200 → { "message": "Logged out" }
+```
+Call this on sign-out; the presented token is revoked immediately (a reused token
+returns `401 "Unauthorized: token has been revoked"`). Then clear local storage.
 
 ### 1.3 Global 401 handling
 Wrap your HTTP client so ANY `401` clears storage and returns to Login (token
@@ -294,7 +305,8 @@ Validation error shape:
 | Method | Path | Purpose |
 |--------|------|---------|
 | POST | `/api/auth/login` | Log in |
-| POST | `/api/auth/change-password` | Change password (forced reset) |
+| POST | `/api/auth/change-password` | Change password (forced reset) — revokes sessions |
+| POST | `/api/auth/logout` | Revoke current token on sign-out |
 | GET  | `/api/parents/{parentId}/students` | Children + assigned bus/driver |
 | GET  | `/api/devices/locations` | Last-known locations of child's buses |
 | GET  | `/api/parents/{parentId}/leaves` | Leave history |

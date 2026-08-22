@@ -14,7 +14,7 @@ const config = require('./config');
 const logger = require('./logger');
 const S = require('./schemas');
 const { validate } = require('./middleware/validate');
-const { authenticate, authorizeRoles, requireTenant, requireSelfOrRoles, logoutToken } = require('./middleware/auth');
+const { authenticate, authorizeRoles, requireTenant, requireSelfOrRoles, logoutToken, invalidateUser } = require('./middleware/auth');
 const { telemetryHmac } = require('./middleware/telemetryHmac');
 const { attachSocketAuth, emitToSchool, emitToUser } = require('./middleware/socketAuth');
 const { getSimulatedAlerts, getMockNotifications } = require('./mock-data');
@@ -169,11 +169,21 @@ app.post('/api/auth/change-password', authenticate, validate({ body: S.changePas
       where: { id: user.id },
       data: { password: hashed, mustResetPassword: false },
     });
+    // A password change ends all existing sessions for this user (including this one).
+    // The client must log in again with the new password.
+    invalidateUser(user.id);
+    logoutToken(req.token);
     res.json({ message: 'Password updated successfully' });
   } catch (err) {
     req.log.error({ err }, 'change password failed');
     res.status(500).json({ error: 'Internal server error' });
   }
+});
+
+// Logout — revoke the presented token so it can no longer be used.
+app.post('/api/auth/logout', authenticate, (req, res) => {
+  logoutToken(req.token);
+  res.json({ message: 'Logged out' });
 });
 
 // Telemetry (HMAC-authenticated, not JWT). Bus is looked up by the HMAC middleware
@@ -1560,6 +1570,10 @@ app.put('/api/admins/:id', validate({ body: S.updateAdmin }), async (req, res) =
       data,
       select: { id: true, name: true, email: true, role: true, schoolId: true },
     });
+    // Role / school / password change → revoke that user's existing tokens (stale claims).
+    if (req.body.role || req.body.schoolId !== undefined || req.body.password) {
+      invalidateUser(req.params.id);
+    }
     res.json(admin);
   } catch (err) {
     req.log.error({ err }, 'update admin failed');
@@ -1571,6 +1585,8 @@ app.delete('/api/admins/:id', async (req, res) => {
   try {
     if (req.params.id === req.user.id) return res.status(403).json({ error: 'Cannot delete yourself' });
     await prisma.user.delete({ where: { id: req.params.id } });
+    // Revoke the deleted user's outstanding tokens so they cannot keep acting for up to 24h.
+    invalidateUser(req.params.id);
     res.json({ success: true });
   } catch (err) {
     req.log.error({ err }, 'delete admin failed');
