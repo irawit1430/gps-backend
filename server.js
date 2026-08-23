@@ -313,6 +313,35 @@ app.get('/api/schools/:schoolId/leaves', requireTenant('schoolId'), async (req, 
   }
 });
 
+app.delete('/api/leaves/:id', authorizeRoles('PARENT', 'SUPER_ADMIN', 'SCHOOL_ADMIN'), async (req, res) => {
+  try {
+    const leave = await prisma.leaveApplication.findUnique({
+      where: { id: req.params.id },
+      include: { student: true }
+    });
+    if (!leave) return res.status(404).json({ error: 'Leave not found' });
+    
+    // Authorization check
+    if (req.user.role === 'PARENT' && leave.student.parentId !== req.user.id) {
+      return res.status(403).json({ error: 'Forbidden: not your student' });
+    }
+    if (req.user.role === 'SCHOOL_ADMIN' && leave.student.schoolId !== req.user.schoolId) {
+      return res.status(403).json({ error: 'Forbidden: cross-tenant access denied' });
+    }
+    
+    // Only pending leaves can be deleted
+    if (leave.status !== 'PENDING') {
+      return res.status(400).json({ error: 'Only PENDING leaves can be deleted' });
+    }
+    
+    await prisma.leaveApplication.delete({ where: { id: req.params.id } });
+    res.status(204).send();
+  } catch (err) {
+    req.log.error({ err }, 'delete leave failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Doc-parity alias: /api/schools/:schoolId/leaves/pending
 app.get('/api/schools/:schoolId/leaves/pending', requireTenant('schoolId'), async (req, res) => {
   try {
@@ -869,7 +898,57 @@ app.post('/api/schools/:schoolId/broadcast', requireTenant('schoolId'), authoriz
       }
     });
     
-    // Broadcast via socket to school room
+    // Dispatch Notifications to Parents
+    let parentIds = new Set();
+    if (req.body.tripId) {
+      // Find all students on this trip's route
+      const trip = await prisma.trip.findUnique({
+        where: { id: req.body.tripId },
+        include: { route: { include: { stops: { include: { studentMappings: { include: { student: true } } } } } } }
+      });
+      if (trip && trip.route) {
+        trip.route.stops.forEach(stop => {
+          stop.studentMappings.forEach(mapping => {
+            if (mapping.student.parentId) parentIds.add(mapping.student.parentId);
+          });
+        });
+      }
+    } else {
+      // School-wide broadcast: all parents in the school
+      const students = await prisma.student.findMany({
+        where: { schoolId: req.params.schoolId },
+        select: { parentId: true }
+      });
+      students.forEach(s => {
+        if (s.parentId) parentIds.add(s.parentId);
+      });
+    }
+
+    const parentsArr = Array.from(parentIds);
+    if (parentsArr.length > 0) {
+      // Create DB Notifications
+      await prisma.notification.createMany({
+        data: parentsArr.map(pId => ({
+          userId: pId,
+          title: 'Emergency Broadcast',
+          message: req.body.message,
+          type: 'SOS'
+        }))
+      });
+      
+      // Emit to each parent's socket room
+      if (io) {
+        parentsArr.forEach(pId => {
+          emitToUser(io, pId, 'notification', {
+            title: 'Emergency Broadcast',
+            message: req.body.message,
+            type: 'SOS'
+          });
+        });
+      }
+    }
+
+    // Still broadcast to the general school room for the admin dashboards
     if (io) emitToSchool(io, req.params.schoolId, 'emergency_alert', alert);
     
     res.json(alert);
@@ -1093,6 +1172,11 @@ app.get('/api/parents/:parentId/students',
       });
       const formatted = students.map((s) => {
         const t = s.routeMappings[0]?.routeStop?.route?.trips[0] || null;
+        let tripStatus = 'NOT_STARTED';
+        if (t) {
+          if (t.status === 'ON_SCHEDULE') tripStatus = 'IN_TRANSIT';
+          else tripStatus = t.status;
+        }
         return {
           id: s.id,
           name: s.name,
@@ -1101,6 +1185,9 @@ app.get('/api/parents/:parentId/students',
           routeStopName: s.routeMappings[0]?.routeStop?.name || 'Unassigned',
           driverName: t?.driver?.name || 'Unassigned',
           licensePlate: t?.bus?.licensePlate || 'Unassigned',
+          tripStatus,
+          busId: t?.busId || null,
+          tripId: t?.id || null,
         };
       });
       res.json(formatted);
