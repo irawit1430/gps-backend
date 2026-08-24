@@ -23,3 +23,8 @@
 **Vulnerability:** Parent-related endpoints (`/api/parents/:id/preferences`, `/api/parents/:parentId/*`) lacked explicit authorization checks to verify if the authenticated user owns the requested resource, allowing users to potentially access or modify data belonging to other parents.
 **Learning:** The global `authenticate` middleware only verifies token presence; it does not ensure resource ownership. Without explicit IDOR protection, authenticated users can access resources they shouldn't by modifying the resource ID in the request.
 **Prevention:** Always implement explicit authorization checks (e.g., using a custom `authorizeParentResource` middleware) for endpoints that access resources belonging to a specific user to prevent IDOR.
+
+## 2025-02-23 - Missing Select Clause Leaking Sensitive Fields
+**Vulnerability:** The `POST /api/schools/:schoolId/drivers` endpoint returned the created driver object using Prisma's default select behavior, which included the sensitive hashed `password` field.
+**Learning:** Prisma's default behavior is to return all scalar fields of a model after a `create` operation unless explicitly told otherwise. Failing to define a `select` clause can inadvertently expose sensitive data to clients.
+**Prevention:** When returning user objects or other sensitive records from Prisma queries (such as `create`, `update`, or `findMany`), always explicitly use the `select` clause to whitelist safe fields and filter out sensitive information like passwords.
