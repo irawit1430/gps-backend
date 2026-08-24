@@ -2117,21 +2117,40 @@ app.get('/api/search', async (req, res) => {
 });
 
 // ─── Notifications ────────────────────────────────────────
+// Every alert used to be titled "Emergency SOS", including admin broadcasts.
+const ALERT_TITLES = {
+  DRIVER_SOS: 'Emergency SOS',
+  HARDWARE_SOS: 'Hardware SOS',
+  ADMIN_BROADCAST: 'Broadcast',
+  DELAY: 'Delay alert',
+};
+
 app.get('/api/notifications', async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit) || 20, 200);
-    const { id: userId, role } = req.user;
+    const { id: userId, role, schoolId } = req.user;
 
-    if (role === 'SUPER_ADMIN') {
-      const realAlerts = await prisma.emergencyAlert.findMany({ orderBy: { createdAt: 'desc' }, take: limit });
+    if (role === 'SUPER_ADMIN' || (role === 'SCHOOL_ADMIN' && schoolId)) {
+      // An SOS writes an EmergencyAlert row, never a Notification row, so a
+      // SCHOOL_ADMIN polling this endpoint used to see nothing at all — alerts were
+      // visible to SUPER_ADMIN only. Scope them to the admin's own school.
+      const alertWhere = role === 'SCHOOL_ADMIN' ? { schoolId } : {};
+      const realAlerts = await prisma.emergencyAlert.findMany({ where: alertWhere, orderBy: { createdAt: 'desc' }, take: limit });
       const formatted = realAlerts.map((a) => ({
-        id: a.id, type: a.type || 'DRIVER_SOS', title: 'Emergency SOS',
+        id: a.id, type: a.type || 'DRIVER_SOS', title: ALERT_TITLES[a.type] || 'Emergency SOS',
         message: a.message || 'Driver triggered SOS alert',
         status: a.status, isRead: a.status === 'RESOLVED', createdAt: a.createdAt,
       }));
+
+      const newestFirst = (a, b) => new Date(b.createdAt) - new Date(a.createdAt);
+      if (role === 'SCHOOL_ADMIN') {
+        // School admins also receive ordinary per-user notifications; show one list.
+        const own = await prisma.notification.findMany({ where: { userId }, orderBy: { createdAt: 'desc' }, take: limit });
+        return res.json([...formatted, ...own].sort(newestFirst).slice(0, limit));
+      }
       if (config.ENABLE_MOCK_DATA) {
         const sim = getSimulatedAlerts();
-        return res.json([...formatted, ...sim].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, limit));
+        return res.json([...formatted, ...sim].sort(newestFirst).slice(0, limit));
       }
       return res.json(formatted);
     }
