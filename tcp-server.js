@@ -3,6 +3,7 @@ const { PrismaClient } = require('@prisma/client');
 const { parseBlackboxPacket } = require('./blackbox-parser');
 const { syncGpsLogToFirebase, syncEmergencyAlertToFirebase } = require('./firebase');
 const { emitToSchool } = require('./middleware/socketAuth');
+const liveFixGuard = require('./liveFixGuard');
 const config = require('./config');
 const logger = require('./logger');
 
@@ -15,6 +16,11 @@ const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 // Throttles Bus.status='ONLINE' writes per bus so a live TCP device refreshes
 // updatedAt (for the stale-sweep) without a DB write on every packet.
 const tcpThrottleCache = new Map(); // busId → last status-write epoch ms
+
+// One hardware SOS per bus per cooldown window. A latched panic button sets the
+// emergency flag on every packet, so without this each packet becomes its own alert.
+const SOS_COOLDOWN_MS = 5 * 60 * 1000;
+const sosCooldownCache = new Map(); // busId → last alert epoch ms
 
 let activeConnections = 0;
 
@@ -87,29 +93,58 @@ function startTcpServer(io, tcpPort = config.TCP_PORT) {
               tcpThrottleCache.set(bus.id, now);
             }
 
-            syncGpsLogToFirebase({
-              busId: bus.id,
-              licensePlate: bus.licensePlate,
-              lat: parsed.lat,
-              lng: parsed.lng,
-              speed: parsed.speed || 0,
-              timestamp: log.timestamp,
-            });
+            // Only a live, GPS-fixed packet describes where the bus is *now*.
+            // History replays ($DP field 5 = 'H') and no-fix packets are persisted
+            // above for the trail, but must never drive the live map.
+            const isLiveFix = parsed.isLive !== false && parsed.gpsFix !== false;
 
-            if (io) {
-              emitToSchool(io, bus.schoolId, 'location_update', {
+            if (!isLiveFix || !liveFixGuard.shouldBroadcast(bus.id, log.timestamp)) {
+              logger.debug(
+                { busId: bus.id, imei: parsed.imei, isLive: parsed.isLive, gpsFix: parsed.gpsFix, timestamp: log.timestamp },
+                'TCP: skipping live broadcast for stale/history fix'
+              );
+            } else {
+              syncGpsLogToFirebase({
                 busId: bus.id,
                 licensePlate: bus.licensePlate,
                 lat: parsed.lat,
                 lng: parsed.lng,
-                speed: parsed.speed,
-                heading: parsed.heading || 0,
-                timestamp: parsed.timestamp || new Date(),
+                speed: parsed.speed || 0,
+                timestamp: log.timestamp,
               });
+
+              if (io) {
+                emitToSchool(io, bus.schoolId, 'location_update', {
+                  busId: bus.id,
+                  licensePlate: bus.licensePlate,
+                  lat: parsed.lat,
+                  lng: parsed.lng,
+                  speed: parsed.speed,
+                  heading: parsed.heading || 0,
+                  timestamp: log.timestamp,
+                });
+              }
             }
           }
 
           if (parsed.emergencyActive) {
+            // The emergency flag stays set on every packet for as long as the panic
+            // button is latched, and stored packets ($EPB type 'SP', $DP status 'H')
+            // replay old ones — both would otherwise mint a fresh ACTIVE alert per
+            // packet and bury the dashboard.
+            const isReplay = parsed.isStored === true || parsed.isLive === false;
+            const lastAlertAt = sosCooldownCache.get(bus.id) || 0;
+            const withinCooldown = Date.now() - lastAlertAt < SOS_COOLDOWN_MS;
+
+            if (isReplay || withinCooldown) {
+              logger.debug(
+                { imei: parsed.imei, busId: bus.id, isReplay, withinCooldown },
+                'TCP: suppressing duplicate hardware SOS'
+              );
+              continue;
+            }
+            sosCooldownCache.set(bus.id, Date.now());
+
             logger.warn({ imei: parsed.imei, busId: bus.id }, 'TCP: hardware SOS');
             const alert = await prisma.emergencyAlert.create({
               data: {

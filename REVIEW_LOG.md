@@ -42,6 +42,14 @@
 | `a911bca` | `updateStudent` schema whitelist + P2002; trips reassign admin-only; driver pw → revoke tokens; devices PUT/DELETE ownership check inside try/catch; drop dead `JWT_EX_IN` |
 | `3d1b1d3` | JWT revocation: `POST /api/auth/logout`, denylist + per-user invalidation on delete/demote/password |
 | `6adf1b0` | Removed duplicate `const activeTrip` in `/api/telemetry` that crashed server boot |
+| _(uncommitted)_ | **Live map snap-back:** TCP ingest broadcast history/no-fix packets as live `location_update`s. Added `liveFixGuard.js` (per-bus newest-fix watermark, future-clock clamp) + `isLive`/`gpsFix` gate in `tcp-server.js`; same guard on `POST /api/telemetry`. History points are still persisted, just not broadcast |
+| _(uncommitted)_ | **Hardware SOS spam:** a latched panic button minted one ACTIVE alert per packet, and stored/replayed packets re-raised old ones. Added a 5-min per-bus cooldown + replay skip in `tcp-server.js` |
+| _(uncommitted)_ | `emitToSchool` emitted twice into `school:<id>` and `super:all` — a SUPER_ADMIN with a schoolId received every event twice. Now one emit across both rooms |
+| _(uncommitted)_ | Stale-bus sweep (`index.js`) now emits `device_status_change` OFFLINE per bus, so dashboards see a bus go dark without a reload |
+| _(uncommitted)_ | P2002 → 500 on `POST /api/schools/:id/drivers`, `POST /api/devices`, `POST`/`PUT /api/admins`, and bulk student import. All now 400 with a usable message |
+| _(uncommitted)_ | `GET /api/schools?sort=<col>` 500'd on any unknown column — now a 400 with the allowed list |
+| _(uncommitted)_ | Open Item 6 closed: `PATCH /api/trips/:tripId/status` re-checks bus/driver conflict before ON_SCHEDULE/DELAYED |
+| _(uncommitted)_ | Open Item 8 closed: bulk student import generates a random temp password per parent and returns `parentCredentials[]` (was the shared literal `password123`) |
 
 ## Open items (not yet done — coordinate before acting)
 
@@ -60,12 +68,11 @@
 5. **HMAC telemetry replay.** `middleware/telemetryHmac.js` signs
    `deviceId.ts.lat.lng.speed` but has no nonce/dedup — a captured signed packet can
    be replayed within the 300s skew window.
-6. **Double-booking now only enforced against ACTIVE trips** (`a36c9c4` narrowed the
-   create/reassign check to `ON_SCHEDULE`/`DELAYED`, dropping `PLANNED`). Two PLANNED
-   trips for the same bus/driver can now coexist, and `PATCH /api/trips/:tripId/status`
-   does NOT re-check on start — so two trips can both go ON_SCHEDULE for one bus.
-   If multiple-PLANNED is intentional (pre-planning), add the conflict check to the
-   status-transition to close the runtime hole.
+6. ~~**Double-booking only enforced against ACTIVE trips.**~~ ✅ RESOLVED (uncommitted) —
+   `PATCH /api/trips/:tripId/status` now re-checks for a conflicting ON_SCHEDULE/DELAYED
+   trip on the same bus or driver before starting. Multiple PLANNED trips are still
+   allowed by design; only one of them can go live.
+
 7. **Bulk telemetry is only half-wired.** `middleware/telemetryHmac.js` now reads a
    `logs[]` array (signs `logs[0]`), but `S.telemetry` (`schemas.js`) still *requires*
    top-level `lat`/`lng` and has no `logs`, and the `POST /api/telemetry` handler
@@ -73,13 +80,12 @@
    will 400 at validation. To finish: allow `logs` in the schema (single OR bulk) and
    iterate `logs` in the handler (createMany + emit). Also note: signing only `logs[0]`
    leaves the rest of the batch unsigned — sign the whole batch when completing this.
-8. **Bulk student import gives every parent the password `password123`**
-   (`POST /api/schools/:schoolId/students/bulk` in `server.js`). The single-student
-   flow generates a random password and returns it; bulk hardcodes a known weak one.
-   Needs a product decision: generate a random password per parent and return a
-   credentials list to the admin, or require the forced-reset flow. NOT changed yet
-   (changing it affects how imported parents first log in). The `.agents/AGENTS.md`
-   `password123` exemption is for pre-seeded TEST users only — not for real imports.
+8. ~~**Bulk student import gives every parent the password `password123`.**~~
+   ✅ RESOLVED (uncommitted) — bulk now mirrors the single-student flow: a random
+   temp password per newly created parent, `mustResetPassword: true`, and the
+   plaintext returned once in `parentCredentials[]` on the import response.
+   **Frontend impact:** the CSV-import screen should surface that list to the admin;
+   parents imported before this change still hold `password123` and should be reset.
 
 ## Key file addresses
 - API + routes: `server.js`

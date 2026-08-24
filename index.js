@@ -22,6 +22,7 @@ if (config.RUN_MIGRATIONS) {
 const { server, io, prisma } = require('./server.js');
 const { startTcpServer } = require('./tcp-server.js');
 const { flushFirestore } = require('./firebase.js');
+const { emitToSchool } = require('./middleware/socketAuth');
 
 const httpServer = server.listen(config.PORT, () => {
   logger.info({ port: config.PORT }, 'HTTP + Socket.IO server listening');
@@ -38,10 +39,25 @@ try {
 setInterval(async () => {
   try {
     const cutoff = new Date(Date.now() - 15 * 60 * 1000);
-    const result = await prisma.bus.updateMany({
+    // Collect first: updateMany cannot return the rows, and dashboards need to be
+    // told a bus went dark instead of showing it ONLINE until the next page load.
+    const stale = await prisma.bus.findMany({
       where: { status: 'ONLINE', updatedAt: { lt: cutoff } },
+      select: { id: true, schoolId: true, licensePlate: true },
+    });
+    if (stale.length === 0) return;
+
+    const result = await prisma.bus.updateMany({
+      where: { id: { in: stale.map((b) => b.id) }, status: 'ONLINE' },
       data: { status: 'OFFLINE' }
     });
+    for (const bus of stale) {
+      emitToSchool(io, bus.schoolId, 'device_status_change', {
+        deviceId: bus.id,
+        status: 'OFFLINE',
+        message: `No telemetry from ${bus.licensePlate} for 15 minutes`,
+      });
+    }
     if (result.count > 0) logger.info({ count: result.count }, 'Marked stale buses OFFLINE');
   } catch(err) {
     logger.error({err}, 'Stale bus sweep failed');

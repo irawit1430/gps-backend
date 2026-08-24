@@ -4,7 +4,7 @@ const config = require('../config');
 // Verifies HMAC-SHA256 signature on /api/telemetry requests.
 // Header:  X-Device-Signature: <hex>
 // Header:  X-Device-Timestamp: <unix seconds>
-// Signed payload: `${deviceId}.${timestamp}.${lat}.${lng}`
+// Signed payload: `${deviceId}.${timestamp}.${lat}.${lng}.${speed || 0}`
 // Secret:  Bus.deviceSecret (looked up by req.body.deviceId).
 //
 // Behavior:

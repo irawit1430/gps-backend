@@ -39,8 +39,11 @@ function attachSocketAuth(io) {
 // Emit an event scoped to a school + super admins.
 // If schoolId is null/undefined we fall back to super:all only.
 function emitToSchool(io, schoolId, event, payload) {
-  if (schoolId) io.to(`school:${schoolId}`).emit(event, payload);
-  io.to('super:all').emit(event, payload);
+  // One emit across both rooms — Socket.IO delivers a single copy to a socket that
+  // is in both (a SUPER_ADMIN who also carries a schoolId). Emitting per room would
+  // deliver the event twice to that admin.
+  const target = schoolId ? io.to(`school:${schoolId}`).to('super:all') : io.to('super:all');
+  target.emit(event, payload);
 }
 
 function emitToUser(io, userId, event, payload) {

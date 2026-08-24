@@ -193,6 +193,7 @@ app.post('/api/auth/logout', authenticate, (req, res) => {
 // Telemetry (HMAC-authenticated, not JWT). Bus is looked up by the HMAC middleware
 // and attached as req.bus.
 const telemetryCache = require('./telemetryCache');
+const liveFixGuard = require('./liveFixGuard');
 app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => next(), // placeholder to satisfy ordering
   // deferred HMAC attach after prisma exists:
   async (req, res, next) => (await telemetryHmac(prisma))(req, res, next),
@@ -233,26 +234,33 @@ app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => 
         telemetryCache.set(deviceId, bus);
       }
 
-      syncGpsLogToFirebase({
-        busId: bus.id,
-        licensePlate: bus.licensePlate,
-        lat,
-        lng,
-        speed: speed || 0,
-        timestamp: log.timestamp,
-      });
+      // An offline queue flush from the driver app (or a retried post) can deliver a
+      // fix older than one already broadcast. It belongs in the trail above, but
+      // broadcasting it would drag the live marker backwards.
+      if (liveFixGuard.shouldBroadcast(bus.id, log.timestamp)) {
+        syncGpsLogToFirebase({
+          busId: bus.id,
+          licensePlate: bus.licensePlate,
+          lat,
+          lng,
+          speed: speed || 0,
+          timestamp: log.timestamp,
+        });
 
-      emitToSchool(io, bus.schoolId, 'location_update', {
-        busId: bus.id,
-        licensePlate: bus.licensePlate,
-        capacity: bus.capacity,
-        driverName: activeTrip?.driver?.name || 'Unassigned',
-        routeName: activeTrip?.route?.name || 'Off-Route',
-        lat,
-        lng,
-        speed,
-        timestamp: log.timestamp,
-      });
+        emitToSchool(io, bus.schoolId, 'location_update', {
+          busId: bus.id,
+          licensePlate: bus.licensePlate,
+          capacity: bus.capacity,
+          driverName: activeTrip?.driver?.name || 'Unassigned',
+          routeName: activeTrip?.route?.name || 'Off-Route',
+          lat,
+          lng,
+          speed,
+          timestamp: log.timestamp,
+        });
+      } else {
+        req.log.debug({ busId: bus.id, timestamp: log.timestamp }, 'telemetry: skipping live broadcast for stale fix');
+      }
 
       res.status(200).json({ success: true });
     } catch (err) {
@@ -691,6 +699,9 @@ app.post('/api/schools/:schoolId/drivers',
       });
       res.json({ driver: { id: driver.id, name: driver.name, email: driver.email }, tempPassword });
     } catch (err) {
+      if (err.code === 'P2002' && err.meta?.target?.includes('email')) {
+        return res.status(400).json({ error: 'Email already in use' });
+      }
       req.log.error({ err }, 'create driver failed');
       res.status(500).json({ error: 'Internal server error' });
     }
@@ -962,24 +973,33 @@ app.post('/api/schools/:schoolId/students/bulk', requireTenant('schoolId'), auth
   try {
     const students = req.body;
     let createdCount = 0;
-    
+    // Temp passwords for parents provisioned by this import, returned once so the
+    // admin can hand them out. Never reuse a fixed password here — every account
+    // created with a shared literal is a free login for anyone who reads this file.
+    const parentCredentials = [];
+
     // Process in transaction
     await prisma.$transaction(async (tx) => {
       for (const st of students) {
         let parent = null;
         if (st.parentEmail) {
-          parent = await tx.user.upsert({
-            where: { email: st.parentEmail },
-            update: {},
-            create: {
-              email: st.parentEmail,
-              name: st.parentName || 'Parent',
-              password: await bcrypt.hash('password123', 10),
-              role: 'PARENT',
-              schoolId: req.params.schoolId,
-              mustResetPassword: true,
-            }
-          });
+          const existing = await tx.user.findUnique({ where: { email: st.parentEmail } });
+          if (existing) {
+            parent = existing;
+          } else {
+            const tempPassword = crypto.randomBytes(16).toString('hex');
+            parent = await tx.user.create({
+              data: {
+                email: st.parentEmail,
+                name: st.parentName || 'Parent',
+                password: await bcrypt.hash(tempPassword, 10),
+                role: 'PARENT',
+                schoolId: req.params.schoolId,
+                mustResetPassword: true,
+              }
+            });
+            parentCredentials.push({ email: st.parentEmail, temporaryPassword: tempPassword });
+          }
         }
         await tx.student.create({
           data: {
@@ -993,8 +1013,11 @@ app.post('/api/schools/:schoolId/students/bulk', requireTenant('schoolId'), auth
         createdCount++;
       }
     });
-    res.json({ success: true, message: `Created ${createdCount} students successfully.` });
+    res.json({ success: true, message: `Created ${createdCount} students successfully.`, parentCredentials });
   } catch (err) {
+    if (err.code === 'P2002') {
+      return res.status(400).json({ error: 'Import aborted: an RFID tag or parent email in this batch is already in use.' });
+    }
     req.log.error({ err }, 'bulk student import failed');
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -1439,6 +1462,24 @@ async function ownsTrip(req, res, next) {
 
 app.patch('/api/trips/:tripId/status', ownsTrip, validate({ body: S.tripStatus }), async (req, res) => {
   try {
+    // Creation only blocks a *running* conflict, so two PLANNED trips may share a bus
+    // or driver. The conflict has to be re-checked here, or both can be started and
+    // the bus ends up on two live trips at once.
+    if (req.body.status === 'ON_SCHEDULE' || req.body.status === 'DELAYED') {
+      const trip = await prisma.trip.findUnique({ where: { id: req.params.tripId } });
+      if (!trip) return res.status(404).json({ error: 'Trip not found' });
+      const conflict = await prisma.trip.findFirst({
+        where: {
+          id: { not: req.params.tripId },
+          OR: [{ busId: trip.busId }, { driverId: trip.driverId }],
+          status: { in: ['ON_SCHEDULE', 'DELAYED'] },
+        },
+      });
+      if (conflict) {
+        return res.status(400).json({ error: 'Bus or driver is already on an active trip' });
+      }
+    }
+
     const data = { status: req.body.status };
     if (req.body.status === 'ON_SCHEDULE') data.startTime = new Date();
     if (req.body.status === 'COMPLETED') data.endTime = new Date();
@@ -1581,8 +1622,16 @@ app.get('/api/schools', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
     const where = search ? { name: { contains: search, mode: 'insensitive' } } : {};
     if (req.query.status) where.status = req.query.status;
     
+    // Whitelisted: an unknown column reaches Prisma as a validation error and
+    // surfaces to the caller as a 500.
+    const SORTABLE = ['name', 'city', 'state', 'status', 'createdAt', 'updatedAt'];
     let orderBy = { createdAt: 'desc' };
-    if (req.query.sort) orderBy = { [req.query.sort]: req.query.order === 'asc' ? 'asc' : 'desc' };
+    if (req.query.sort) {
+      if (!SORTABLE.includes(req.query.sort)) {
+        return res.status(400).json({ error: `Cannot sort by '${req.query.sort}'. Allowed: ${SORTABLE.join(', ')}` });
+      }
+      orderBy = { [req.query.sort]: req.query.order === 'asc' ? 'asc' : 'desc' };
+    }
     
     const [schools, total] = await Promise.all([
       prisma.school.findMany({ where, skip: (page - 1) * limit, take: limit, orderBy }),
@@ -1796,6 +1845,10 @@ app.post('/api/devices', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), validate
     // Return the secret ONCE on creation so ops can flash it to the device
     res.json({ ...device, deviceSecret });
   } catch (err) {
+    if (err.code === 'P2002') {
+      const field = err.meta?.target?.includes('licensePlate') ? 'License plate' : 'Device ID';
+      return res.status(400).json({ error: `${field} is already registered` });
+    }
     req.log.error({ err }, 'create device failed');
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -1912,6 +1965,9 @@ app.post('/api/admins', validate({ body: S.createAdmin }), async (req, res) => {
     });
     res.json(admin);
   } catch (err) {
+    if (err.code === 'P2002' && err.meta?.target?.includes('email')) {
+      return res.status(400).json({ error: 'Email already in use' });
+    }
     req.log.error({ err }, 'create admin failed');
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -1942,6 +1998,9 @@ app.put('/api/admins/:id', validate({ body: S.updateAdmin }), async (req, res) =
     }
     res.json(admin);
   } catch (err) {
+    if (err.code === 'P2002' && err.meta?.target?.includes('email')) {
+      return res.status(400).json({ error: 'Email already in use' });
+    }
     req.log.error({ err }, 'update admin failed');
     res.status(500).json({ error: 'Internal server error' });
   }
