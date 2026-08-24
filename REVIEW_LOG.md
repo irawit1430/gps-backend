@@ -94,6 +94,24 @@
    **Frontend impact:** the CSV-import screen should surface that list to the admin;
    parents imported before this change still hold `password123` and should be reset.
 
+9. **Frontend feature requests that need `prisma/schema.prisma` — owner said NOT NOW
+   (2026-08-25).** Blocked by `.agents/AGENTS.md`. Shape already decided, so whoever
+   picks this up does not re-litigate it:
+   - **ETA / delay detection** → add **`Trip.scheduledStart DateTime?`** (owner's pick).
+     Per-stop schedule is then `scheduledStart + RouteStop.expectedArrivalMinutes`,
+     which already exists. Do NOT put an absolute `scheduledArrival` on `RouteStop`
+     as originally requested — those rows are reused by every trip, so a fixed
+     timestamp there is stale the next day.
+   - **`Student.guardianPhone String?`** — plain new nullable column.
+   - **FCM push** → `User.fcmToken String?` + a token-registration endpoint
+     (`firebase.js` already imports `getMessaging`). Open Item 4 covers the rest.
+   Until then: ETA only after a trip starts, no guardian phone, and trip changes ride
+   the new `trip_status_change` socket event instead of push.
+10. **Attendance idempotency is natural-key based, not key-value based.**
+   `POST /api/attendance` honours `Idempotency-Key` by matching student+trip+type
+   inside 10 minutes, because storing the key needs a column. If item 9 is ever
+   approved, add `AttendanceLog.idempotencyKey String? @unique` and match on it.
+
 ## Key file addresses
 - API + routes: `server.js`
 - Auth / RBAC / token revocation: `middleware/auth.js`
