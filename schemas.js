@@ -226,6 +226,14 @@ exports.broadcast = z.object({
   message: z.string().min(1).max(1000),
   // routeId intentionally omitted: EmergencyAlert has no routeId column.
   tripId: uuid.optional(),
+  // Who receives it. Defaults to PARENTS so existing callers are unaffected.
+  audience: z.enum(['PARENTS', 'DRIVERS', 'ALL']).optional(),
+  // Narrows a DRIVERS/ALL send to specific drivers; ignored for PARENTS.
+  driverIds: z.array(uuid).max(200).optional(),
+  title: z.string().min(1).max(200).optional(),
+  // SOS renders as an emergency in the apps; SYSTEM is the routine channel
+  // (app-update notices, schedule changes).
+  type: z.enum(['SOS', 'SYSTEM', 'DELAY']).optional(),
 });
 
 exports.bulkStudents = z.array(exports.createStudent).min(1).max(2000);

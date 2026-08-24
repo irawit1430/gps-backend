@@ -185,6 +185,50 @@ arrives; a driver who has just been unassigned gets `reason: 'unassigned'`.
 
 ---
 
+---
+
+## 4.1 Sending a message to drivers or parents
+
+One endpoint covers both audiences. Usable from the **School Admin console** (own
+school) and the **Super Admin console** (any school — pass that school's id).
+
+```
+POST /api/schools/:schoolId/broadcast
+{
+  message:    "Please update the driver app to v2.4 before tomorrow's shift.",
+  audience:   "DRIVERS",        // PARENTS (default) | DRIVERS | ALL
+  type:       "SYSTEM",         // SYSTEM = routine, SOS = emergency, DELAY
+  title:      "App update required",   // optional
+  driverIds:  ["<uuid>", ...],  // optional: only these drivers
+  tripId:     "<uuid>"          // optional: scope to one trip's driver / parents
+}
+→ { ...alert, audience, recipientCount }
+```
+
+Rules that matter:
+
+- **`audience` defaults to `PARENTS`**, so existing broadcast callers are unchanged.
+- `type` defaults to `SYSTEM` for a DRIVERS send and `SOS` otherwise. Use `SYSTEM`
+  for routine notices — `SOS` renders as an emergency in the apps.
+- `driverIds` is filtered to drivers **of that school**, so a Super Admin cannot
+  message another school's drivers through this route.
+- With `tripId` and no `driverIds`, DRIVERS means that trip's driver, and PARENTS
+  means the parents of students on that trip's route.
+- `recipientCount` is how many people were actually written to — show it as
+  confirmation instead of assuming the send landed.
+
+**Receiving side (driver app and parent app):** each recipient gets a real
+`Notification` row over socket `notification`, including `id`, so it can be marked
+read with `POST /api/notifications/:id/read`. It also appears in
+`GET /api/notifications`.
+
+```js
+socket.on('notification', (n) => showInbox(n));   // n.type: SYSTEM | SOS | DELAY | ...
+```
+
+Admin dashboards additionally receive the audit record as `emergency_alert`
+(`type: 'ADMIN_BROADCAST'`), the same as before.
+
 ## 5. Standard error shape
 
 | Status | Meaning | Frontend action |

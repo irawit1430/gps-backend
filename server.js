@@ -932,60 +932,89 @@ app.post('/api/schools/:schoolId/broadcast', requireTenant('schoolId'), authoriz
       }
     });
     
-    // Dispatch Notifications to Parents
-    let parentIds = new Set();
+    const audience = req.body.audience || 'PARENTS';
+    const wantsParents = audience === 'PARENTS' || audience === 'ALL';
+    const wantsDrivers = audience === 'DRIVERS' || audience === 'ALL';
+    const notifType = req.body.type || (audience === 'DRIVERS' ? 'SYSTEM' : 'SOS');
+    const notifTitle = req.body.title || (notifType === 'SOS' ? 'Emergency Broadcast' : 'Message from school');
+
+    // One trip lookup serves both audiences when the broadcast is trip-scoped.
+    let trip = null;
     if (req.body.tripId) {
-      // Find all students on this trip's route
-      const trip = await prisma.trip.findUnique({
+      trip = await prisma.trip.findUnique({
         where: { id: req.body.tripId },
-        include: { route: { include: { stops: { include: { studentMappings: { include: { student: true } } } } } } }
-      });
-      if (trip && trip.route) {
-        trip.route.stops.forEach(stop => {
-          stop.studentMappings.forEach(mapping => {
-            if (mapping.student.parentId) parentIds.add(mapping.student.parentId);
-          });
-        });
-      }
-    } else {
-      // School-wide broadcast: all parents in the school
-      const students = await prisma.student.findMany({
-        where: { schoolId: req.params.schoolId },
-        select: { parentId: true }
-      });
-      students.forEach(s => {
-        if (s.parentId) parentIds.add(s.parentId);
+        include: { route: { include: { stops: { include: { studentMappings: { select: { student: { select: { parentId: true } } } } } } } } }
       });
     }
 
-    const parentsArr = Array.from(parentIds);
-    if (parentsArr.length > 0) {
-      // Create DB Notifications
-      await prisma.notification.createMany({
-        data: parentsArr.map(pId => ({
-          userId: pId,
-          title: 'Emergency Broadcast',
-          message: req.body.message,
-          type: 'SOS'
-        }))
-      });
-      
-      // Emit to each parent's socket room
-      if (io) {
-        parentsArr.forEach(pId => {
-          emitToUser(io, pId, 'notification', {
-            title: 'Emergency Broadcast',
-            message: req.body.message,
-            type: 'SOS'
+    const recipientIds = new Set();
+
+    if (wantsParents) {
+      if (trip?.route) {
+        trip.route.stops.forEach(stop => {
+          stop.studentMappings.forEach(mapping => {
+            if (mapping.student.parentId) recipientIds.add(mapping.student.parentId);
           });
         });
+      } else if (!req.body.tripId) {
+        // School-wide broadcast: every parent in the school
+        const students = await prisma.student.findMany({
+          where: { schoolId: req.params.schoolId },
+          select: { parentId: true }
+        });
+        students.forEach(s => {
+          if (s.parentId) recipientIds.add(s.parentId);
+        });
       }
+    }
+
+    if (wantsDrivers) {
+      // driverIds narrows the send; otherwise it is the trip's driver, or every
+      // driver in the school. The schoolId filter keeps a SUPER_ADMIN from
+      // messaging another school's drivers through this route.
+      if (req.body.driverIds?.length) {
+        const drivers = await prisma.user.findMany({
+          where: { id: { in: req.body.driverIds }, role: 'DRIVER', schoolId: req.params.schoolId },
+          select: { id: true }
+        });
+        drivers.forEach(d => recipientIds.add(d.id));
+      } else if (trip?.driverId) {
+        recipientIds.add(trip.driverId);
+      } else if (!req.body.tripId) {
+        const drivers = await prisma.user.findMany({
+          where: { schoolId: req.params.schoolId, role: 'DRIVER' },
+          select: { id: true }
+        });
+        drivers.forEach(d => recipientIds.add(d.id));
+      }
+    }
+
+    const recipients = Array.from(recipientIds);
+    if (recipients.length > 0) {
+      const sentAt = new Date();
+      await prisma.notification.createMany({
+        data: recipients.map(userId => ({
+          userId,
+          title: notifTitle,
+          message: req.body.message,
+          type: notifType
+        }))
+      });
+
+      // Read the rows back so each client receives a real Notification (with an id
+      // it can mark read) rather than a shape that only looks like one.
+      const created = await prisma.notification.findMany({
+        where: { userId: { in: recipients }, createdAt: { gte: sentAt } },
+      });
+      if (io) created.forEach(n => emitToUser(io, n.userId, 'notification', n));
     }
 
     // Still broadcast to the general school room for the admin dashboards
     if (io) emitToSchool(io, req.params.schoolId, 'emergency_alert', alert);
-    
-    res.json(alert);
+
+    // recipientCount lets the sending dashboard show "sent to N people" instead of
+    // guessing whether anyone was actually targeted.
+    res.json({ ...alert, audience, recipientCount: recipients.length });
   } catch (err) {
     req.log.error({ err }, 'broadcast failed');
     res.status(500).json({ error: 'Internal server error' });
