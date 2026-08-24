@@ -163,9 +163,25 @@ After authenticating the socket (§1.1), listen for:
 |-------|---------|-----------|
 | `location_update` | `{ busId, licensePlate, lat, lng, speed, driverName, routeName, timestamp }` | Admin maps, Parent live-track |
 | `emergency_alert` | full alert object | Admin dashboards |
-| `device_status_change` | `{ deviceId, status, message }` | Super Admin |
+| `device_status_change` | `{ deviceId, status, message }` | Admin dashboards |
+| `trip_status_change` | `{ tripId, status, busId, driverId, routeId, routeName, startTime, endTime, reason }` | Driver app, Admin dashboards |
+| `notification` | the Notification row | Parents |
 
 Events are already filtered to your school server-side.
+
+⚠️ **There is no `sos`, `sos_alert`, `alert`, or `notification_new` event.** An SOS —
+driver-triggered or hardware — arrives as **`emergency_alert`**, with `type` set to
+`DRIVER_SOS` / `HARDWARE_SOS` / `ADMIN_BROADCAST` / `DELAY`. Listening on any other
+name yields silence.
+
+`device_status_change` fires on both edges: `ONLINE` when a bus starts reporting
+again, `OFFLINE` when the sweep sees no telemetry for 15 minutes. Do not infer
+offline from "no `location_update` for N seconds" — a parked bus with no fresh GPS
+fix legitimately goes quiet.
+
+`trip_status_change` (`reason`: `created` | `status` | `assignment` | `unassigned`)
+replaces polling `GET /api/drivers/:id/trips` on a timer. Re-fetch the trip when it
+arrives; a driver who has just been unassigned gets `reason: 'unassigned'`.
 
 ---
 

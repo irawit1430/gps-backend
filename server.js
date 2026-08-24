@@ -749,7 +749,9 @@ app.post('/api/schools/:schoolId/trips',
       if (activeTrips.length > 0) return res.status(400).json({ error: 'Bus or Driver is already assigned to an active trip' });
       const trip = await prisma.trip.create({
         data: { routeId: req.body.routeId, busId: req.body.busId, driverId: req.body.driverId, status: 'PLANNED' },
+        include: { route: { select: { schoolId: true, name: true } } },
       });
+      emitTripChange(trip, 'created');
       res.json(trip);
     } catch (err) {
       req.log.error({ err }, 'create trip failed');
@@ -808,8 +810,14 @@ app.put('/api/trips/:tripId',
           ...(busId && { busId }),
           ...(driverId && { driverId }),
           ...(routeId && { routeId })
-        }
+        },
+        include: { route: { select: { schoolId: true, name: true } } },
       });
+      emitTripChange(updated, 'assignment');
+      // The outgoing driver loses this trip, so tell them too.
+      if (driverId && driverId !== existingTrip.driverId) {
+        emitToUser(io, existingTrip.driverId, 'trip_status_change', { tripId, status: updated.status, reason: 'unassigned' });
+      }
       res.json(updated);
     } catch (err) {
       req.log.error({ err }, 'update trip failed');
@@ -1327,12 +1335,34 @@ async function sosHandler(req, res) {
     });
     syncEmergencyAlertToFirebase(alert);
     emitToSchool(io, alert.schoolId, 'emergency_alert', alert);
-    res.json(alert);
+    // alertId duplicates `id` so the driver app can poll GET /api/alerts/:id for
+    // acknowledgement without unpacking the alert object.
+    res.json({ ...alert, alertId: alert.id });
   } catch (err) {
     req.log.error({ err }, 'sos failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 }
+// Acknowledgement check for a raised SOS. The driver who sent it, any admin of that
+// school, and SUPER_ADMIN may read it. `acknowledged` flips once an admin resolves
+// the alert via POST /api/notifications/:id/resolve.
+app.get('/api/alerts/:id', async (req, res) => {
+  try {
+    const alert = await prisma.emergencyAlert.findUnique({ where: { id: req.params.id } });
+    if (!alert) return res.status(404).json({ error: 'Alert not found' });
+
+    const isSuper = req.user.role === 'SUPER_ADMIN';
+    const isOwnSchool = Boolean(req.user.schoolId) && alert.schoolId === req.user.schoolId;
+    const isSender = alert.senderId === req.user.id;
+    if (!isSuper && !isOwnSchool && !isSender) return res.status(403).json({ error: 'Forbidden' });
+
+    res.json({ ...alert, alertId: alert.id, acknowledged: alert.status !== 'ACTIVE' });
+  } catch (err) {
+    req.log.error({ err }, 'get alert failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 app.post('/api/alerts/sos', validate({ body: S.sos }), sosHandler);
 app.post('/api/driver/emergency', validate({ body: S.sos }), sosHandler); // doc-parity alias
 
@@ -1481,6 +1511,26 @@ app.get('/api/drivers/:driverId/trips',
   }
 );
 
+// Announce a trip change so clients can drop their polling loop. Goes to the school
+// room (admin dashboards) and to the assigned driver, who is not in that room.
+// `trip` must carry route.schoolId.
+function emitTripChange(trip, reason) {
+  if (!io || !trip) return;
+  const payload = {
+    tripId: trip.id,
+    status: trip.status,
+    busId: trip.busId,
+    driverId: trip.driverId,
+    routeId: trip.routeId,
+    routeName: trip.route?.name || null,
+    startTime: trip.startTime || null,
+    endTime: trip.endTime || null,
+    reason,
+  };
+  emitToSchool(io, trip.route?.schoolId, 'trip_status_change', payload);
+  if (trip.driverId) emitToUser(io, trip.driverId, 'trip_status_change', payload);
+}
+
 async function ownsTrip(req, res, next) {
   if (req.user.role === 'SUPER_ADMIN') return next();
   const trip = await prisma.trip.findUnique({
@@ -1516,13 +1566,21 @@ app.patch('/api/trips/:tripId/status', ownsTrip, validate({ body: S.tripStatus }
     const data = { status: req.body.status };
     if (req.body.status === 'ON_SCHEDULE') data.startTime = new Date();
     if (req.body.status === 'COMPLETED') data.endTime = new Date();
-    const trip = await prisma.trip.update({ where: { id: req.params.tripId }, data });
+    const trip = await prisma.trip.update({
+      where: { id: req.params.tripId },
+      data,
+      include: { route: { select: { schoolId: true, name: true } } },
+    });
+    emitTripChange(trip, 'status');
     res.json(trip);
   } catch (err) {
     req.log.error({ err }, 'update trip failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+// How far back a replayed check-in is recognised as the same scan.
+const IDEMPOTENCY_WINDOW_MS = 10 * 60 * 1000;
 
 app.post('/api/attendance', validate({ body: S.attendance }), async (req, res) => {
   try {
@@ -1542,10 +1600,33 @@ app.post('/api/attendance', validate({ body: S.attendance }), async (req, res) =
     if (!student) return res.status(404).json({ error: 'Student not found' });
     if (student.schoolId !== trip.route.schoolId) return res.status(400).json({ error: 'Student not on this trip route' });
 
+    // Idempotency for the driver app's offline check-in queue: a replayed scan must
+    // not create a second row or fire a second notification to the parent. Callers
+    // opt in with an Idempotency-Key header; the same scan (student + trip + type)
+    // inside the window is treated as that replay and answered with the original row.
+    //
+    // NOTE: this matches on the natural key, not on the key value itself — storing
+    // keys needs a column, and prisma/schema.prisma is off-limits without the owner's
+    // go-ahead. Two *genuinely* different scans of the same student, same trip, same
+    // type inside 10 minutes therefore collapse into one.
+    if (req.headers['idempotency-key']) {
+      const replayWindow = new Date(Date.now() - IDEMPOTENCY_WINDOW_MS);
+      const existing = await prisma.attendanceLog.findFirst({
+        where: {
+          studentId: req.body.studentId,
+          tripId: req.body.tripId,
+          type: req.body.type,
+          timestamp: { gte: replayWindow },
+        },
+        orderBy: { timestamp: 'desc' },
+      });
+      if (existing) return res.status(200).json({ ...existing, duplicate: true });
+    }
+
     const log = await prisma.attendanceLog.create({
       data: { studentId: req.body.studentId, tripId: req.body.tripId, type: req.body.type },
     });
-    
+
     if (student.parentId) {
       const typeEnum = req.body.type === 'BOARDED' ? 'BOARDING' : 'ARRIVAL';
       const title = `Student ${req.body.type}`;

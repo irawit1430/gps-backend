@@ -53,6 +53,63 @@ POST /api/attendance  { studentId, tripId, type: 'BOARDED' | 'ALIGHTED' }
 RFID scan or manual tap → one row per event. Server checks the trip is yours
 AND the student belongs to that trip's route/school.
 
+**Offline queue / replay safety.** Send an `Idempotency-Key` header when flushing a
+queued scan:
+```
+POST /api/attendance
+  headers: Idempotency-Key: <any stable id for this scan, e.g. a uuid>
+  body:    { studentId, tripId, type }
+```
+With the header present, a scan that repeats an existing one for the same
+`studentId` + `tripId` + `type` within **10 minutes** returns **200** with the
+original row plus `duplicate: true` — no second row, no second parent
+notification. Never a 409. Without the header the request is always a fresh insert,
+so send it for anything that came off the queue.
+
+Caveat worth knowing: the server matches on the scan's natural key, not on the key
+value you send. Two genuinely separate scans of the same student on the same trip
+with the same type inside 10 minutes collapse into one.
+
+`attendanceLogs[].timestamp` is always present (server-stamped, never null) and is
+the server's receipt time, not the phone's. In `GET /api/drivers/:id/trips` the list
+is scoped to **today** — it answers "who is already aboard", not trip history.
+
+## 5.1 Trip fields — what is real and what is not
+
+| Field | Status |
+|-------|--------|
+| `status` | real: `PLANNED` / `ON_SCHEDULE` / `DELAYED` / `COMPLETED` / `CANCELLED` |
+| `startTime` | real: stamped server-side the moment status becomes `ON_SCHEDULE`. `null` while `PLANNED` |
+| `endTime` | real: stamped when status becomes `COMPLETED` |
+| `progressPercent` | ⚠️ **dead column — always `0`.** Nothing writes it. Do not render it |
+| `delayMinutes` | ⚠️ **dead column — always `0`** |
+| `currentEtaMessage` | ⚠️ **dead column — always `null`** |
+
+You were right to not guess: `progressPercent` is neither stop-based nor
+distance-based, it is simply never computed. If you want progress today, derive it
+client-side from `attendanceLogs` against `route.stops` (stops covered ÷ total), or
+ask backend to compute it server-side.
+
+**ETA today** comes from `RouteStop.expectedArrivalMinutes` (an offset in minutes
+from trip start), not from an absolute timestamp:
+```
+stopETA = trip.startTime + expectedArrivalMinutes    // once the trip is running
+```
+Before `startTime` exists there is no absolute schedule to anchor to — see the note
+on `scheduledArrival` in REVIEW_LOG open items.
+
+## 5.2 SOS acknowledgement
+```
+POST /api/driver/emergency   { message?, tripId? }
+→ { alertId, id, status: 'ACTIVE', schoolId, type, message, createdAt, ... }
+
+GET /api/alerts/:alertId
+→ { alertId, status, acknowledged, ... }
+```
+`acknowledged` is `true` once an admin resolves the alert
+(`POST /api/notifications/:id/resolve` sets `status: 'RESOLVED'`). Readable by the
+driver who raised it, any admin of that school, and SUPER_ADMIN.
+
 ## 6. SOS (emergency) 🔴 payload changed
 ```
 POST /api/driver/emergency   { message?, tripId? }
