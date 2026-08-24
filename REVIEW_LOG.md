@@ -53,6 +53,8 @@
 | _(uncommitted)_ | `liveFixGuard` rejected equal timestamps, so a TM-100 reusing its last fix time punched gaps into the live stream. Only strictly older fixes are dropped now |
 | _(uncommitted)_ | `PUT /api/devices/:id` announced status ONLINE on any edit — now reports the device's actual status |
 | _(uncommitted)_ | **OOM restart loop** (pm2 killed the process at 512M every 1–4 min in prod, dropping every socket → dashboards flapped online/offline). Both admin-stats "active devices" queries pulled every GpsLog row in the window into JS (Prisma applies `distinct` in memory) — replaced with `groupBy` (DB-side) and bounded the window with `lte: now` so a future-dated device clock cannot make the filter match the whole table |
+| _(uncommitted)_ | **deviceSecret leak:** `GET /api/schools/:id/buses` spread the whole Bus row, and `bus: true` in `GET /api/drivers/:driverId/trips`, `GET /api/schools/:id/drivers` and `/api/search` carried the HMAC secret to every admin and driver client. All field-selected now |
+| _(uncommitted)_ | `GET /api/drivers/:driverId/trips` (the driver app's poll endpoint — ~6× the traffic of anything else in prod logs) pulled unbounded `attendanceLogs` and whole student rows on every poll. Scoped to today's logs + the fields `docs/frontend/driver-app.md` §2 documents |
 | _(uncommitted)_ | Open Item 6 closed: `PATCH /api/trips/:tripId/status` re-checks bus/driver conflict before ON_SCHEDULE/DELAYED |
 | _(uncommitted)_ | Open Item 8 closed: bulk student import generates a random temp password per parent and returns `parentCredentials[]` (was the shared literal `password123`) |
 

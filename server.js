@@ -304,7 +304,9 @@ app.get('/api/schools/:schoolId/buses', requireTenant('schoolId'), async (req, r
       buses.map((b) => {
         const t = b.trips.find(x => x.status === 'ON_SCHEDULE' || x.status === 'DELAYED');
         const isAvailable = b.trips.length === 0;
-        return { ...b, driverName: t?.driver?.name || 'Unassigned', routeName: t?.route?.name || 'Off-Route', isAvailable };
+        // Spreading the row shipped Bus.deviceSecret — /api/devices already scrubs it.
+        const { deviceSecret, ...bus } = b;
+        return { ...bus, driverName: t?.driver?.name || 'Unassigned', routeName: t?.route?.name || 'Off-Route', isAvailable };
       })
     );
   } catch (err) {
@@ -683,7 +685,11 @@ app.get('/api/schools/:schoolId/drivers', requireTenant('schoolId'), async (req,
         notificationSettings: true, schoolId: true, createdAt: true, updatedAt: true,
         driverTrips: {
           where: { status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
-          include: { bus: true, route: true },
+          // `bus: true` here also carried the HMAC deviceSecret out to any admin.
+          include: {
+            bus: { select: { id: true, licensePlate: true, capacity: true, deviceId: true, status: true } },
+            route: true,
+          },
         },
       },
     });
@@ -1433,6 +1439,12 @@ app.get('/api/drivers/:driverId/trips',
   requireSelfOrRoles('driverId', 'SUPER_ADMIN', 'SCHOOL_ADMIN'),
   async (req, res) => {
     try {
+      // This is the driver app's polling endpoint — by far the most requested one,
+      // so every column it drags along is paid for on every poll. Keep the payload
+      // to what docs/frontend/driver-app.md §2 actually documents.
+      const startOfToday = new Date();
+      startOfToday.setHours(0, 0, 0, 0);
+
       const trips = await prisma.trip.findMany({
         where: { driverId: req.params.driverId, status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
         include: {
@@ -1440,12 +1452,24 @@ app.get('/api/drivers/:driverId/trips',
             include: {
               stops: {
                 orderBy: { orderIdx: 'asc' },
-                include: { studentMappings: { include: { student: true } } },
+                include: {
+                  studentMappings: {
+                    include: {
+                      student: { select: { id: true, name: true, rfidTag: true, grade: true, photoUrl: true } },
+                    },
+                  },
+                },
               },
             },
           },
-          bus: true,
-          attendanceLogs: true,
+          // `bus: true` shipped Bus.deviceSecret — the HMAC key — in every response.
+          bus: { select: { id: true, licensePlate: true, capacity: true, deviceId: true, status: true, schoolId: true } },
+          // Unbounded, this grows for the life of the trip; the app only needs
+          // today's scans to know who is already aboard.
+          attendanceLogs: {
+            where: { timestamp: { gte: startOfToday } },
+            select: { id: true, studentId: true, type: true, timestamp: true },
+          },
         },
         orderBy: { createdAt: 'asc' },
       });
@@ -2064,7 +2088,7 @@ app.get('/api/search', async (req, res) => {
     if (role === 'SCHOOL_ADMIN' && schoolId) {
       const [students, drivers, buses, routes] = await Promise.all([
         prisma.student.findMany({ where: { schoolId, name: { contains: q } }, include: { routeMappings: { include: { routeStop: { include: { route: true } } } } }, take: 10 }),
-        prisma.user.findMany({ where: { schoolId, role: 'DRIVER', name: { contains: q } }, include: { driverTrips: { include: { bus: true } } }, take: 10 }),
+        prisma.user.findMany({ where: { schoolId, role: 'DRIVER', name: { contains: q } }, include: { driverTrips: { include: { bus: { select: { id: true, licensePlate: true } } } } }, take: 10 }),
         prisma.bus.findMany({ where: { schoolId, licensePlate: { contains: q } }, take: 10 }),
         prisma.route.findMany({ where: { schoolId, name: { contains: q } }, take: 10 }),
       ]);

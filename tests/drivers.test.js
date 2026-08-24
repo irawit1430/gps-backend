@@ -48,7 +48,14 @@ describe('GET /api/schools/:schoolId/drivers', () => {
       select: {
         id: true, name: true, email: true, role: true, photoUrl: true,
         notificationSettings: true, schoolId: true, createdAt: true, updatedAt: true,
-        driverTrips: { where: { status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } }, include: { bus: true, route: true } },
+        driverTrips: {
+          where: { status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
+          // bus is field-selected so the HMAC deviceSecret never leaves the server
+          include: {
+            bus: { select: { id: true, licensePlate: true, capacity: true, deviceId: true, status: true } },
+            route: true,
+          },
+        },
       },
     });
   });
