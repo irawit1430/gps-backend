@@ -1554,7 +1554,7 @@ const getSchoolAdminStats = async (schoolId) => {
     prisma.student.count({ where: { schoolId } }),
     prisma.route.count({ where: { schoolId } }),
     prisma.leaveApplication.count({ where: { student: { schoolId }, status: 'PENDING' } }),
-    prisma.gpsLog.findMany({ where: { bus: { schoolId }, timestamp: { gte: fifteenMinsAgo } }, distinct: ['busId'], select: { busId: true } }),
+    prisma.gpsLog.groupBy({ by: ['busId'], where: { bus: { schoolId }, timestamp: { gte: fifteenMinsAgo, lte: new Date() } } }),
     prisma.bus.count({ where: { schoolId, createdAt: { gte: thirtyDaysAgo } } }),
     prisma.student.count({ where: { schoolId, createdAt: { gte: thirtyDaysAgo } } }),
     prisma.route.aggregate({ _avg: { estimatedDuration: true }, where: { schoolId } }),
@@ -1591,7 +1591,7 @@ const getSuperAdminStats = async () => {
     prisma.student.count(),
     prisma.school.count({ where: { createdAt: { gte: thirtyDaysAgo } } }),
     prisma.bus.count({ where: { createdAt: { gte: thirtyDaysAgo } } }),
-    prisma.gpsLog.findMany({ where: { timestamp: { gte: fifteenMinsAgo } }, distinct: ['busId'], select: { busId: true } }),
+    prisma.gpsLog.groupBy({ by: ['busId'], where: { timestamp: { gte: fifteenMinsAgo, lte: new Date() } } }),
   ]);
   const activeDevices = activeLogs.length;
   const offlineDevices = Math.max(0, totalBuses - activeDevices);
