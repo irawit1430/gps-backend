@@ -48,6 +48,10 @@
 | _(uncommitted)_ | Stale-bus sweep (`index.js`) now emits `device_status_change` OFFLINE per bus, so dashboards see a bus go dark without a reload |
 | _(uncommitted)_ | P2002 → 500 on `POST /api/schools/:id/drivers`, `POST /api/devices`, `POST`/`PUT /api/admins`, and bulk student import. All now 400 with a usable message |
 | _(uncommitted)_ | `GET /api/schools?sort=<col>` 500'd on any unknown column — now a 400 with the allowed list |
+| _(uncommitted)_ | **Online/offline dot flapping:** nothing ever emitted a `device_status_change` ONLINE — the sweep announced only the OFFLINE edge, so a dimmed bus never lit back up over socket. Added `busPresence.js`: shared status-write throttle + OFFLINE→ONLINE edge, announced from both ingest paths; sweep calls `markOffline()` |
+| _(uncommitted)_ | The status-write throttle never engaged on `POST /api/telemetry` with HMAC on (marker was kept on a per-request row object) — a `bus.update` ran on every packet. Now held in `busPresence` |
+| _(uncommitted)_ | `liveFixGuard` rejected equal timestamps, so a TM-100 reusing its last fix time punched gaps into the live stream. Only strictly older fixes are dropped now |
+| _(uncommitted)_ | `PUT /api/devices/:id` announced status ONLINE on any edit — now reports the device's actual status |
 | _(uncommitted)_ | Open Item 6 closed: `PATCH /api/trips/:tripId/status` re-checks bus/driver conflict before ON_SCHEDULE/DELAYED |
 | _(uncommitted)_ | Open Item 8 closed: bulk student import generates a random temp password per parent and returns `parentCredentials[]` (was the shared literal `password123`) |
 
@@ -93,7 +97,8 @@
 - HMAC telemetry: `middleware/telemetryHmac.js`
 - Zod request schemas: `schemas.js`
 - TCP hardware ingest: `tcp-server.js`
-- Presence throttle helper: `busPresence.js`
+- Presence throttle + online-edge helper: `busPresence.js`
+- Live-fix watermark (anti snap-back): `liveFixGuard.js`
 - Boot + stale-sweep + graceful shutdown: `index.js`
 - Tests: `tests/*.test.js`
 - Frontend integration docs: `docs/frontend/` (`parent-app.md`, `driver-app.md`)

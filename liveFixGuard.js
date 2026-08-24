@@ -24,8 +24,12 @@ function shouldBroadcast(busId, timestamp) {
   const now = Date.now();
   if (fixMs > now + MAX_CLOCK_SKEW_MS) fixMs = now;
 
+  // Equal timestamps pass: a TM-100 reuses the last fix time on packets sent while
+  // it has no fresh fix, and a phone can post twice inside the same second. Only a
+  // fix that is genuinely *older* than what clients already have is dropped —
+  // rejecting equal ones would punch gaps into an otherwise live stream.
   const lastMs = lastFixMs.get(busId) || 0;
-  if (fixMs <= lastMs) return false;
+  if (fixMs < lastMs) return false;
 
   if (!lastFixMs.has(busId) && lastFixMs.size >= MAX_ENTRIES) {
     lastFixMs.delete(lastFixMs.keys().next().value);

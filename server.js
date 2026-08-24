@@ -194,6 +194,7 @@ app.post('/api/auth/logout', authenticate, (req, res) => {
 // and attached as req.bus.
 const telemetryCache = require('./telemetryCache');
 const liveFixGuard = require('./liveFixGuard');
+const busPresence = require('./busPresence');
 app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => next(), // placeholder to satisfy ordering
   // deferred HMAC attach after prisma exists:
   async (req, res, next) => (await telemetryHmac(prisma))(req, res, next),
@@ -222,16 +223,24 @@ app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => 
         data: { busId: bus.id, tripId: activeTrip?.id || null, lat, lng, speed: speed || 0, timestamp: timestamp ? new Date(timestamp) : new Date() },
       });
 
-      const now = Date.now();
-      const lastStatusWrite = bus.lastStatusWrite || 0;
-      if (bus.status !== 'ONLINE' || now - lastStatusWrite > 5 * 60 * 1000) {
+      // Throttle state lives in busPresence, not on `bus`: with HMAC enforced the row
+      // is re-read per request, so a marker stored on the object was always missing
+      // and every single packet wrote to the DB.
+      const presence = busPresence.evaluate(bus.id, bus.status);
+      if (presence.write) {
         await prisma.bus.update({
           where: { id: bus.id },
           data: { status: 'ONLINE' },
         });
         bus.status = 'ONLINE';
-        bus.lastStatusWrite = now;
         telemetryCache.set(deviceId, bus);
+      }
+      if (presence.cameOnline) {
+        emitToSchool(io, bus.schoolId, 'device_status_change', {
+          deviceId: bus.id,
+          status: 'ONLINE',
+          message: `${bus.licensePlate} is reporting`,
+        });
       }
 
       // An offline queue flush from the driver app (or a retried post) can deliver a
@@ -1863,7 +1872,9 @@ app.put('/api/devices/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), valid
     }
     const { deviceSecret, ...safeBody } = req.body || {};
     const device = await prisma.bus.update({ where: { id: req.params.id }, data: safeBody });
-    emitToSchool(io, device.schoolId, 'device_status_change', { deviceId: device.id, status: 'ONLINE', message: 'Device updated' });
+    // Report the status the device actually has — an edit is not a presence signal,
+    // and hardcoding ONLINE here lit up buses that were not reporting at all.
+    emitToSchool(io, device.schoolId, 'device_status_change', { deviceId: device.id, status: device.status, message: 'Device updated' });
     const { deviceSecret: _s, ...rest } = device;
     res.json(rest);
   } catch (err) {

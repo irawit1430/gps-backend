@@ -4,6 +4,7 @@ const { parseBlackboxPacket } = require('./blackbox-parser');
 const { syncGpsLogToFirebase, syncEmergencyAlertToFirebase } = require('./firebase');
 const { emitToSchool } = require('./middleware/socketAuth');
 const liveFixGuard = require('./liveFixGuard');
+const busPresence = require('./busPresence');
 const config = require('./config');
 const logger = require('./logger');
 
@@ -13,9 +14,6 @@ const MAX_BUFFER_BYTES = 4 * 1024;
 const MAX_CONCURRENT_CONNECTIONS = 500;
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 
-// Throttles Bus.status='ONLINE' writes per bus so a live TCP device refreshes
-// updatedAt (for the stale-sweep) without a DB write on every packet.
-const tcpThrottleCache = new Map(); // busId → last status-write epoch ms
 
 // One hardware SOS per bus per cooldown window. A latched panic button sets the
 // emergency flag on every packet, so without this each packet becomes its own alert.
@@ -83,14 +81,19 @@ function startTcpServer(io, tcpPort = config.TCP_PORT) {
               data: { busId: bus.id, tripId: bus.trips?.[0]?.id || null, lat: parsed.lat, lng: parsed.lng, speed: parsed.speed || 0, timestamp: parsed.timestamp || new Date() },
             });
             
-            const now = Date.now();
-            const lastWrite = tcpThrottleCache.get(bus.id) || 0;
-            if (bus.status !== 'ONLINE' || now - lastWrite > 5 * 60 * 1000) {
+            const presence = busPresence.evaluate(bus.id, bus.status);
+            if (presence.write) {
               await prisma.bus.update({
                 where: { id: bus.id },
                 data: { status: 'ONLINE' }
               });
-              tcpThrottleCache.set(bus.id, now);
+            }
+            if (presence.cameOnline && io) {
+              emitToSchool(io, bus.schoolId, 'device_status_change', {
+                deviceId: bus.id,
+                status: 'ONLINE',
+                message: `${bus.licensePlate} is reporting`,
+              });
             }
 
             // Only a live, GPS-fixed packet describes where the bus is *now*.

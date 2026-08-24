@@ -23,6 +23,7 @@ const { server, io, prisma } = require('./server.js');
 const { startTcpServer } = require('./tcp-server.js');
 const { flushFirestore } = require('./firebase.js');
 const { emitToSchool } = require('./middleware/socketAuth');
+const busPresence = require('./busPresence');
 
 const httpServer = server.listen(config.PORT, () => {
   logger.info({ port: config.PORT }, 'HTTP + Socket.IO server listening');
@@ -52,6 +53,9 @@ setInterval(async () => {
       data: { status: 'OFFLINE' }
     });
     for (const bus of stale) {
+      // Next packet from this bus must write + announce ONLINE right away rather
+      // than wait out the status-write throttle.
+      busPresence.markOffline(bus.id);
       emitToSchool(io, bus.schoolId, 'device_status_change', {
         deviceId: bus.id,
         status: 'OFFLINE',
