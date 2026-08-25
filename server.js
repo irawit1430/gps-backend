@@ -197,6 +197,61 @@ app.post('/api/auth/logout', authenticate, async (req, res) => {
   res.json({ message: 'Logged out' });
 });
 
+// Forgot password. There is no mail sender in this stack, so instead of emailing a
+// code this queues a request for the user's school admin, who resets the password and
+// hands it over directly. Always answers 200 with the same body: a different response
+// for an unknown address would confirm which emails have accounts.
+app.post('/api/auth/forgot-password', loginLimiter, validate({ body: S.forgotPassword }), async (req, res) => {
+  const sameAnswer = {
+    success: true,
+    message: 'If that account exists, your school admin has been notified and will share a new password.',
+  };
+  try {
+    const user = await prisma.user.findUnique({ where: { email: req.body.email } });
+    if (!user) return res.json(sameAnswer);
+
+    // Re-tapping the button must not pile up requests for the same person.
+    const pending = await prisma.passwordResetRequest.findFirst({
+      where: { userId: user.id, status: 'PENDING' },
+    });
+    if (pending) return res.json(sameAnswer);
+
+    const request = await prisma.passwordResetRequest.create({
+      data: { userId: user.id, schoolId: user.schoolId || null, status: 'PENDING' },
+    });
+
+    // Tell the people who can act on it: that school's admins, or the super admins
+    // when the account belongs to no school.
+    const admins = await prisma.user.findMany({
+      where: user.schoolId
+        ? { schoolId: user.schoolId, role: { in: ['SCHOOL_ADMIN', 'SUPER_ADMIN'] } }
+        : { role: 'SUPER_ADMIN' },
+      select: { id: true },
+    });
+    const adminIds = admins.map((a) => a.id);
+    if (adminIds.length > 0) {
+      const title = 'Password reset requested';
+      const message = `${user.name} (${user.email}) cannot sign in and asked for a password reset.`;
+      await prisma.notification.createMany({
+        data: adminIds.map((id) => ({ userId: id, title, message, type: 'SYSTEM' })),
+      });
+      if (io) {
+        adminIds.forEach((id) =>
+          emitToUser(io, id, 'notification', { title, message, type: 'SYSTEM', requestId: request.id })
+        );
+      }
+      pushToUsers(adminIds, { title, body: message, data: { type: 'PASSWORD_RESET', requestId: request.id } });
+    }
+
+    req.log.info({ userId: user.id, requestId: request.id }, 'password reset requested');
+    res.json(sameAnswer);
+  } catch (err) {
+    req.log.error({ err }, 'forgot password failed');
+    // Still the same answer: an error here must not become an account oracle either.
+    res.json(sameAnswer);
+  }
+});
+
 // Telemetry (HMAC-authenticated, not JWT). Bus is looked up by the HMAC middleware
 // and attached as req.bus.
 const telemetryCache = require('./telemetryCache');
@@ -2530,6 +2585,111 @@ app.delete('/api/admins/:id', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+// -- Password reset requests (admin side of the forgot-password flow) --
+// Readable alphabet: no O/0/I/1, so a temp password can be read out over a phone
+// without spelling it letter by letter.
+const TEMP_PASSWORD_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+function generateTempPassword(length = 12) {
+  const bytes = crypto.randomBytes(length);
+  let out = '';
+  for (let i = 0; i < length; i++) out += TEMP_PASSWORD_ALPHABET[bytes[i] % TEMP_PASSWORD_ALPHABET.length];
+  return out;
+}
+
+app.get('/api/password-reset-requests',
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  async (req, res) => {
+    try {
+      const status = req.query.status ? String(req.query.status).toUpperCase() : 'PENDING';
+      const where = { status };
+      if (req.user.role === 'SCHOOL_ADMIN') where.schoolId = req.user.schoolId;
+      else if (req.query.schoolId) where.schoolId = req.query.schoolId;
+
+      const requests = await prisma.passwordResetRequest.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: Math.min(parseInt(req.query.limit) || 50, 200),
+        include: { user: { select: { id: true, name: true, email: true, role: true, phone: true } } },
+      });
+      res.json(requests);
+    } catch (err) {
+      req.log.error({ err }, 'list password reset requests failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
+// Approving mints a temp password and returns it ONCE: it is never stored in
+// readable form and cannot be fetched again.
+app.post('/api/password-reset-requests/:id/approve',
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  async (req, res) => {
+    try {
+      const request = await prisma.passwordResetRequest.findUnique({
+        where: { id: req.params.id },
+        include: { user: { select: { id: true, name: true, email: true, schoolId: true } } },
+      });
+      if (!request) return res.status(404).json({ error: 'Request not found' });
+      if (req.user.role === 'SCHOOL_ADMIN' && request.schoolId !== req.user.schoolId) {
+        return res.status(403).json({ error: 'Forbidden: cross-tenant' });
+      }
+      if (request.status !== 'PENDING') {
+        return res.status(400).json({ error: `Request is already ${request.status}` });
+      }
+
+      const tempPassword = generateTempPassword();
+      const hashed = await bcrypt.hash(tempPassword, 10);
+      await prisma.$transaction([
+        prisma.user.update({
+          where: { id: request.userId },
+          data: { password: hashed, mustResetPassword: true },
+        }),
+        prisma.passwordResetRequest.update({
+          where: { id: request.id },
+          data: { status: 'APPROVED', resolvedBy: req.user.id, resolvedAt: new Date() },
+        }),
+      ]);
+      // Whoever was signed in as this user is signed out: the password just changed.
+      invalidateUser(request.userId);
+
+      req.log.info({ requestId: request.id, by: req.user.id }, 'password reset approved');
+      res.json({
+        success: true,
+        user: { id: request.user.id, name: request.user.name, email: request.user.email },
+        tempPassword,
+        note: 'Share this with the user directly. It is shown once and they must change it at next sign-in.',
+      });
+    } catch (err) {
+      req.log.error({ err }, 'approve password reset failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
+app.post('/api/password-reset-requests/:id/reject',
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  async (req, res) => {
+    try {
+      const request = await prisma.passwordResetRequest.findUnique({ where: { id: req.params.id } });
+      if (!request) return res.status(404).json({ error: 'Request not found' });
+      if (req.user.role === 'SCHOOL_ADMIN' && request.schoolId !== req.user.schoolId) {
+        return res.status(403).json({ error: 'Forbidden: cross-tenant' });
+      }
+      if (request.status !== 'PENDING') {
+        return res.status(400).json({ error: `Request is already ${request.status}` });
+      }
+      const updated = await prisma.passwordResetRequest.update({
+        where: { id: request.id },
+        data: { status: 'REJECTED', resolvedBy: req.user.id, resolvedAt: new Date() },
+      });
+      res.json(updated);
+    } catch (err) {
+      req.log.error({ err }, 'reject password reset failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
 
 // ─── Settings ─────────────────────────────────────────────
 app.get('/api/settings', async (_req, res) => {

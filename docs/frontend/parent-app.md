@@ -325,6 +325,19 @@ to — the handshake already joins the room.
 Scoping caveat: an SOS raised **without** a `tripId`, and a hardware SOS from a bus
 with no running trip, cannot be attributed to any family, so those reach admins only.
 
+## 4.2 Forgot password
+
+```
+POST /api/auth/forgot-password   { email }
+→ 200 { success: true, message: "..." }
+```
+
+Show the returned `message` and send the user back to the login screen. There is no
+code to enter and no reset link — a school admin approves the request and passes the
+new password on directly (see README §4.4 for why).
+
+The response is identical for an address that has no account, so never branch on it.
+
 ## 5. Leaves
 ```
 GET  /api/parents/{parentId}/leaves

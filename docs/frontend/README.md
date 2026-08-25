@@ -277,6 +277,53 @@ Consequences once a trip carries one:
 **Admin consoles:** add an optional date-time field to the trip create/edit form.
 Leaving it empty is valid and preserves today's behaviour.
 
+---
+
+## 4.4 Forgot password (admin-approval flow)
+
+There is **no reset-by-email**. Nothing in this stack can send mail, and adding a
+mail provider was declined, so a reset is approved by a human instead.
+
+**User side (parent / driver app) — one call:**
+
+```
+POST /api/auth/forgot-password   { "email": "someone@example.com" }
+→ 200 { success: true, message: "If that account exists, your school admin has been
+        notified and will share a new password." }
+```
+
+- Always 200, always the **same body**, whether or not the address has an account —
+  a different answer would tell an attacker which emails are registered. Do not try
+  to infer anything from it; show the message and stop.
+- Rate-limited like login (429 → "try again in a minute").
+- Tapping twice does not queue a second request.
+- There is no code-entry step and no reset-token step. If your app was built for a
+  3-step flow, keep step 1 and replace steps 2–3 with the message above.
+
+**Admin side (school + super admin consoles):**
+
+```
+GET  /api/password-reset-requests?status=PENDING
+→ [{ id, status, createdAt, user: { id, name, email, role, phone } }]
+
+POST /api/password-reset-requests/:id/approve
+→ { success, user: { id, name, email }, tempPassword, note }
+
+POST /api/password-reset-requests/:id/reject
+→ the updated request
+```
+
+Approving sets a fresh temp password, forces `mustResetPassword`, and signs the user
+out of every existing session. **`tempPassword` is returned exactly once** — it is
+stored only as a hash, so a lost one means approving a new request. Its alphabet
+excludes `O/0/I/1` so it can be read out over a phone.
+
+School admins see and act on their own school only. Requests from accounts with no
+school go to super admins.
+
+**UI note:** a pending request also arrives as a `notification` socket event and a
+push, so a badge on the admin console can light up without polling.
+
 ## 5. Standard error shape
 
 | Status | Meaning | Frontend action |

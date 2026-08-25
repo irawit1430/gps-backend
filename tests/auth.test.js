@@ -8,7 +8,16 @@ jest.mock('@prisma/client', () => {
   const mockPrisma = {
     user: {
       findUnique: jest.fn(),
+      findMany: jest.fn(),
       update: jest.fn(),
+      updateMany: jest.fn(),
+    },
+    passwordResetRequest: {
+      findFirst: jest.fn(),
+      create: jest.fn(),
+    },
+    notification: {
+      createMany: jest.fn(),
     },
   };
   return { PrismaClient: jest.fn(() => mockPrisma) };
@@ -177,5 +186,60 @@ describe('POST /api/users/me/fcm-token', () => {
 
     expect(res.status).toBe(400);
     expect(prisma.user.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/auth/forgot-password', () => {
+  const SAME_MESSAGE =
+    'If that account exists, your school admin has been notified and will share a new password.';
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    prisma.user.findMany.mockResolvedValue([]);
+    prisma.passwordResetRequest.findFirst.mockResolvedValue(null);
+    prisma.passwordResetRequest.create.mockResolvedValue({ id: 'req-1' });
+  });
+
+  it('answers identically for an unknown email and creates nothing', async () => {
+    prisma.user.findUnique.mockResolvedValue(null);
+
+    const res = await request(app)
+      .post('/api/auth/forgot-password')
+      .send({ email: 'nobody@test.com' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, message: SAME_MESSAGE });
+    expect(prisma.passwordResetRequest.create).not.toHaveBeenCalled();
+  });
+
+  it('queues a request for a known email, with the same response body', async () => {
+    prisma.user.findUnique.mockResolvedValue({
+      id: 'user-9', name: 'Parent P', email: 'known@test.com', schoolId: 'school-1',
+    });
+
+    const res = await request(app)
+      .post('/api/auth/forgot-password')
+      .send({ email: 'known@test.com' });
+
+    expect(res.status).toBe(200);
+    // Byte-identical to the unknown-email answer: no account oracle.
+    expect(res.body).toEqual({ success: true, message: SAME_MESSAGE });
+    expect(prisma.passwordResetRequest.create).toHaveBeenCalledWith({
+      data: { userId: 'user-9', schoolId: 'school-1', status: 'PENDING' },
+    });
+  });
+
+  it('does not queue a second request while one is pending', async () => {
+    prisma.user.findUnique.mockResolvedValue({
+      id: 'user-9', name: 'Parent P', email: 'known@test.com', schoolId: 'school-1',
+    });
+    prisma.passwordResetRequest.findFirst.mockResolvedValue({ id: 'req-existing' });
+
+    const res = await request(app)
+      .post('/api/auth/forgot-password')
+      .send({ email: 'known@test.com' });
+
+    expect(res.status).toBe(200);
+    expect(prisma.passwordResetRequest.create).not.toHaveBeenCalled();
   });
 });

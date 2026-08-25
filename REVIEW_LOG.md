@@ -104,8 +104,11 @@
    No column was dropped, renamed or made NOT NULL, so existing rows need no backfill.
    `RouteStop.scheduledArrival` was deliberately NOT added — `Trip.scheduledStart` +
    the existing `RouteStop.expectedArrivalMinutes` covers it without stale-per-day rows.
-   Still outstanding: **forgot-password** needs an email/SMS provider decision before
-   the schema side is worth building — nothing in `package.json` can send mail.
+   Forgot-password: owner chose the **admin-approval** route over adding a mail
+   provider (2026-08-25). Migration `4_password_reset_requests` adds one table;
+   `POST /api/auth/forgot-password` queues a request and notifies that school's
+   admins, who approve it and hand over a one-time temp password. No mailer, no new
+   service, no cost. Revisit only if resets outgrow the transport desk.
 
 10. **Attendance idempotency is natural-key based, not key-value based.**
    `POST /api/attendance` honours `Idempotency-Key` by matching student+trip+type

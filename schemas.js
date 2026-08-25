@@ -209,6 +209,10 @@ exports.globalSettings = z.object({
   alertEmail: z.string().email().optional(),
 });
 
+exports.forgotPassword = z.object({
+  email: z.string().email(),
+});
+
 exports.changePassword = z.object({
   oldPassword: z.string().min(1).max(200),
   newPassword: z.string().min(8).max(200),
