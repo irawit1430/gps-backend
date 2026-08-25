@@ -216,6 +216,111 @@ you fetch them, but the parent app has no trip-detail endpoint today.)
 
 ---
 
+## 4.1 Child detail, trip timeline, history, alerts (added 25 Aug 2026)
+
+### `GET /api/parents/:parentId/students` — extra fields
+
+```jsonc
+{
+  "id": "...", "name": "...", "grade": "...", "photoUrl": "...",
+  "routeStopName": "Sector 14 Market",
+  "driverName": "Rajesh Kumar",
+  "licensePlate": "DL-01-AB-1234",
+  "tripStatus": "IN_TRANSIT",
+  "busId": "bus-101",          // match socket packets on this, not licensePlate
+  "tripId": "trip-88",
+  "stopId": "stop-1",
+  "stopLat": 28.5600,          // the child's own stop — map pin + ETA anchor
+  "stopLng": 77.2050,
+  "stopOffsetMinutes": 22,     // RouteStop.expectedArrivalMinutes, null if unset
+  "stopEtaAt": "2026-08-25T07:52:00.000Z",   // startTime + offset; null before start
+  "stopEtaMinutes": 7,                        // relative to now; negative = overdue
+  "trip": {
+    "id": "trip-88",
+    "status": "ON_SCHEDULE",
+    "startTime": "2026-08-25T07:30:00.000Z",
+    "endTime": null,
+    "currentEtaMessage": null,   // ⚠️ dead column, nothing writes it
+    "delayMinutes": 0            // ⚠️ dead column, always 0
+  },
+  "driverPhone": null,           // no phone column on User — see below
+  "schoolPhone": "+9111XXXXXXX"  // School.phone, falls back to contactPhone
+}
+```
+
+**ETA:** prefer `stopEtaAt` / `stopEtaMinutes` over a client-side distance ÷ speed
+estimate. Both are `null` until the trip actually starts (`startTime` is stamped when
+the driver moves the trip to `ON_SCHEDULE`) or when the school has not filled in
+`expectedArrivalMinutes` for that stop. Keep the fallback for those two cases.
+
+Do **not** build on `trip.currentEtaMessage` or `trip.delayMinutes` — they are columns
+nothing computes, returned only so the shape does not change later.
+
+### `GET /api/parents/:parentId/students/:studentId/trip`
+
+Trip timeline. 404 when the child has no route mapping or no active trip on it.
+
+```jsonc
+{
+  "id": "trip-88", "status": "ON_SCHEDULE",
+  "startTime": "...", "endTime": null,
+  "busId": "bus-101", "licensePlate": "DL-01-AB-1234", "driverName": "Rajesh Kumar",
+  "route": {
+    "id": "route-4b", "name": "Morning Route 4B",
+    "stops": [{
+      "id": "stop-1", "name": "Green Park Gate 2",
+      "lat": 28.5584, "lng": 77.2029, "orderIdx": 1,
+      "expectedArrivalMinutes": 12,
+      "stopEtaAt": "2026-08-25T07:42:00.000Z", "stopEtaMinutes": -3,
+      "isMyStop": false,
+      "boardedCount": 4,
+      "passedAt": "2026-08-25T07:29:00Z"
+    }]
+  }
+}
+```
+
+No `studentMappings`, no other child's name or RFID tag — only `boardedCount`.
+
+⚠️ `passedAt` is **derived**, not recorded: nothing tracks when a bus physically passes
+a stop, so this is the first boarding scan at that stop on this trip. A stop where
+nobody boarded stays `null` even after the bus has been and gone.
+
+### `GET /api/parents/:parentId/students/:studentId/attendance?limit=20`
+
+```jsonc
+[{ "id": "att-1", "type": "BOARDED", "tripId": "trip-88",
+   "timestamp": "2026-08-25T07:42:00.000Z",
+   "createdAt": "2026-08-25T07:42:00.000Z",   // alias of timestamp
+   "stopName": "Sector 14 Market" }]
+```
+
+Newest first, `limit` default 20, max 100. `stopName` is the child's **assigned** stop
+(AttendanceLog has no stop column), so it is the same on every row.
+
+### `GET /api/parents/:parentId/alerts?limit=20`
+
+Cold-start companion to the socket event — an SOS raised while the app was closed.
+
+```jsonc
+[{ "id": "alert-1", "type": "DRIVER_SOS", "message": "...",
+   "status": "ACTIVE", "resolved": false, "tripId": "trip-88",
+   "createdAt": "2026-08-25T07:36:00Z" }]
+```
+
+Scoped to trips on the routes this parent's children ride — never other buses.
+`resolved` is `true` once an admin marks the alert handled; poll or re-fetch on
+foreground to clear a banner.
+
+### `emergency_alert` now reaches parents
+
+Both driver SOS and hardware SOS emit `emergency_alert` to the affected trip's parents
+(via their `user:<id>` room), in addition to the school's admins. Nothing to subscribe
+to — the handshake already joins the room.
+
+Scoping caveat: an SOS raised **without** a `tripId`, and a hardware SOS from a bus
+with no running trip, cannot be attributed to any family, so those reach admins only.
+
 ## 5. Leaves
 ```
 GET  /api/parents/{parentId}/leaves

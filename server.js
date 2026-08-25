@@ -1217,6 +1217,62 @@ app.patch('/api/parents/:id/preferences',
   }
 );
 
+// Arrival time for one stop on a running trip. There is no absolute schedule in the
+// schema (see REVIEW_LOG item 9), so this anchors RouteStop.expectedArrivalMinutes to
+// the trip's actual startTime — meaningful only once the trip has started.
+function stopEta(trip, stop) {
+  const offset = stop?.expectedArrivalMinutes;
+  if (!trip?.startTime || offset === null || offset === undefined) {
+    return { stopEtaAt: null, stopEtaMinutes: null };
+  }
+  const at = new Date(new Date(trip.startTime).getTime() + offset * 60_000);
+  return {
+    stopEtaAt: at.toISOString(),
+    stopEtaMinutes: Math.round((at.getTime() - Date.now()) / 60_000),
+  };
+}
+
+// Parents of the children riding a given trip. Used to scope emergency alerts to the
+// families actually affected instead of the whole school.
+async function parentIdsOnTrip(tripId) {
+  if (!tripId) return [];
+  const trip = await prisma.trip.findUnique({
+    where: { id: tripId },
+    include: {
+      route: {
+        include: {
+          stops: { include: { studentMappings: { select: { student: { select: { parentId: true } } } } } },
+        },
+      },
+    },
+  });
+  const ids = new Set();
+  trip?.route?.stops?.forEach((stop) => {
+    stop.studentMappings.forEach((m) => {
+      if (m.student.parentId) ids.add(m.student.parentId);
+    });
+  });
+  return Array.from(ids);
+}
+
+// Confirms the student belongs to this parent. Admins pass through — the route-level
+// requireSelfOrRoles has already established they may act for this parent.
+async function loadParentStudent(req, res) {
+  const student = await prisma.student.findUnique({
+    where: { id: req.params.studentId },
+    include: { school: { select: { phone: true, contactPhone: true } } },
+  });
+  if (!student) {
+    res.status(404).json({ error: 'Student not found' });
+    return null;
+  }
+  if (student.parentId !== req.params.parentId) {
+    res.status(403).json({ error: 'Forbidden: not your child' });
+    return null;
+  }
+  return student;
+}
+
 app.get('/api/parents/:parentId/students',
   requireSelfOrRoles('parentId', 'SUPER_ADMIN', 'SCHOOL_ADMIN'),
   async (req, res) => {
@@ -1224,6 +1280,7 @@ app.get('/api/parents/:parentId/students',
       const students = await prisma.student.findMany({
         where: { parentId: req.params.parentId },
         include: {
+          school: { select: { phone: true, contactPhone: true } },
           routeMappings: {
             include: {
               routeStop: {
@@ -1246,7 +1303,8 @@ app.get('/api/parents/:parentId/students',
         },
       });
       const formatted = students.map((s) => {
-        const t = s.routeMappings[0]?.routeStop?.route?.trips[0] || null;
+        const stop = s.routeMappings[0]?.routeStop || null;
+        const t = stop?.route?.trips[0] || null;
         let tripStatus = 'NOT_STARTED';
         if (t) {
           if (t.status === 'ON_SCHEDULE') tripStatus = 'IN_TRANSIT';
@@ -1257,17 +1315,205 @@ app.get('/api/parents/:parentId/students',
           name: s.name,
           grade: s.grade,
           photoUrl: s.photoUrl,
-          routeStopName: s.routeMappings[0]?.routeStop?.name || 'Unassigned',
+          routeStopName: stop?.name || 'Unassigned',
           driverName: t?.driver?.name || 'Unassigned',
           licensePlate: t?.bus?.licensePlate || 'Unassigned',
           tripStatus,
           busId: t?.busId || null,
           tripId: t?.id || null,
+          // The child's own stop — needed to draw the pin and to measure an ETA against.
+          stopId: stop?.id || null,
+          stopLat: stop?.lat ?? null,
+          stopLng: stop?.lng ?? null,
+          // Schedule offset from trip start, in minutes (null when the school has not
+          // filled it in). Combined with trip.startTime it gives a real arrival time.
+          stopOffsetMinutes: stop?.expectedArrivalMinutes ?? null,
+          ...stopEta(t, stop),
+          trip: t
+            ? {
+                id: t.id,
+                status: t.status,
+                startTime: t.startTime,
+                endTime: t.endTime,
+                // Columns exist but nothing computes them — see docs/frontend §5.1.
+                currentEtaMessage: t.currentEtaMessage ?? null,
+                delayMinutes: t.delayMinutes ?? 0,
+              }
+            : null,
+          // Driver's personal number is not a column on User; see REVIEW_LOG item 9.
+          driverPhone: null,
+          schoolPhone: s.school?.phone || s.school?.contactPhone || null,
         };
       });
       res.json(formatted);
     } catch (err) {
       req.log.error({ err }, 'list parent students failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
+// Trip detail for a parent: the same route/stop shape drivers get, minus every other
+// child's identity. studentMappings are reduced to counts before they leave the server.
+app.get('/api/parents/:parentId/students/:studentId/trip',
+  requireSelfOrRoles('parentId', 'SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  async (req, res) => {
+    try {
+      const student = await loadParentStudent(req, res);
+      if (!student) return;
+
+      const mapping = await prisma.studentRouteMapping.findFirst({
+        where: { studentId: student.id },
+        include: { routeStop: { select: { id: true, routeId: true } } },
+      });
+      if (!mapping) return res.status(404).json({ error: 'Student is not mapped to a route stop' });
+
+      const trip = await prisma.trip.findFirst({
+        where: { routeId: mapping.routeStop.routeId, status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
+        include: {
+          route: {
+            include: {
+              stops: {
+                orderBy: { orderIdx: 'asc' },
+                include: { studentMappings: { select: { studentId: true } } },
+              },
+            },
+          },
+          bus: { select: { id: true, licensePlate: true } },
+          driver: { select: { name: true } },
+        },
+        orderBy: { createdAt: 'asc' },
+      });
+      if (!trip) return res.status(404).json({ error: 'No active trip on this route' });
+
+      const logs = await prisma.attendanceLog.findMany({
+        where: { tripId: trip.id },
+        select: { studentId: true, type: true, timestamp: true },
+      });
+
+      const stops = trip.route.stops.map((stop) => {
+        const stopStudentIds = new Set(stop.studentMappings.map((m) => m.studentId));
+        const boardings = logs.filter((l) => l.type === 'BOARDED' && stopStudentIds.has(l.studentId));
+        // No per-stop passage is recorded anywhere, so the first boarding at a stop is
+        // the closest honest proxy for "the bus was here".
+        const firstBoarding = boardings.reduce(
+          (earliest, l) => (!earliest || l.timestamp < earliest ? l.timestamp : earliest),
+          null
+        );
+        return {
+          id: stop.id,
+          name: stop.name,
+          lat: stop.lat,
+          lng: stop.lng,
+          orderIdx: stop.orderIdx,
+          expectedArrivalMinutes: stop.expectedArrivalMinutes ?? null,
+          ...stopEta(trip, stop),
+          isMyStop: stop.id === mapping.routeStop.id,
+          boardedCount: boardings.length,
+          passedAt: firstBoarding ? new Date(firstBoarding).toISOString() : null,
+        };
+      });
+
+      res.json({
+        id: trip.id,
+        status: trip.status,
+        startTime: trip.startTime,
+        endTime: trip.endTime,
+        busId: trip.busId,
+        licensePlate: trip.bus?.licensePlate || null,
+        driverName: trip.driver?.name || 'Unassigned',
+        route: { id: trip.routeId, name: trip.route.name, stops },
+      });
+    } catch (err) {
+      req.log.error({ err }, 'parent trip detail failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
+// Attendance history for one child.
+app.get('/api/parents/:parentId/students/:studentId/attendance',
+  requireSelfOrRoles('parentId', 'SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  async (req, res) => {
+    try {
+      const student = await loadParentStudent(req, res);
+      if (!student) return;
+
+      const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+      const [logs, mapping] = await Promise.all([
+        prisma.attendanceLog.findMany({
+          where: { studentId: student.id },
+          orderBy: { timestamp: 'desc' },
+          take: limit,
+          select: { id: true, type: true, timestamp: true, tripId: true },
+        }),
+        prisma.studentRouteMapping.findFirst({
+          where: { studentId: student.id },
+          include: { routeStop: { select: { name: true } } },
+        }),
+      ]);
+
+      // AttendanceLog has no stop column: this is the child's assigned pickup stop,
+      // not necessarily where each individual scan happened.
+      const stopName = mapping?.routeStop?.name || null;
+      res.json(
+        logs.map((l) => ({
+          id: l.id,
+          type: l.type,
+          tripId: l.tripId,
+          timestamp: l.timestamp,
+          createdAt: l.timestamp,
+          stopName,
+        }))
+      );
+    } catch (err) {
+      req.log.error({ err }, 'parent attendance history failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
+// Cold-start companion to the `emergency_alert` socket event: alerts raised on the
+// trips this parent's children ride. School-wide alerts for other buses are excluded.
+app.get('/api/parents/:parentId/alerts',
+  requireSelfOrRoles('parentId', 'SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  async (req, res) => {
+    try {
+      const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+      const mappings = await prisma.studentRouteMapping.findMany({
+        where: { student: { parentId: req.params.parentId } },
+        include: { routeStop: { select: { routeId: true } } },
+      });
+      const routeIds = [...new Set(mappings.map((m) => m.routeStop.routeId))];
+      if (routeIds.length === 0) return res.json([]);
+
+      const trips = await prisma.trip.findMany({
+        where: { routeId: { in: routeIds } },
+        orderBy: { createdAt: 'desc' },
+        take: 50,
+        select: { id: true },
+      });
+      const tripIds = trips.map((t) => t.id);
+      if (tripIds.length === 0) return res.json([]);
+
+      const alerts = await prisma.emergencyAlert.findMany({
+        where: { tripId: { in: tripIds } },
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+      });
+      res.json(
+        alerts.map((a) => ({
+          id: a.id,
+          type: a.type,
+          message: a.message,
+          status: a.status,
+          resolved: a.status === 'RESOLVED',
+          tripId: a.tripId,
+          createdAt: a.createdAt,
+        }))
+      );
+    } catch (err) {
+      req.log.error({ err }, 'parent alerts failed');
       res.status(500).json({ error: 'Internal server error' });
     }
   }
@@ -1364,6 +1610,12 @@ async function sosHandler(req, res) {
     });
     syncEmergencyAlertToFirebase(alert);
     emitToSchool(io, alert.schoolId, 'emergency_alert', alert);
+    // Parents are not in the school room. Reach only the families whose child rides
+    // this trip — a parent should not be alarmed by an unrelated bus.
+    if (alert.tripId) {
+      const parents = await parentIdsOnTrip(alert.tripId);
+      parents.forEach((pid) => emitToUser(io, pid, 'emergency_alert', alert));
+    }
     // alertId duplicates `id` so the driver app can poll GET /api/alerts/:id for
     // acknowledgement without unpacking the alert object.
     res.json({ ...alert, alertId: alert.id });
@@ -1608,6 +1860,21 @@ app.patch('/api/trips/:tripId/status', ownsTrip, validate({ body: S.tripStatus }
   }
 });
 
+// Notification preferences (PATCH /api/parents/:id/preferences) are free-form JSON.
+// These are the keys the parent app ships; anything absent counts as enabled, so a
+// parent who has never opened the settings screen keeps getting everything.
+//   approaching → 5-minutes-away alert
+//   boarding    → check-in / drop-off
+//   delay       → delays and emergencies
+function wantsNotification(settings, key) {
+  if (!settings) return true;
+  let prefs = settings;
+  if (typeof prefs === 'string') {
+    try { prefs = JSON.parse(prefs); } catch { return true; }
+  }
+  return prefs?.[key] !== false;
+}
+
 // How far back a replayed check-in is recognised as the same scan.
 const IDEMPOTENCY_WINDOW_MS = 10 * 60 * 1000;
 
@@ -1660,12 +1927,16 @@ app.post('/api/attendance', validate({ body: S.attendance }), async (req, res) =
       const typeEnum = req.body.type === 'BOARDED' ? 'BOARDING' : 'ARRIVAL';
       const title = `Student ${req.body.type}`;
       const message = `${student.name} has been marked ${req.body.type}.`;
-      
-      const notif = await prisma.notification.create({
-        data: { userId: student.parentId, title, message, type: typeEnum }
-      });
-      
-      emitToUser(io, student.parentId, 'notification', notif);
+
+      // The parent's toggles were being read and then ignored. `boarding` off means
+      // no row and no push for check-in/drop-off; absent means on.
+      if (wantsNotification(student.parent?.notificationSettings, 'boarding')) {
+        const notif = await prisma.notification.create({
+          data: { userId: student.parentId, title, message, type: typeEnum }
+        });
+
+        emitToUser(io, student.parentId, 'notification', notif);
+      }
     }
     
     res.json(log);

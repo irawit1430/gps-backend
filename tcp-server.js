@@ -2,7 +2,7 @@ const net = require('net');
 const { PrismaClient } = require('@prisma/client');
 const { parseBlackboxPacket } = require('./blackbox-parser');
 const { syncGpsLogToFirebase, syncEmergencyAlertToFirebase } = require('./firebase');
-const { emitToSchool } = require('./middleware/socketAuth');
+const { emitToSchool, emitToUser } = require('./middleware/socketAuth');
 const liveFixGuard = require('./liveFixGuard');
 const busPresence = require('./busPresence');
 const config = require('./config');
@@ -149,16 +149,30 @@ function startTcpServer(io, tcpPort = config.TCP_PORT) {
             sosCooldownCache.set(bus.id, Date.now());
 
             logger.warn({ imei: parsed.imei, busId: bus.id }, 'TCP: hardware SOS');
+            // Stamping the running trip lets parents of that trip be notified, and
+            // lets GET /api/parents/:id/alerts find this alert on a cold start.
+            const activeTripId = bus.trips?.[0]?.id || null;
             const alert = await prisma.emergencyAlert.create({
               data: {
                 schoolId: bus.schoolId || 'unknown',
+                tripId: activeTripId,
                 type: 'HARDWARE_SOS',
                 message: `Emergency SOS from Blackbox TM-100 (IMEI ${parsed.imei}, Bus ${bus.licensePlate})`,
                 status: 'ACTIVE',
               },
             });
             syncEmergencyAlertToFirebase(alert);
-            if (io) emitToSchool(io, bus.schoolId, 'emergency_alert', alert);
+            if (io) {
+              emitToSchool(io, bus.schoolId, 'emergency_alert', alert);
+              if (activeTripId) {
+                const riders = await prisma.studentRouteMapping.findMany({
+                  where: { routeStop: { route: { trips: { some: { id: activeTripId } } } } },
+                  select: { student: { select: { parentId: true } } },
+                });
+                const parentIds = [...new Set(riders.map((r) => r.student.parentId).filter(Boolean))];
+                parentIds.forEach((pid) => emitToUser(io, pid, 'emergency_alert', alert));
+              }
+            }
           }
         } catch (err) {
           logger.error({ err: err.message, ip: clientAddress }, 'TCP packet processing failed');
