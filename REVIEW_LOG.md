@@ -103,6 +103,13 @@
      as originally requested — those rows are reused by every trip, so a fixed
      timestamp there is stale the next day.
    - **`Student.guardianPhone String?`** — plain new nullable column.
+   - **`User.phone String?`** — the parent app's Emergency screen wants a driver
+     number to dial; there is no phone column on User at all. A masked/proxy number
+     satisfies the requirement equally well.
+   - **Forgot-password flow** (`POST /api/auth/forgot-password` → code → reset) needs
+     BOTH a store for codes (`PasswordReset` table, or columns on User) AND an email
+     or SMS provider — nothing in `package.json` can send mail today. Two decisions,
+     not one.
    - **FCM push** → `User.fcmToken String?` + a token-registration endpoint
      (`firebase.js` already imports `getMessaging`). Open Item 4 covers the rest.
    Until then: ETA only after a trip starts, no guardian phone, and trip changes ride
