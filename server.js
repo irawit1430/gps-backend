@@ -2688,7 +2688,26 @@ app.use((req, res, next) => {
 
 // Global Error Handler
 app.use((err, req, res, next) => {
-  req.log.error({ err }, 'Unhandled application error');
+  // `req.log` only exists once pino-http has run, and cors + express.json sit ahead
+  // of it — a rejected origin or a malformed body reached this handler with no
+  // logger attached, so it threw here and buried the real error.
+  const log = req?.log || logger;
+  log.error({ err }, 'Unhandled application error');
+
+  if (res.headersSent) return next(err);
+
+  // Both of these are the caller's mistake, not a server fault. Returning 500 for
+  // them sent frontends hunting for a backend bug that was not there.
+  if (err?.message?.startsWith('CORS origin not allowed')) {
+    return res.status(403).json({ error: err.message });
+  }
+  if (err?.type === 'entity.parse.failed' || err instanceof SyntaxError) {
+    return res.status(400).json({ error: 'Malformed JSON body' });
+  }
+  if (err?.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'Request body too large' });
+  }
+
   res.status(500).json({ error: 'Internal server error' });
 });
 
