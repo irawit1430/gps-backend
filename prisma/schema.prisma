@@ -63,7 +63,9 @@ model User {
   password             String
   role                 Role
   name                 String
+  phone                String?  // contact number; for drivers this is what parents dial
   photoUrl             String?
+  fcmToken             String?  // FCM push token — never returned by the API
   notificationSettings Json?
   mustResetPassword    Boolean  @default(false)
   schoolId             String?
@@ -166,6 +168,7 @@ model Student {
   name      String
   grade     String?
   photoUrl  String?
+  guardianPhone String?  // fallback contact when the parent account has no phone
   parentId  String?
   parent    User?    @relation("ParentStudents", fields: [parentId], references: [id])
   createdAt DateTime @default(now())
@@ -201,6 +204,7 @@ model Trip {
   driverId          String
   driver            User       @relation("DriverTrips", fields: [driverId], references: [id])
   status            TripStatus @default(PLANNED)
+  scheduledStart    DateTime?  // planned departure; anchors stop ETAs before start
   progressPercent   Int        @default(0)
   delayMinutes      Int        @default(0)
   currentEtaMessage String?

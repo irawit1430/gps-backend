@@ -69,9 +69,12 @@
 3. **JWT revocation is in-memory** (`middleware/auth.js`) — per-instance, resets on
    restart. Fine for single-VM; needs Redis or a `tokenVersion` column for
    multi-instance / restart-safe revocation.
-4. **OS push (FCM) not implemented.** In-app notifications + the `notification`
-   socket event work; native push needs a `fcmToken` column (schema change — do not
-   add without the user's explicit go-ahead) + a device-token registration endpoint.
+4. ~~**OS push (FCM) not implemented.**~~ ✅ RESOLVED (2026-08-25) —
+   `User.fcmToken` + `POST /api/users/me/fcm-token`; `sendPush` in `firebase.js`
+   fires alongside the socket event for attendance, broadcasts and emergency alerts.
+   Tokens FCM rejects are cleared automatically; logout clears the token; no endpoint
+   ever returns it. Silently skipped when `FIREBASE_SERVICE_ACCOUNT` is unset.
+
 5. **HMAC telemetry replay.** `middleware/telemetryHmac.js` signs
    `deviceId.ts.lat.lng.speed` but has no nonce/dedup — a captured signed packet can
    be replayed within the 300s skew window.
@@ -94,26 +97,16 @@
    **Frontend impact:** the CSV-import screen should surface that list to the admin;
    parents imported before this change still hold `password123` and should be reset.
 
-9. **Frontend feature requests that need `prisma/schema.prisma` — owner said NOT NOW
-   (2026-08-25).** Blocked by `.agents/AGENTS.md`. Shape already decided, so whoever
-   picks this up does not re-litigate it:
-   - **ETA / delay detection** → add **`Trip.scheduledStart DateTime?`** (owner's pick).
-     Per-stop schedule is then `scheduledStart + RouteStop.expectedArrivalMinutes`,
-     which already exists. Do NOT put an absolute `scheduledArrival` on `RouteStop`
-     as originally requested — those rows are reused by every trip, so a fixed
-     timestamp there is stale the next day.
-   - **`Student.guardianPhone String?`** — plain new nullable column.
-   - **`User.phone String?`** — the parent app's Emergency screen wants a driver
-     number to dial; there is no phone column on User at all. A masked/proxy number
-     satisfies the requirement equally well.
-   - **Forgot-password flow** (`POST /api/auth/forgot-password` → code → reset) needs
-     BOTH a store for codes (`PasswordReset` table, or columns on User) AND an email
-     or SMS provider — nothing in `package.json` can send mail today. Two decisions,
-     not one.
-   - **FCM push** → `User.fcmToken String?` + a token-registration endpoint
-     (`firebase.js` already imports `getMessaging`). Open Item 4 covers the rest.
-   Until then: ETA only after a trip starts, no guardian phone, and trip changes ride
-   the new `trip_status_change` socket event instead of push.
+9. ~~**Frontend feature requests that need `prisma/schema.prisma`.**~~ ✅ RESOLVED
+   (2026-08-25) — owner lifted the freeze with "add only, remove nothing". Migration
+   `3_parent_driver_contact_and_schedule` adds four nullable columns:
+   `User.phone`, `User.fcmToken`, `Student.guardianPhone`, `Trip.scheduledStart`.
+   No column was dropped, renamed or made NOT NULL, so existing rows need no backfill.
+   `RouteStop.scheduledArrival` was deliberately NOT added — `Trip.scheduledStart` +
+   the existing `RouteStop.expectedArrivalMinutes` covers it without stale-per-day rows.
+   Still outstanding: **forgot-password** needs an email/SMS provider decision before
+   the schema side is worth building — nothing in `package.json` can send mail.
+
 10. **Attendance idempotency is natural-key based, not key-value based.**
    `POST /api/attendance` honours `Idempotency-Key` by matching student+trip+type
    inside 10 minutes, because storing the key needs a column. If item 9 is ever

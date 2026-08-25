@@ -46,7 +46,7 @@ describe('GET /api/schools/:schoolId/drivers', () => {
     expect(prisma.user.findMany).toHaveBeenCalledWith({
       where: { schoolId: 'school-1', role: 'DRIVER' },
       select: {
-        id: true, name: true, email: true, role: true, photoUrl: true,
+        id: true, name: true, email: true, phone: true, role: true, photoUrl: true,
         notificationSettings: true, schoolId: true, createdAt: true, updatedAt: true,
         driverTrips: {
           where: { status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },

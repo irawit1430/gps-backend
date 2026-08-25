@@ -22,6 +22,7 @@ const {
   syncGpsLogToFirebase,
   syncEmergencyAlertToFirebase,
   syncStudentToFirebase,
+  sendPush,
 } = require('./firebase');
 
 // ─── Boot ───────────────────────────────────────────────────
@@ -185,8 +186,14 @@ app.post('/api/auth/change-password', authenticate, validate({ body: S.changePas
 });
 
 // Logout — revoke the presented token so it can no longer be used.
-app.post('/api/auth/logout', authenticate, (req, res) => {
+app.post('/api/auth/logout', authenticate, async (req, res) => {
   logoutToken(req.token);
+  // Drop the device token too, so a signed-out phone stops receiving pushes.
+  try {
+    await prisma.user.updateMany({ where: { id: req.user.id }, data: { fcmToken: null } });
+  } catch (err) {
+    req.log.warn({ err: err.message }, 'clearing fcmToken on logout failed');
+  }
   res.json({ message: 'Logged out' });
 });
 
@@ -634,7 +641,7 @@ app.get('/api/schools/:schoolId/parents', requireTenant('schoolId'), async (req,
     const parents = await prisma.user.findMany({
       where: { schoolId: req.params.schoolId, role: 'PARENT' },
       select: {
-        id: true, name: true, email: true, role: true, photoUrl: true,
+        id: true, name: true, email: true, phone: true, role: true, photoUrl: true,
         createdAt: true, updatedAt: true,
         parentStudents: {
           include: { routeMappings: { include: { routeStop: { include: { route: true } } } } }
@@ -666,6 +673,7 @@ app.put('/api/parents/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), valid
     // A password reset must revoke the parent's existing tokens.
     if (req.body.password) invalidateUser(req.params.id);
     delete updated.password;
+    delete updated.fcmToken;
     res.json(updated);
   } catch (err) {
     if (err.code === 'P2002' && err.meta?.target?.includes('email')) {
@@ -681,7 +689,7 @@ app.get('/api/schools/:schoolId/drivers', requireTenant('schoolId'), async (req,
     const drivers = await prisma.user.findMany({
       where: { schoolId: req.params.schoolId, role: 'DRIVER' },
       select: {
-        id: true, name: true, email: true, role: true, photoUrl: true,
+        id: true, name: true, email: true, phone: true, role: true, photoUrl: true,
         notificationSettings: true, schoolId: true, createdAt: true, updatedAt: true,
         driverTrips: {
           where: { status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
@@ -706,13 +714,13 @@ app.post('/api/schools/:schoolId/drivers',
   validate({ body: S.createDriver }),
   async (req, res) => {
     try {
-      const { name, email } = req.body;
+      const { name, email, phone } = req.body;
       const tempPassword = crypto.randomBytes(16).toString('hex');
       const hashed = await bcrypt.hash(tempPassword, 10);
       const driver = await prisma.user.create({
-        data: { schoolId: req.params.schoolId, name, email, password: hashed, role: 'DRIVER', mustResetPassword: true },
+        data: { schoolId: req.params.schoolId, name, email, phone: phone || null, password: hashed, role: 'DRIVER', mustResetPassword: true },
       });
-      res.json({ driver: { id: driver.id, name: driver.name, email: driver.email }, tempPassword });
+      res.json({ driver: { id: driver.id, name: driver.name, email: driver.email, phone: driver.phone }, tempPassword });
     } catch (err) {
       if (err.code === 'P2002' && err.meta?.target?.includes('email')) {
         return res.status(400).json({ error: 'Email already in use' });
@@ -748,7 +756,13 @@ app.post('/api/schools/:schoolId/trips',
       });
       if (activeTrips.length > 0) return res.status(400).json({ error: 'Bus or Driver is already assigned to an active trip' });
       const trip = await prisma.trip.create({
-        data: { routeId: req.body.routeId, busId: req.body.busId, driverId: req.body.driverId, status: 'PLANNED' },
+        data: {
+          routeId: req.body.routeId,
+          busId: req.body.busId,
+          driverId: req.body.driverId,
+          status: 'PLANNED',
+          scheduledStart: req.body.scheduledStart ? new Date(req.body.scheduledStart) : null,
+        },
         include: { route: { select: { schoolId: true, name: true } } },
       });
       emitTripChange(trip, 'created');
@@ -809,7 +823,10 @@ app.put('/api/trips/:tripId',
         data: {
           ...(busId && { busId }),
           ...(driverId && { driverId }),
-          ...(routeId && { routeId })
+          ...(routeId && { routeId }),
+          ...(req.body.scheduledStart !== undefined && {
+            scheduledStart: req.body.scheduledStart ? new Date(req.body.scheduledStart) : null,
+          }),
         },
         include: { route: { select: { schoolId: true, name: true } } },
       });
@@ -841,6 +858,7 @@ app.get('/api/schools/:schoolId/students', requireTenant('schoolId'), async (req
           name: s.name,
           grade: s.grade,
           photoUrl: s.photoUrl,
+          guardianPhone: s.guardianPhone || null,
           assignedRoute: m?.routeStop?.route?.name || 'Unassigned',
           routeStopName: m?.routeStop?.name || 'Unassigned',
           boardingStatus: 'Absent',
@@ -867,7 +885,7 @@ async function studentCreateHandler(req, res) {
       return res.status(403).json({ error: 'Forbidden' });
     }
 
-    let { rfidTag, name, grade, parentEmail, parentName } = req.body;
+    let { rfidTag, name, grade, guardianPhone, parentEmail, parentName } = req.body;
     if (!rfidTag || typeof rfidTag !== 'string' || rfidTag.trim() === '') {
       rfidTag = `RFID-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
     } else {
@@ -897,7 +915,7 @@ async function studentCreateHandler(req, res) {
         parentId = parent.id;
       }
       const student = await tx.student.create({
-        data: { schoolId, rfidTag, name, grade: grade || 'General', parentId },
+        data: { schoolId, rfidTag, name, grade: grade || 'General', guardianPhone: guardianPhone || null, parentId },
       });
       return { student, generatedPassword };
     });
@@ -1007,6 +1025,11 @@ app.post('/api/schools/:schoolId/broadcast', requireTenant('schoolId'), authoriz
         where: { userId: { in: recipients }, createdAt: { gte: sentAt } },
       });
       if (io) created.forEach(n => emitToUser(io, n.userId, 'notification', n));
+      pushToUsers(recipients, {
+        title: notifTitle,
+        body: req.body.message,
+        data: { type: notifType, schoolId: req.params.schoolId, tripId: req.body.tripId || '' },
+      });
     }
 
     // Still broadcast to the general school room for the admin dashboards
@@ -1059,6 +1082,7 @@ app.post('/api/schools/:schoolId/students/bulk', requireTenant('schoolId'), auth
             rfidTag: st.rfidTag,
             name: st.name,
             grade: st.grade,
+            guardianPhone: st.guardianPhone || null,
             parentId: parent ? parent.id : null,
           }
         });
@@ -1217,18 +1241,21 @@ app.patch('/api/parents/:id/preferences',
   }
 );
 
-// Arrival time for one stop on a running trip. There is no absolute schedule in the
-// schema (see REVIEW_LOG item 9), so this anchors RouteStop.expectedArrivalMinutes to
-// the trip's actual startTime — meaningful only once the trip has started.
+// Arrival time for one stop: RouteStop.expectedArrivalMinutes anchored to the trip's
+// actual startTime, or to its scheduledStart while the trip is still PLANNED.
 function stopEta(trip, stop) {
   const offset = stop?.expectedArrivalMinutes;
-  if (!trip?.startTime || offset === null || offset === undefined) {
-    return { stopEtaAt: null, stopEtaMinutes: null };
+  // Once the trip is moving its real startTime is the truth; before that, the planned
+  // departure carries the schedule, which is what makes an ETA visible pre-departure.
+  const anchor = trip?.startTime || trip?.scheduledStart;
+  if (!anchor || offset === null || offset === undefined) {
+    return { stopEtaAt: null, stopEtaMinutes: null, etaBasis: null };
   }
-  const at = new Date(new Date(trip.startTime).getTime() + offset * 60_000);
+  const at = new Date(new Date(anchor).getTime() + offset * 60_000);
   return {
     stopEtaAt: at.toISOString(),
     stopEtaMinutes: Math.round((at.getTime() - Date.now()) / 60_000),
+    etaBasis: trip.startTime ? 'ACTUAL_START' : 'SCHEDULED_START',
   };
 }
 
@@ -1290,7 +1317,7 @@ app.get('/api/parents/:parentId/students',
                       trips: {
                         where: { status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
                         include: {
-                          driver: { select: { name: true } },
+                          driver: { select: { name: true, phone: true } },
                           bus: { select: { licensePlate: true, deviceId: true } },
                         },
                       },
@@ -1333,15 +1360,17 @@ app.get('/api/parents/:parentId/students',
             ? {
                 id: t.id,
                 status: t.status,
+                scheduledStart: t.scheduledStart,
                 startTime: t.startTime,
                 endTime: t.endTime,
-                // Columns exist but nothing computes them — see docs/frontend §5.1.
+                // Computed at departure against scheduledStart; null/0 when the school
+                // has not scheduled the trip.
                 currentEtaMessage: t.currentEtaMessage ?? null,
                 delayMinutes: t.delayMinutes ?? 0,
               }
             : null,
-          // Driver's personal number is not a column on User; see REVIEW_LOG item 9.
-          driverPhone: null,
+          guardianPhone: s.guardianPhone || null,
+          driverPhone: t?.driver?.phone || null,
           schoolPhone: s.school?.phone || s.school?.contactPhone || null,
         };
       });
@@ -1615,6 +1644,11 @@ async function sosHandler(req, res) {
     if (alert.tripId) {
       const parents = await parentIdsOnTrip(alert.tripId);
       parents.forEach((pid) => emitToUser(io, pid, 'emergency_alert', alert));
+      pushToUsers(parents, {
+        title: 'Emergency alert',
+        body: alert.message || 'An emergency was raised on your child bus route.',
+        data: { type: 'EMERGENCY', alertId: alert.id, tripId: alert.tripId },
+      });
     }
     // alertId duplicates `id` so the driver app can poll GET /api/alerts/:id for
     // acknowledgement without unpacking the alert object.
@@ -1675,8 +1709,24 @@ app.get('/api/users/me', async (req, res) => {
     const user = await prisma.user.findUnique({ where: { id: req.user.id } });
     if (!user) return res.status(404).json({ error: 'User not found' });
     delete user.password;
+    delete user.fcmToken;
     res.json(user);
   } catch (err) {
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Device push token registration. Send the token after the user grants notification
+// permission; send null on sign-out from that device.
+app.post('/api/users/me/fcm-token', validate({ body: S.fcmToken }), async (req, res) => {
+  try {
+    await prisma.user.update({
+      where: { id: req.user.id },
+      data: { fcmToken: req.body.fcmToken || null },
+    });
+    res.json({ success: true, registered: Boolean(req.body.fcmToken) });
+  } catch (err) {
+    req.log.error({ err }, 'fcm token registration failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -1695,6 +1745,7 @@ app.put('/api/users/me', validate({ body: S.updateMe }), async (req, res) => {
       logoutToken(req.token);
     }
     delete updated.password;
+    delete updated.fcmToken;
     res.json(updated);
   } catch (err) {
     if (err.code === 'P2002' && err.meta?.target?.includes('email')) {
@@ -1722,6 +1773,7 @@ app.put('/api/drivers/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), valid
     // A password reset must revoke the driver's existing tokens.
     if (req.body.password) invalidateUser(req.params.id);
     delete updated.password;
+    delete updated.fcmToken;
     res.json(updated);
   } catch (err) {
     if (err.code === 'P2002' && err.meta?.target?.includes('email')) {
@@ -1766,7 +1818,7 @@ app.get('/api/drivers/:driverId/trips',
                 include: {
                   studentMappings: {
                     include: {
-                      student: { select: { id: true, name: true, rfidTag: true, grade: true, photoUrl: true } },
+                      student: { select: { id: true, name: true, rfidTag: true, grade: true, photoUrl: true, guardianPhone: true } },
                     },
                   },
                 },
@@ -1845,7 +1897,20 @@ app.patch('/api/trips/:tripId/status', ownsTrip, validate({ body: S.tripStatus }
     }
 
     const data = { status: req.body.status };
-    if (req.body.status === 'ON_SCHEDULE') data.startTime = new Date();
+    if (req.body.status === 'ON_SCHEDULE') {
+      data.startTime = new Date();
+      // delayMinutes and currentEtaMessage were columns nothing ever wrote. With a
+      // scheduledStart to compare against they finally mean something.
+      const planned = await prisma.trip.findUnique({
+        where: { id: req.params.tripId },
+        select: { scheduledStart: true },
+      });
+      if (planned?.scheduledStart) {
+        const late = Math.round((data.startTime - new Date(planned.scheduledStart)) / 60_000);
+        data.delayMinutes = Math.max(0, late);
+        data.currentEtaMessage = late > 0 ? `Running ${late} min late` : 'On time';
+      }
+    }
     if (req.body.status === 'COMPLETED') data.endTime = new Date();
     const trip = await prisma.trip.update({
       where: { id: req.params.tripId },
@@ -1873,6 +1938,32 @@ function wantsNotification(settings, key) {
     try { prefs = JSON.parse(prefs); } catch { return true; }
   }
   return prefs?.[key] !== false;
+}
+
+// Deliver an OS push to users who have registered a device token. Socket events only
+// reach an app that is open; this is what reaches a locked phone.
+// Never throws — a push failure must not fail the request that triggered it.
+async function pushToUsers(userIds, payload) {
+  try {
+    const ids = [...new Set((userIds || []).filter(Boolean))];
+    if (ids.length === 0) return;
+    const users = await prisma.user.findMany({
+      where: { id: { in: ids }, fcmToken: { not: null } },
+      select: { id: true, fcmToken: true },
+    });
+    if (users.length === 0) return;
+
+    const { invalidTokens } = await sendPush(users.map((u) => u.fcmToken), payload);
+    if (invalidTokens?.length) {
+      // Uninstalled app / re-registered device: drop the token so it is not retried.
+      await prisma.user.updateMany({
+        where: { fcmToken: { in: invalidTokens } },
+        data: { fcmToken: null },
+      });
+    }
+  } catch (err) {
+    logger.error({ err: err.message }, 'push dispatch failed');
+  }
 }
 
 // How far back a replayed check-in is recognised as the same scan.
@@ -1936,6 +2027,11 @@ app.post('/api/attendance', validate({ body: S.attendance }), async (req, res) =
         });
 
         emitToUser(io, student.parentId, 'notification', notif);
+        pushToUsers([student.parentId], {
+          title,
+          body: message,
+          data: { notificationId: notif.id, type: typeEnum, studentId: student.id, tripId: req.body.tripId },
+        });
       }
     }
     

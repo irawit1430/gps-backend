@@ -229,6 +229,54 @@ socket.on('notification', (n) => showInbox(n));   // n.type: SYSTEM | SOS | DELA
 Admin dashboards additionally receive the audit record as `emergency_alert`
 (`type: 'ADMIN_BROADCAST'`), the same as before.
 
+---
+
+## 4.2 OS push notifications (FCM) — now live
+
+Socket events only reach an app that is open. Push reaches a locked phone.
+
+```
+POST /api/users/me/fcm-token   { "fcmToken": "<device token>" }   → { success, registered: true }
+POST /api/users/me/fcm-token   { "fcmToken": null }                → { success, registered: false }
+```
+
+- Register **after** the user grants notification permission, and again whenever the
+  device rotates the token.
+- `POST /api/auth/logout` clears it server-side, so a signed-out phone goes quiet
+  without an extra call.
+- The token is **never** returned by any endpoint — `GET /api/users/me` and the
+  driver/parent update responses strip it.
+- A token FCM rejects as unregistered is cleared automatically on the next send.
+
+Push is sent alongside the socket event for: attendance (boarding/drop-off),
+admin broadcasts, and emergency alerts. Payload `data` carries `type` plus the
+relevant id (`notificationId`, `alertId`, `tripId`) so a tap can deep-link.
+
+If `FIREBASE_SERVICE_ACCOUNT` is not configured on the server, push is silently
+skipped — sockets and `GET /api/notifications` keep working.
+
+## 4.3 Trip scheduling (`scheduledStart`)
+
+`Trip.scheduledStart` is the planned departure. It is what makes an ETA visible
+**before** a trip starts.
+
+```
+POST /api/schools/:schoolId/trips  { routeId, busId, driverId, scheduledStart?: ISO }
+PUT  /api/trips/:tripId            { ..., scheduledStart?: ISO | null }
+```
+
+Consequences once a trip carries one:
+
+- Stop ETAs resolve pre-departure (`etaBasis: "SCHEDULED_START"`), and switch to the
+  real clock the moment the driver starts the trip (`etaBasis: "ACTUAL_START"`).
+- `Trip.delayMinutes` and `Trip.currentEtaMessage` **stop being dead columns** — they
+  are computed at departure (`startTime` vs `scheduledStart`) and stored. A trip with
+  no `scheduledStart` keeps `delayMinutes: 0` / `currentEtaMessage: null`, exactly as
+  before, so nothing breaks for schools that do not schedule.
+
+**Admin consoles:** add an optional date-time field to the trip create/edit form.
+Leaving it empty is valid and preserves today's behaviour.
+
 ## 5. Standard error shape
 
 | Status | Meaning | Frontend action |

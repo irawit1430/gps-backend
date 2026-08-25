@@ -175,7 +175,44 @@ async function flushFirestore() {
   pendingGpsLogWrites.clear();
 }
 
+// ─── OS push (FCM) ─────────────────────────────────────────
+// Fire-and-forget delivery to device tokens. Returns the tokens FCM rejected as
+// permanently invalid so the caller can clear them — a stale token otherwise sticks
+// on the row forever and every future send wastes a round trip on it.
+async function sendPush(tokens, { title, body, data } = {}) {
+  const list = [...new Set((Array.isArray(tokens) ? tokens : [tokens]).filter(Boolean))];
+  if (!messaging || list.length === 0) return { sent: 0, invalidTokens: [] };
+
+  // FCM data values must be strings.
+  const stringData = Object.fromEntries(
+    Object.entries(data || {}).map(([k, v]) => [k, v == null ? '' : String(v)])
+  );
+
+  try {
+    const res = await messaging.sendEachForMulticast({
+      tokens: list,
+      notification: { title, body },
+      data: stringData,
+    });
+    const invalidTokens = [];
+    res.responses.forEach((r, i) => {
+      const code = r.error?.code;
+      if (code === 'messaging/registration-token-not-registered' || code === 'messaging/invalid-argument') {
+        invalidTokens.push(list[i]);
+      }
+    });
+    if (res.failureCount > 0) {
+      logger.warn({ failureCount: res.failureCount, invalid: invalidTokens.length }, 'FCM: some sends failed');
+    }
+    return { sent: res.successCount, invalidTokens };
+  } catch (err) {
+    logger.error({ err: err.message }, 'FCM send failed');
+    return { sent: 0, invalidTokens: [] };
+  }
+}
+
 module.exports = {
+  sendPush,
   app,
   db,
   messaging,

@@ -132,3 +132,50 @@ describe('POST /api/auth/logout (token revocation)', () => {
     expect(reused.body).toEqual({ error: 'Unauthorized: token has been revoked' });
   });
 });
+
+describe('POST /api/users/me/fcm-token', () => {
+  const token = jwt.sign({ id: 'user-1', role: 'PARENT', schoolId: 'school-1' }, process.env.JWT_SECRET);
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    prisma.user.update.mockResolvedValue({ id: 'user-1' });
+  });
+
+  it('registers a device token', async () => {
+    const res = await request(app)
+      .post('/api/users/me/fcm-token')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ fcmToken: 'd'.repeat(40) });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, registered: true });
+    expect(prisma.user.update).toHaveBeenCalledWith({
+      where: { id: 'user-1' },
+      data: { fcmToken: 'd'.repeat(40) },
+    });
+  });
+
+  it('clears the token when null is sent', async () => {
+    const res = await request(app)
+      .post('/api/users/me/fcm-token')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ fcmToken: null });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, registered: false });
+    expect(prisma.user.update).toHaveBeenCalledWith({
+      where: { id: 'user-1' },
+      data: { fcmToken: null },
+    });
+  });
+
+  it('rejects a request with no token field', async () => {
+    const res = await request(app)
+      .post('/api/users/me/fcm-token')
+      .set('Authorization', `Bearer ${token}`)
+      .send({});
+
+    expect(res.status).toBe(400);
+    expect(prisma.user.update).not.toHaveBeenCalled();
+  });
+});

@@ -29,9 +29,15 @@ Handle `429`.
 ## 2. My Trips
 ```
 GET /api/drivers/:driverId/trips
-→ [{ id, status, route:{ name, stops:[{ name, lat, lng, orderIdx,
-        studentMappings:[{ student:{ id,name,rfidTag,grade } }] }] }, bus:{...} }]
+→ [{ id, status, scheduledStart, startTime, delayMinutes,
+     route:{ name, stops:[{ name, lat, lng, orderIdx,
+        studentMappings:[{ student:{ id,name,rfidTag,grade,photoUrl,guardianPhone } }] }] },
+     bus:{...} }]
 ```
+
+`student.guardianPhone` is the child's emergency contact — dial it straight from the
+roster row. `scheduledStart` is the planned departure (null when unscheduled), and
+`delayMinutes` is filled in at departure by comparing it to the real start.
 Only `PLANNED / ON_SCHEDULE / DELAYED` trips are returned.
 
 ## 3. Trip detail

@@ -238,13 +238,15 @@ you fetch them, but the parent app has no trip-detail endpoint today.)
   "trip": {
     "id": "trip-88",
     "status": "ON_SCHEDULE",
+    "scheduledStart": "2026-08-25T07:25:00.000Z",  // null if the school did not schedule
     "startTime": "2026-08-25T07:30:00.000Z",
     "endTime": null,
-    "currentEtaMessage": null,   // ⚠️ dead column, nothing writes it
-    "delayMinutes": 0            // ⚠️ dead column, always 0
+    "currentEtaMessage": "Running 5 min late",     // computed at departure
+    "delayMinutes": 5                              // 0 when there is no scheduledStart
   },
-  "driverPhone": null,           // no phone column on User — see below
-  "schoolPhone": "+9111XXXXXXX"  // School.phone, falls back to contactPhone
+  "guardianPhone": "+9198XXXXXXXX",  // the child's own emergency contact
+  "driverPhone": "+9198XXXXXXXX",    // null until the school fills the driver's number
+  "schoolPhone": "+9111XXXXXXX"      // School.phone, falls back to contactPhone
 }
 ```
 
@@ -253,8 +255,10 @@ estimate. Both are `null` until the trip actually starts (`startTime` is stamped
 the driver moves the trip to `ON_SCHEDULE`) or when the school has not filled in
 `expectedArrivalMinutes` for that stop. Keep the fallback for those two cases.
 
-Do **not** build on `trip.currentEtaMessage` or `trip.delayMinutes` — they are columns
-nothing computes, returned only so the shape does not change later.
+`trip.delayMinutes` and `trip.currentEtaMessage` are real now, but only for trips the
+school gave a `scheduledStart`. Without one they stay `0` / `null` — treat those as
+"unknown", not "on time". `stopEtaAt` also carries `etaBasis`:
+`SCHEDULED_START` before departure, `ACTUAL_START` once the trip is moving.
 
 ### `GET /api/parents/:parentId/students/:studentId/trip`
 

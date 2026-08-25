@@ -30,6 +30,7 @@ describe('GET /api/schools/:schoolId/students', () => {
         name: 'Student 1',
         grade: '5th',
         photoUrl: 'url1',
+        guardianPhone: null,
         routeMappings: []
       }
     ];
@@ -47,6 +48,7 @@ describe('GET /api/schools/:schoolId/students', () => {
         name: 'Student 1',
         grade: '5th',
         photoUrl: 'url1',
+        guardianPhone: null,
         assignedRoute: 'Unassigned',
         routeStopName: 'Unassigned',
         boardingStatus: 'Absent',
@@ -67,6 +69,7 @@ describe('GET /api/schools/:schoolId/students', () => {
         name: 'Student 2',
         grade: '6th',
         photoUrl: 'url2',
+        guardianPhone: null,
         routeMappings: [
           {
             routeStop: {
@@ -93,6 +96,7 @@ describe('GET /api/schools/:schoolId/students', () => {
         name: 'Student 2',
         grade: '6th',
         photoUrl: 'url2',
+        guardianPhone: null,
         assignedRoute: 'Route 1',
         routeStopName: 'Stop A',
         boardingStatus: 'Absent',

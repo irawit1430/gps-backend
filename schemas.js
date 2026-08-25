@@ -47,6 +47,7 @@ exports.createStudent = z.object({
   rfidTag: z.string().max(64).optional().nullable(),
   name: z.string().min(1).max(200),
   grade: z.string().max(50).optional().nullable(),
+  guardianPhone: z.string().min(6).max(20).optional().nullable(),
   parentEmail: z.string().email().optional().nullable(),
   parentName: z.string().max(200).optional().nullable(),
 });
@@ -60,12 +61,14 @@ exports.updateStudent = z.object({
   grade: z.string().max(50).optional().nullable(),
   rfidTag: z.string().min(1).max(64).optional(),
   photoUrl: z.string().max(500).optional().nullable(),
+  guardianPhone: z.string().min(6).max(20).optional().nullable(),
 });
 
 exports.updateDriver = z.object({
   name: z.string().min(1).max(200).optional(),
   email: z.string().email().optional(),
   password: z.string().min(8).max(200).optional(),
+  phone: z.string().min(6).max(20).optional().nullable(),
 });
 
 
@@ -82,6 +85,7 @@ exports.updateDevice = exports.createDevice.partial();
 exports.createDriver = z.object({
   name: z.string().min(1).max(200),
   email: z.string().email(),
+  phone: z.string().min(6).max(20).optional().nullable(),
 });
 
 exports.createAdmin = z.object({
@@ -104,12 +108,15 @@ exports.createTrip = z.object({
   routeId: uuid,
   busId: uuid,
   driverId: uuid,
+  // Planned departure. Stop ETAs are anchored to it until the trip actually starts.
+  scheduledStart: z.string().datetime().optional().nullable(),
 });
 
 exports.updateTrip = z.object({
   routeId: uuid.optional(),
   busId: uuid.optional(),
   driverId: uuid.optional(),
+  scheduledStart: z.string().datetime().optional().nullable(),
 });
 
 exports.tripStatus = z.object({
@@ -242,4 +249,10 @@ exports.updateMe = z.object({
   name: z.string().min(1).max(200).optional(),
   photoUrl: z.string().url().max(1000).optional().nullable(),
   password: z.string().min(8).max(200).optional(),
+  phone: z.string().min(6).max(20).optional().nullable(),
+});
+
+// Device push token registration (POST /api/users/me/fcm-token).
+exports.fcmToken = z.object({
+  fcmToken: z.string().min(10).max(4096).nullable(),
 });
