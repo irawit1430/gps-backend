@@ -23,3 +23,7 @@
 **Vulnerability:** Parent-related endpoints (`/api/parents/:id/preferences`, `/api/parents/:parentId/*`) lacked explicit authorization checks to verify if the authenticated user owns the requested resource, allowing users to potentially access or modify data belonging to other parents.
 **Learning:** The global `authenticate` middleware only verifies token presence; it does not ensure resource ownership. Without explicit IDOR protection, authenticated users can access resources they shouldn't by modifying the resource ID in the request.
 **Prevention:** Always implement explicit authorization checks (e.g., using a custom `authorizeParentResource` middleware) for endpoints that access resources belonging to a specific user to prevent IDOR.
+## 2025-02-23 - Authorization Bypass in Global Endpoints
+**Vulnerability:** The `/api/search` and `/api/stats` endpoints used a catch-all `else` block to execute Super Admin queries, allowing any authenticated user (e.g., Parent or Driver) to bypass role checks and access global PII and system stats.
+**Learning:** Catch-all `else` blocks in role-based logic default to granting access to anyone who doesn't match the preceding conditions, which breaks the principle of least privilege.
+**Prevention:** Always use explicit `else if (role === 'SUPER_ADMIN')` conditions for privileged logic, and include a catch-all `else` block that strictly denies access (e.g., `403 Forbidden`).
