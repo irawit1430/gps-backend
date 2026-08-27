@@ -801,6 +801,28 @@ app.post('/api/schools/:schoolId/drivers',
 );
 
 // Trips
+// A conflicting trip only genuinely blocks if it could still be running. Nothing in
+// this system ever sets COMPLETED except a driver tapping it, so an abandoned run
+// otherwise locks its bus AND driver out of every future trip, permanently. Past the
+// window it is over whatever the row says: close it and let the caller through.
+// Both the create and the start path route through here — fixing only one leaves the
+// other door locked.
+async function stillBlocking(conflict, log) {
+  if (!conflict) return null;
+  const startedAt = conflict.startTime || conflict.createdAt;
+  if (Date.now() - new Date(startedAt).getTime() <= config.TRIP_STALE_HOURS * 3_600_000) {
+    return conflict;
+  }
+  await prisma.trip.update({
+    where: { id: conflict.id },
+    // endTime is when we closed it, not when it really ended. The oversized duration
+    // that produces is the point — it makes the abandonment visible.
+    data: { status: 'COMPLETED', endTime: new Date() },
+  });
+  log?.warn({ tripId: conflict.id, startedAt }, 'auto-completed stale trip blocking a new one');
+  return null;
+}
+
 app.post('/api/schools/:schoolId/trips',
   requireTenant('schoolId'),
   authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
@@ -817,13 +839,15 @@ app.post('/api/schools/:schoolId/trips',
       if (!bus || (bus.schoolId && bus.schoolId !== req.params.schoolId)) return res.status(400).json({ error: 'Bus not in this school' });
       if (!driver || driver.role !== 'DRIVER' || driver.schoolId !== req.params.schoolId) return res.status(400).json({ error: 'Driver not in this school' });
       
-      const activeTrips = await prisma.trip.findMany({
+      const conflict = await prisma.trip.findFirst({
         where: {
           OR: [{ busId: req.body.busId }, { driverId: req.body.driverId }],
           status: { in: ['ON_SCHEDULE', 'DELAYED'] },
-        }
+        },
       });
-      if (activeTrips.length > 0) return res.status(400).json({ error: 'Bus or Driver is already assigned to an active trip' });
+      if (await stillBlocking(conflict, req.log)) {
+        return res.status(400).json({ error: 'Bus or Driver is already assigned to an active trip' });
+      }
       const trip = await prisma.trip.create({
         data: {
           routeId: req.body.routeId,
@@ -2016,24 +2040,8 @@ app.patch('/api/trips/:tripId/status', ownsTrip, validate({ body: S.tripStatus }
           status: { in: ['ON_SCHEDULE', 'DELAYED'] },
         },
       });
-      if (conflict) {
-        // Nothing in this system ever completes a trip except a driver tapping
-        // COMPLETED. A run abandoned mid-way — app killed, battery dead, shift over —
-        // otherwise sits in ON_SCHEDULE forever and locks this bus AND this driver out
-        // of every future trip, permanently. Past the window it is over whatever the
-        // row says, so close it and let the new trip start.
-        const startedAt = conflict.startTime || conflict.createdAt;
-        const stale = Date.now() - new Date(startedAt).getTime() > config.TRIP_STALE_HOURS * 3_600_000;
-        if (!stale) {
-          return res.status(400).json({ error: 'Bus or driver is already on an active trip' });
-        }
-        await prisma.trip.update({
-          where: { id: conflict.id },
-          // endTime is when we closed it, not when it really ended. The oversized
-          // duration that produces is the point — it makes the abandonment visible.
-          data: { status: 'COMPLETED', endTime: new Date() },
-        });
-        req.log.warn({ tripId: conflict.id, startedAt }, 'auto-completed stale trip blocking a new one');
+      if (await stillBlocking(conflict, req.log)) {
+        return res.status(400).json({ error: 'Bus or driver is already on an active trip' });
       }
     }
 
