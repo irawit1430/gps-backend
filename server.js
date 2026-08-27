@@ -271,6 +271,7 @@ app.post('/api/auth/forgot-password', loginLimiter, validate({ body: S.forgotPas
 const telemetryCache = require('./telemetryCache');
 const liveFixGuard = require('./liveFixGuard');
 const busPresence = require('./busPresence');
+const gpsWriteGate = require('./gpsWriteGate');
 app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => next(), // placeholder to satisfy ordering
   // deferred HMAC attach after prisma exists:
   async (req, res, next) => (await telemetryHmac(prisma))(req, res, next),
@@ -285,7 +286,9 @@ app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => 
           where: { deviceId },
           include: {
             trips: {
-              where: { status: 'ON_SCHEDULE' },
+              // DELAYED is running too. Matching only ON_SCHEDULE filed every fix
+              // from a late bus under tripId null — exactly when the track matters.
+              where: { status: { in: ['ON_SCHEDULE', 'DELAYED'] } },
               include: { driver: { select: { name: true } }, route: { select: { name: true } } },
             },
           },
@@ -295,9 +298,16 @@ app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => 
       if (!bus) return res.status(404).json({ error: 'Bus not found' });
 
       const activeTrip = bus.trips?.[0];
-      const log = await prisma.gpsLog.create({
-        data: { busId: bus.id, tripId: activeTrip?.id || null, lat, lng, speed: speed || 0, timestamp: timestamp ? new Date(timestamp) : new Date() },
-      });
+      const fixAt = timestamp ? new Date(timestamp) : new Date();
+      const fixSpeed = speed || 0;
+
+      // Not every packet earns a row — see gpsWriteGate. The broadcast below is
+      // unaffected and still runs on every packet.
+      if (gpsWriteGate.shouldPersist(bus.id, activeTrip?.id, fixSpeed)) {
+        await prisma.gpsLog.create({
+          data: { busId: bus.id, tripId: activeTrip?.id || null, lat, lng, speed: fixSpeed, timestamp: fixAt },
+        });
+      }
 
       // Throttle state lives in busPresence, not on `bus`: with HMAC enforced the row
       // is re-read per request, so a marker stored on the object was always missing
@@ -322,14 +332,14 @@ app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => 
       // An offline queue flush from the driver app (or a retried post) can deliver a
       // fix older than one already broadcast. It belongs in the trail above, but
       // broadcasting it would drag the live marker backwards.
-      if (liveFixGuard.shouldBroadcast(bus.id, log.timestamp)) {
+      if (liveFixGuard.shouldBroadcast(bus.id, fixAt)) {
         syncGpsLogToFirebase({
           busId: bus.id,
           licensePlate: bus.licensePlate,
           lat,
           lng,
           speed: speed || 0,
-          timestamp: log.timestamp,
+          timestamp: fixAt,
         });
 
         emitToSchool(io, bus.schoolId, 'location_update', {
@@ -341,10 +351,10 @@ app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => 
           lat,
           lng,
           speed,
-          timestamp: log.timestamp,
+          timestamp: fixAt,
         });
       } else {
-        req.log.debug({ busId: bus.id, timestamp: log.timestamp }, 'telemetry: skipping live broadcast for stale fix');
+        req.log.debug({ busId: bus.id, timestamp: fixAt }, 'telemetry: skipping live broadcast for stale fix');
       }
 
       res.status(200).json({ success: true });
@@ -1320,7 +1330,9 @@ app.get('/api/schools/:schoolId/stats', requireTenant('schoolId'), async (req, r
     const [totalStudents, totalRoutes, activeTrips, totalBoarded, pendingLeaves] = await Promise.all([
       prisma.student.count({ where: { schoolId } }),
       prisma.route.count({ where: { schoolId } }),
-      prisma.trip.count({ where: { route: { schoolId }, status: 'ON_SCHEDULE' } }),
+      // Named activeTrips, so it must count DELAYED as well — a late bus is still
+      // out on the road, and the dashboard under-reported every time one ran late.
+      prisma.trip.count({ where: { route: { schoolId }, status: { in: ['ON_SCHEDULE', 'DELAYED'] } } }),
       prisma.attendanceLog.count({ where: { student: { schoolId }, type: 'BOARDED', timestamp: { gte: today } } }),
       prisma.leaveApplication.count({ where: { student: { schoolId }, status: 'PENDING' } }),
     ]);

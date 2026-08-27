@@ -25,6 +25,14 @@ const schema = z.object({
   TELEMETRY_HMAC_ENFORCE: boolish.default('0'),
   TELEMETRY_MAX_SKEW_SECONDS: z.coerce.number().int().positive().default(300),
 
+  // A parked bus reports every ~8s and nothing reads those rows. Persist a
+  // trip-less, stationary bus at most this often; 0 speed threshold would be
+  // defeated by GPS jitter, hence a km/h floor.
+  GPS_PARKED_INTERVAL_MIN: z.coerce.number().int().positive().default(5),
+  GPS_MOVING_SPEED_KPH: z.coerce.number().nonnegative().default(5),
+  // Days of GpsLog to keep. 0 disables pruning entirely.
+  GPS_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(30),
+
   RUN_MIGRATIONS: boolish.default('0'),
   ALLOW_SEED: boolish.default('0'),
   SEED_ADMIN_EMAIL: z.string().email().optional().or(z.literal('').transform(() => undefined)),

@@ -5,6 +5,7 @@ const { syncGpsLogToFirebase, syncEmergencyAlertToFirebase } = require('./fireba
 const { emitToSchool, emitToUser } = require('./middleware/socketAuth');
 const liveFixGuard = require('./liveFixGuard');
 const busPresence = require('./busPresence');
+const gpsWriteGate = require('./gpsWriteGate');
 const config = require('./config');
 const logger = require('./logger');
 
@@ -69,7 +70,9 @@ function startTcpServer(io, tcpPort = config.TCP_PORT) {
 
           const bus = await prisma.bus.findUnique({ 
             where: { deviceId: parsed.imei },
-            include: { trips: { where: { status: 'ON_SCHEDULE' }, select: { id: true } } }
+            // DELAYED is running too — matching only ON_SCHEDULE filed every fix
+            // from a late bus under tripId null, exactly when the track matters.
+            include: { trips: { where: { status: { in: ['ON_SCHEDULE', 'DELAYED'] } }, select: { id: true } } }
           });
           if (!bus) {
             logger.warn({ ip: clientAddress, imei: parsed.imei }, 'TCP: unregistered IMEI');
@@ -77,9 +80,17 @@ function startTcpServer(io, tcpPort = config.TCP_PORT) {
           }
 
           if (parsed.lat !== undefined && parsed.lng !== undefined && (parsed.lat !== 0 || parsed.lng !== 0)) {
-            const log = await prisma.gpsLog.create({
-              data: { busId: bus.id, tripId: bus.trips?.[0]?.id || null, lat: parsed.lat, lng: parsed.lng, speed: parsed.speed || 0, timestamp: parsed.timestamp || new Date() },
-            });
+            const fixAt = parsed.timestamp || new Date();
+            const fixSpeed = parsed.speed || 0;
+            const activeTripId = bus.trips?.[0]?.id || null;
+
+            // Not every packet earns a row — see gpsWriteGate. The broadcast below
+            // is unaffected and still runs on every packet.
+            if (gpsWriteGate.shouldPersist(bus.id, activeTripId, fixSpeed)) {
+              await prisma.gpsLog.create({
+                data: { busId: bus.id, tripId: activeTripId, lat: parsed.lat, lng: parsed.lng, speed: fixSpeed, timestamp: fixAt },
+              });
+            }
             
             const presence = busPresence.evaluate(bus.id, bus.status);
             if (presence.write) {
@@ -101,9 +112,9 @@ function startTcpServer(io, tcpPort = config.TCP_PORT) {
             // above for the trail, but must never drive the live map.
             const isLiveFix = parsed.isLive !== false && parsed.gpsFix !== false;
 
-            if (!isLiveFix || !liveFixGuard.shouldBroadcast(bus.id, log.timestamp)) {
+            if (!isLiveFix || !liveFixGuard.shouldBroadcast(bus.id, fixAt)) {
               logger.debug(
-                { busId: bus.id, imei: parsed.imei, isLive: parsed.isLive, gpsFix: parsed.gpsFix, timestamp: log.timestamp },
+                { busId: bus.id, imei: parsed.imei, isLive: parsed.isLive, gpsFix: parsed.gpsFix, timestamp: fixAt },
                 'TCP: skipping live broadcast for stale/history fix'
               );
             } else {
@@ -113,7 +124,7 @@ function startTcpServer(io, tcpPort = config.TCP_PORT) {
                 lat: parsed.lat,
                 lng: parsed.lng,
                 speed: parsed.speed || 0,
-                timestamp: log.timestamp,
+                timestamp: fixAt,
               });
 
               if (io) {
@@ -124,7 +135,7 @@ function startTcpServer(io, tcpPort = config.TCP_PORT) {
                   lng: parsed.lng,
                   speed: parsed.speed,
                   heading: parsed.heading || 0,
-                  timestamp: log.timestamp,
+                  timestamp: fixAt,
                 });
               }
             }

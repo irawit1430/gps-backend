@@ -68,6 +68,41 @@ setInterval(async () => {
   }
 }, 5 * 60 * 1000);
 
+// GpsLog retention.
+//
+// DEPLOY.md §10 documented this as a crontab under user `voltava` — a user that
+// does not exist on the VM, so the command errored and the table has never been
+// pruned once. In-process means it ships with the code instead of being a manual
+// step that can be skipped, mistyped, or installed under the wrong account.
+//
+// Set GPS_RETENTION_DAYS=0 to disable.
+if (config.GPS_RETENTION_DAYS > 0) {
+  const pruneGpsLogs = async () => {
+    const cutoff = new Date(Date.now() - config.GPS_RETENTION_DAYS * 86_400_000);
+    let removed = 0;
+    // Batched. One unbounded DELETE over a table this size holds a lock long
+    // enough to stall telemetry ingest, which is the outage this is meant to
+    // prevent. The loop cap stops a runaway if something keeps re-inserting.
+    for (let batch = 0; batch < 200; batch++) {
+      const count = await prisma.$executeRaw`
+        DELETE FROM "GpsLog" WHERE id IN (
+          SELECT id FROM "GpsLog" WHERE timestamp < ${cutoff} LIMIT 5000
+        )`;
+      removed += count;
+      if (count === 0) break;
+      // Breathe between batches so ingest keeps up.
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    if (removed > 0) {
+      logger.info({ removed, olderThanDays: config.GPS_RETENTION_DAYS }, "Pruned GpsLog");
+    }
+  };
+
+  setInterval(() => {
+    pruneGpsLogs().catch((err) => logger.error({ err }, "GpsLog prune failed"));
+  }, 6 * 60 * 60 * 1000);
+}
+
 // ─── Graceful shutdown ─────────────────────────────────────
 let shuttingDown = false;
 async function shutdown(signal) {
