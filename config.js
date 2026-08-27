@@ -33,6 +33,11 @@ const schema = z.object({
 
   RATE_LIMIT_LOGIN_PER_MIN: z.coerce.number().int().positive().default(5),
   RATE_LIMIT_GLOBAL_PER_MIN: z.coerce.number().int().positive().default(300),
+
+  // How long a trip may sit in ON_SCHEDULE/DELAYED before a new trip for the same
+  // bus or driver treats it as abandoned and closes it. A school run is hours, not
+  // half a day; tune if a route legitimately runs longer.
+  TRIP_STALE_HOURS: z.coerce.number().int().positive().default(12),
 });
 
 const parsed = schema.safeParse(process.env);

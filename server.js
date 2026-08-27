@@ -1228,14 +1228,35 @@ app.post('/api/student-route-mappings',
   async (req, res) => {
     try {
       const { studentId, routeStopId } = req.body;
+      const stop = await prisma.routeStop.findUnique({
+        where: { id: routeStopId },
+        select: { routeId: true, route: { select: { schoolId: true } } },
+      });
+
       // Tenant check: the student and route stop must belong to caller's school
       if (req.user.role === 'SCHOOL_ADMIN') {
-        const [student, stop] = await Promise.all([
-          prisma.student.findUnique({ where: { id: studentId }, select: { schoolId: true } }),
-          prisma.routeStop.findUnique({ where: { id: routeStopId }, include: { route: { select: { schoolId: true } } } }),
-        ]);
+        const student = await prisma.student.findUnique({ where: { id: studentId }, select: { schoolId: true } });
         if (!student || student.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
+        // 403 and not 404 on a missing stop: a school admin must not be able to probe
+        // which stop ids exist outside their own school.
         if (!stop || stop.route.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
+      } else if (!stop) {
+        return res.status(404).json({ error: 'Route stop not found' });
+      }
+
+      // One stop per student per route. The @@unique is (studentId, routeStopId), which
+      // only makes re-assigning the SAME stop idempotent — a second stop on the same
+      // route slips past it and the student then appears twice on the driver roster.
+      const elsewhere = await prisma.studentRouteMapping.findFirst({
+        where: { studentId, routeStopId: { not: routeStopId }, routeStop: { routeId: stop.routeId } },
+        select: { routeStop: { select: { id: true, name: true } } },
+      });
+      if (elsewhere) {
+        return res.status(409).json({
+          error: 'Student is already assigned to another stop on this route',
+          stopId: elsewhere.routeStop.id,
+          stopName: elsewhere.routeStop.name,
+        });
       }
       const mapping = await prisma.studentRouteMapping.upsert({
         where: { studentId_routeStopId: { studentId, routeStopId } },
@@ -1932,13 +1953,13 @@ app.get('/api/drivers/:driverId/trips',
           })
         : [];
 
-      const leavesByStudent = new Map();
-      for (const l of leaves) {
-        if (!leavesByStudent.has(l.studentId)) leavesByStudent.set(l.studentId, []);
-        leavesByStudent.get(l.studentId).push(l);
-      }
+      // One entry per student, not one per leave row. A student can hold two APPROVED
+      // leaves whose ranges both cover today, and a second entry for the same child is
+      // meaningless to render — it only collides keys in the client.
+      const leaveByStudent = new Map();
+      for (const l of leaves) if (!leaveByStudent.has(l.studentId)) leaveByStudent.set(l.studentId, l);
       trips.forEach((t, i) => {
-        t.leaveApplications = studentIdsByTrip[i].flatMap((id) => leavesByStudent.get(id) || []);
+        t.leaveApplications = studentIdsByTrip[i].map((id) => leaveByStudent.get(id)).filter(Boolean);
       });
       res.json(trips);
     } catch (err) {
@@ -1996,7 +2017,23 @@ app.patch('/api/trips/:tripId/status', ownsTrip, validate({ body: S.tripStatus }
         },
       });
       if (conflict) {
-        return res.status(400).json({ error: 'Bus or driver is already on an active trip' });
+        // Nothing in this system ever completes a trip except a driver tapping
+        // COMPLETED. A run abandoned mid-way — app killed, battery dead, shift over —
+        // otherwise sits in ON_SCHEDULE forever and locks this bus AND this driver out
+        // of every future trip, permanently. Past the window it is over whatever the
+        // row says, so close it and let the new trip start.
+        const startedAt = conflict.startTime || conflict.createdAt;
+        const stale = Date.now() - new Date(startedAt).getTime() > config.TRIP_STALE_HOURS * 3_600_000;
+        if (!stale) {
+          return res.status(400).json({ error: 'Bus or driver is already on an active trip' });
+        }
+        await prisma.trip.update({
+          where: { id: conflict.id },
+          // endTime is when we closed it, not when it really ended. The oversized
+          // duration that produces is the point — it makes the abandonment visible.
+          data: { status: 'COMPLETED', endTime: new Date() },
+        });
+        req.log.warn({ tripId: conflict.id, startedAt }, 'auto-completed stale trip blocking a new one');
       }
     }
 
