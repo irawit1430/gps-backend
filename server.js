@@ -2268,6 +2268,26 @@ app.post('/api/attendance', validate({ body: S.attendance }), async (req, res) =
     if (req.user.role === 'SCHOOL_ADMIN' && trip.route.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
     if (!['DRIVER', 'SCHOOL_ADMIN', 'SUPER_ADMIN'].includes(req.user.role)) return res.status(403).json({ error: 'Forbidden' });
 
+    // A journey has to be happening for someone to board it. Nothing here checked
+    // trip status, so a driver could mark children aboard a trip that was never
+    // started — no departure time, no GPS track, and a real "your child boarded"
+    // push to a parent about a bus standing still. The same hole accepted scans on
+    // finished and cancelled trips.
+    //
+    // Corrections after the fact are legitimate, which is why COMPLETED is allowed for
+    // the office and not for the driver: once a driver has ended a run, a missed scan
+    // is a records question, and records belong to the school.
+    const isAdmin = req.user.role !== 'DRIVER';
+    if (trip.status === 'CANCELLED') {
+      return res.status(409).json({ error: 'This trip was cancelled — nobody travelled on it' });
+    }
+    if (trip.status === 'PLANNED') {
+      return res.status(409).json({ error: 'Start the trip before marking attendance' });
+    }
+    if (trip.status === 'COMPLETED' && !isAdmin) {
+      return res.status(409).json({ error: 'This trip has ended. Ask the school office to correct the record' });
+    }
+
     const student = await prisma.student.findUnique({ 
       where: { id: req.body.studentId },
       include: { parent: { select: { id: true, notificationSettings: true } } }
