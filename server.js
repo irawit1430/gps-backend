@@ -1442,6 +1442,16 @@ app.get('/api/parents/:parentId/students',
                     include: {
                       trips: {
                         where: { status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
+                        // The parent screen shows ONE trip, so the order decides which.
+                        // Unordered, a school day with a morning and an afternoon leg on the
+                        // same route handed out whichever Postgres returned first — and an
+                        // abandoned morning trip stuck in ON_SCHEDULE could win all afternoon,
+                        // reporting IN_TRANSIT for a run that finished before lunch.
+                        //
+                        // Most recently STARTED first, so a running leg always beats a
+                        // finished one. Trips that have not started sort last (startTime is
+                        // null) and fall back to creation order, which is the next one due.
+                        orderBy: [{ startTime: { sort: 'desc', nulls: 'last' } }, { createdAt: 'asc' }],
                         include: {
                           driver: { select: { name: true, phone: true } },
                           bus: { select: { licensePlate: true, deviceId: true } },
