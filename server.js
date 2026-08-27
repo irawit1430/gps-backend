@@ -23,6 +23,7 @@ const {
   syncEmergencyAlertToFirebase,
   syncStudentToFirebase,
   sendPush,
+  isPushConfigured,
 } = require('./firebase');
 
 // ─── Boot ───────────────────────────────────────────────────
@@ -1893,6 +1894,23 @@ app.get('/api/users/me', async (req, res) => {
 // Device push token registration. Send the token after the user grants notification
 // permission; send null on sign-out from that device.
 app.post('/api/users/me/fcm-token', validate({ body: S.fcmToken }), async (req, res) => {
+  // Refuse rather than accept a registration we cannot honour.
+  //
+  // Without a service account sendPush silently does nothing, so a client would
+  // register a token, get a 200, and ship onboarding copy promising alerts that
+  // never arrive — with no signal in the client, the logs, or to the parent. The
+  // first sign would be a parent who quietly stops opening the app.
+  //
+  // So the far end announces its own absence rather than the near end assuming
+  // presence. A client that checks can hold its copy; one that ignores this gets
+  // an error instead of a false success.
+  if (req.body.fcmToken && !isPushConfigured()) {
+    req.log.error("fcm-token registration refused: FIREBASE_SERVICE_ACCOUNT is not set");
+    return res.status(503).json({
+      error: 'Push notifications are not configured on this server',
+      pushEnabled: false,
+    });
+  }
   try {
     await prisma.user.update({
       where: { id: req.user.id },
@@ -2891,11 +2909,23 @@ app.get('/api/settings', async (_req, res) => {
   try {
     let settings = await prisma.globalSettings.findUnique({ where: { id: 'global' } });
     if (!settings) settings = await prisma.globalSettings.create({ data: { id: 'global' } });
-    res.json(settings);
+    // alertEmail and offlineAlertMinutes were saveable for months with nothing behind
+    // them, so an operator configured "email me when a device goes silent", was told
+    // it saved, and was covered by nothing. The console can now grey those fields and
+    // say why, instead of accepting input it cannot honour.
+    res.json({ ...settings, ...channelStatus() });
   } catch (err) {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+// Same rule as fcm-token, on the mail side: alertEmail has been saveable for months
+// with no mail sender behind it, so an operator configured "email me when a device
+// goes silent", was told it saved, and was covered by nothing. Settings now report
+// whether the channels they configure can actually deliver.
+function channelStatus() {
+  return { pushEnabled: isPushConfigured(), emailEnabled: mailer.isConfigured() };
+}
 
 app.put('/api/settings', validate({ body: S.globalSettings }), async (req, res) => {
   try {

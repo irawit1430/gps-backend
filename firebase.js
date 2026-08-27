@@ -211,8 +211,16 @@ async function sendPush(tokens, { title, body, data } = {}) {
   }
 }
 
+// Whether push can actually be delivered. Callers that promise a user something
+// must be able to ask rather than assume — sendPush no-ops silently without a
+// service account, which is a failure with no signal anywhere.
+function isPushConfigured() {
+  return Boolean(messaging);
+}
+
 module.exports = {
   sendPush,
+  isPushConfigured,
   app,
   db,
   messaging,

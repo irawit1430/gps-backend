@@ -27,6 +27,21 @@ jest.mock('bcryptjs', () => ({
   compare: jest.fn(),
 }));
 
+// Push delivery is a real dependency of the registration endpoint now: it refuses a
+// token it could never deliver to, rather than accepting one and going quiet.
+jest.mock('../firebase', () => ({
+  sendPush: jest.fn().mockResolvedValue({ sent: 0, invalidTokens: [] }),
+  isPushConfigured: jest.fn(() => true),
+  syncGpsLogToFirebase: jest.fn(),
+  syncEmergencyAlertToFirebase: jest.fn(),
+  syncStudentToFirebase: jest.fn(),
+  flushFirestore: jest.fn(),
+  app: null,
+  db: null,
+  messaging: null,
+}));
+const firebase = require('../firebase');
+
 describe('POST /api/auth/login', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -147,7 +162,38 @@ describe('POST /api/users/me/fcm-token', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    firebase.isPushConfigured.mockReturnValue(true);
     prisma.user.update.mockResolvedValue({ id: 'user-1' });
+  });
+
+  // Without a service account sendPush silently does nothing, so accepting a token
+  // would let a client ship copy promising alerts that never arrive — with no signal
+  // in the client, the logs, or to the parent. The far end announces its absence.
+  it('refuses to register a token when push is not configured', async () => {
+    firebase.isPushConfigured.mockReturnValue(false);
+
+    const res = await request(app)
+      .post('/api/users/me/fcm-token')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ fcmToken: 'd'.repeat(40) });
+
+    expect(res.status).toBe(503);
+    expect(res.body.pushEnabled).toBe(false);
+    expect(prisma.user.update).not.toHaveBeenCalled();
+  });
+
+  // Clearing a token must still work — a signing-out phone has to be able to detach
+  // itself whatever the server is configured to do.
+  it('still clears a token when push is not configured', async () => {
+    firebase.isPushConfigured.mockReturnValue(false);
+
+    const res = await request(app)
+      .post('/api/users/me/fcm-token')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ fcmToken: null });
+
+    expect(res.status).toBe(200);
+    expect(prisma.user.update).toHaveBeenCalled();
   });
 
   it('registers a device token', async () => {
