@@ -289,7 +289,9 @@ app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => 
               // DELAYED is running too. Matching only ON_SCHEDULE filed every fix
               // from a late bus under tripId null — exactly when the track matters.
               where: { status: { in: ['ON_SCHEDULE', 'DELAYED'] } },
-              include: { driver: { select: { name: true } }, route: { select: { name: true } } },
+              // Only the id is needed: the trip tags the GpsLog row. Identity used to
+              // ride the location_update broadcast and no longer does — see below.
+              select: { id: true },
             },
           },
         }));
@@ -343,11 +345,17 @@ app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => 
         });
 
         emitToSchool(io, bus.schoolId, 'location_update', {
+          // location_update is POSITION ONLY, and both ingest paths must agree on that.
+          //
+          // This event goes to the whole school room, so every parent receives every
+          // bus in their school. driverName and routeName used to ride along, which
+          // meant every parent held every driver name on their device — and only for
+          // phone-GPS buses, because the TM-100 path never sent them. So the fields
+          // were present in testing, absent in production, and a privacy leak in
+          // between. Identity now comes from GET /api/devices/locations.
           busId: bus.id,
           licensePlate: bus.licensePlate,
           capacity: bus.capacity,
-          driverName: activeTrip?.driver?.name || 'Unassigned',
-          routeName: activeTrip?.route?.name || 'Off-Route',
           lat,
           lng,
           speed,
@@ -2460,13 +2468,30 @@ app.get('/api/devices/locations', async (req, res) => {
 
     const buses = await prisma.bus.findMany({
       where,
-      include: { gpsLogs: { orderBy: { timestamp: 'desc' }, take: 1 }, school: { select: { name: true } } },
+      include: {
+        gpsLogs: { orderBy: { timestamp: 'desc' }, take: 1 },
+        school: { select: { name: true } },
+        // Who is driving it right now, so a dashboard can actually place the call its
+        // "Contact driver" button offers. Running trips only, most recently started
+        // first — an unordered take(1) hands back an arbitrary leg on a two-leg day.
+        trips: {
+          where: { status: { in: ['ON_SCHEDULE', 'DELAYED'] } },
+          orderBy: [{ startTime: { sort: 'desc', nulls: 'last' } }, { createdAt: 'asc' }],
+          take: 1,
+          select: { id: true, driver: { select: { name: true, phone: true } } },
+        },
+      },
     });
     const locations = buses
       .map((b) => ({
         busId: b.id,
         licensePlate: b.licensePlate,
         schoolName: b.school?.name || 'Unassigned',
+        tripId: b.trips[0]?.id || null,
+        driverName: b.trips[0]?.driver?.name || null,
+        // null means nobody to call — render the control disabled rather than
+        // offering an action that silently does nothing.
+        driverPhone: b.trips[0]?.driver?.phone || null,
         lastKnownLat: b.gpsLogs[0]?.lat || null,
         lastKnownLng: b.gpsLogs[0]?.lng || null,
         speed: b.gpsLogs[0]?.speed || 0,
