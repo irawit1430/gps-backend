@@ -956,13 +956,38 @@ app.put('/api/trips/:tripId',
 
 app.get('/api/schools/:schoolId/students', requireTenant('schoolId'), async (req, res) => {
   try {
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+
     const students = await prisma.student.findMany({
       where: { schoolId: req.params.schoolId },
-      include: { routeMappings: { include: { routeStop: { include: { route: true } } } } },
+      include: {
+        // The primary contact is the parent account; guardianPhone is the fallback
+        // for families without one. Only shipping the fallback meant the office saw
+        // an empty field and concluded there was no number on file.
+        parent: { select: { name: true, phone: true } },
+        // `route: true` dragged the whole row, including the OSRM polyline, for every
+        // student — to read two names.
+        routeMappings: {
+          include: { routeStop: { select: { name: true, route: { select: { name: true } } } } },
+        },
+      },
     });
+
+    // Today's scans in one bounded query, latest per student. These two fields used
+    // to be the literals 'Absent' and '--:--', so every child read as absent forever.
+    const logs = await prisma.attendanceLog.findMany({
+      where: { student: { schoolId: req.params.schoolId }, timestamp: { gte: startOfToday } },
+      orderBy: { timestamp: 'desc' },
+      select: { studentId: true, type: true, timestamp: true },
+    });
+    const latest = new Map();
+    for (const l of logs) if (!latest.has(l.studentId)) latest.set(l.studentId, l);
+
     res.json(
       students.map((s) => {
         const m = s.routeMappings[0];
+        const a = latest.get(s.id);
         return {
           id: s.id,
           rfidTag: s.rfidTag,
@@ -970,10 +995,14 @@ app.get('/api/schools/:schoolId/students', requireTenant('schoolId'), async (req
           grade: s.grade,
           photoUrl: s.photoUrl,
           guardianPhone: s.guardianPhone || null,
+          parentName: s.parent?.name || null,
+          parentPhone: s.parent?.phone || null,
           assignedRoute: m?.routeStop?.route?.name || 'Unassigned',
           routeStopName: m?.routeStop?.name || 'Unassigned',
-          boardingStatus: 'Absent',
-          lastCheckIn: '--:--',
+          // BOARDED | ALIGHTED | null. null means no scan today — genuinely unknown,
+          // which is not the same as absent and must not render as it.
+          boardingStatus: a?.type || null,
+          lastCheckIn: a?.timestamp?.toISOString() || null,
         };
       })
     );
