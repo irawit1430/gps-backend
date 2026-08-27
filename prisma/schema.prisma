@@ -33,6 +33,20 @@ enum LeaveStatus {
 enum AttendanceType {
   BOARDED
   ALIGHTED
+  // A child who was not at their stop. Until now this was indistinguishable from a
+  // driver who forgot to scan, which made the record unreliable in exactly the case
+  // a school later needs it to be exact. It is also the only notification in this
+  // product with a window in which a parent can still act.
+  NO_SHOW
+}
+
+// How a row came to exist. A scan and an office correction assert the same fact but
+// with different confidence, and a school reconstructing a disputed day needs to tell
+// them apart. MANUAL also suppresses the parent notification — backfilling a missed
+// 07:38 scan at 15:02 must not push "your child boarded" to a family hours later.
+enum AttendanceSource {
+  SCAN
+  MANUAL
 }
 
 enum EmergencyType {
@@ -170,6 +184,21 @@ model Student {
   grade     String?
   photoUrl  String?
   guardianPhone String?  // fallback contact when the parent account has no phone
+
+  // Scannable identity. Random by default; a school that already issues ID cards can
+  // import its own codes instead, because telling them to reprint 600 cards destroys
+  // the entire cost argument for QR over RFID.
+  //
+  // Unique per SCHOOL, not globally: imported codes are roll numbers and admission
+  // numbers, and two schools will both have an "R042". Matching is already
+  // school-scoped so this costs nothing.
+  //
+  // Never leaves the server except via the card-printing endpoint. The driver roster
+  // carries a SHA-256 of it instead, so a phone can verify a card offline without
+  // ever holding the credential that makes one.
+  qrToken        String?
+  // True when the school brought its own code, so no card needs printing for them.
+  qrCodeImported Boolean @default(false)
   parentId  String?
   parent    User?    @relation("ParentStudents", fields: [parentId], references: [id])
   createdAt DateTime @default(now())
@@ -179,6 +208,7 @@ model Student {
   attendanceLogs    AttendanceLog[]
   leaveApplications LeaveApplication[]
 
+  @@unique([schoolId, qrToken])
   @@index([schoolId])
   @@index([parentId])
 }
@@ -244,6 +274,7 @@ model AttendanceLog {
   tripId    String
   trip      Trip           @relation(fields: [tripId], references: [id])
   type      AttendanceType
+  source    AttendanceSource @default(SCAN)
   timestamp DateTime       @default(now())
 
   @@index([studentId, timestamp])

@@ -10,6 +10,16 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 
+// The driver roster must match a scanned card offline — signal dies at the end of
+// every route — so it needs the codes. Shipping the tokens themselves would put every
+// child's credential on every driver's phone, which is the exposure a separate
+// qrToken existed to avoid. So the roster carries a hash: a phone can verify a card
+// without ever holding the thing that makes one, and a leaked payload is useless for
+// forging a card.
+function qrHash(token) {
+  return token ? crypto.createHash('sha256').update(token).digest('hex') : null;
+}
+
 const config = require('./config');
 const logger = require('./logger');
 const S = require('./schemas');
@@ -81,7 +91,18 @@ app.use(globalLimiter);
 // ─── Public routes (health, login, telemetry) ──────────────
 app.get('/', (_req, res) => res.send('Fleet API is running perfectly!'));
 
-app.get('/healthz', (_req, res) => res.status(200).json({ status: 'ok' }));
+// Reports the running process's own clock, not the machine's and not what any
+// config file claims. Every "today" boundary in this service is server-local, so a
+// timezone that was set in .env — where dotenv assigns process.env.TZ long after Node
+// has already fixed its timezone — reads as configured and does nothing. This makes
+// that difference visible without shell access.
+app.get('/healthz', (_req, res) =>
+  res.status(200).json({
+    status: 'ok',
+    serverTime: new Date().toString(),
+    utcOffsetMinutes: -new Date().getTimezoneOffset(),
+  })
+);
 
 app.get('/readyz', async (_req, res) => {
   const checks = { db: false, firestore: null };
@@ -2010,7 +2031,7 @@ app.get('/api/drivers/:driverId/trips',
                 include: {
                   studentMappings: {
                     include: {
-                      student: { select: { id: true, name: true, rfidTag: true, grade: true, photoUrl: true, guardianPhone: true } },
+                      student: { select: { id: true, name: true, rfidTag: true, grade: true, photoUrl: true, guardianPhone: true, qrToken: true } },
                     },
                   },
                 },
@@ -2063,6 +2084,22 @@ app.get('/api/drivers/:driverId/trips',
       trips.forEach((t, i) => {
         t.leaveApplications = studentIdsByTrip[i].map((id) => leaveByStudent.get(id)).filter(Boolean);
       });
+
+      // Swap every token for its hash before this leaves the server. The scanner
+      // matches on the hash, so this is all a phone needs — and it means a driver
+      // payload, cached or intercepted, cannot be used to print a working card.
+      // Deleting rather than omitting from the select: the token is needed here to
+      // compute the hash, so it has to be removed on the way out.
+      for (const t of trips) {
+        for (const stop of t.route?.stops || []) {
+          for (const m of stop.studentMappings || []) {
+            if (!m.student) continue;
+            m.student.qrHash = qrHash(m.student.qrToken);
+            delete m.student.qrToken;
+          }
+        }
+      }
+
       res.json(trips);
     } catch (err) {
       req.log.error({ err }, 'list driver trips failed');
