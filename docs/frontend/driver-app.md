@@ -26,19 +26,32 @@ Read [`README.md`](./README.md) first. Use `driverId = user.id`.
 password** and `mustResetPassword: true` → force reset screen on first login.
 Handle `429`.
 
+On that reset screen `POST /api/auth/change-password` returns a fresh `token` in its
+200 body — store it and go straight into the app. The token you called with is
+revoked, and logging in again in the same second is rejected (whole-second
+revocation cutoff vs second-resolution JWT `iat`), so use the one you were handed.
+
 ## 2. My Trips
 ```
 GET /api/drivers/:driverId/trips
 → [{ id, status, scheduledStart, startTime, delayMinutes,
      route:{ name, stops:[{ name, lat, lng, orderIdx,
         studentMappings:[{ student:{ id,name,rfidTag,grade,photoUrl,guardianPhone } }] }] },
-     bus:{...} }]
+     bus:{...},
+     leaveApplications:[{ id, studentId, status, startDate, endDate }] }]
 ```
 
 `student.guardianPhone` is the child's emergency contact — dial it straight from the
 roster row. `scheduledStart` is the planned departure (null when unscheduled), and
 `delayMinutes` is filled in at departure by comparing it to the real start.
 Only `PLANNED / ON_SCHEDULE / DELAYED` trips are returned.
+
+`leaveApplications` is every **APPROVED** leave covering **today** for the students on
+that trip — mark those kids "On Leave" so the driver does not hold a stop for them.
+Presence in the array *is* the signal: the server has already filtered to today, so you
+do not need to re-check the dates client-side. Note it is a date **range**
+(`startDate`/`endDate`), not a single `date` field, and PENDING/REJECTED leaves never
+appear. Empty array when nobody on the trip is away.
 
 ## 3. Trip detail
 Render `route.stops` (ordered by `orderIdx`); each stop has its

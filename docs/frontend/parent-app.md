@@ -73,13 +73,19 @@ anything else. New parents are provisioned with a temporary password.
 POST /api/auth/change-password        (requires Authorization header)
 Body: { "oldPassword": "<temp>", "newPassword": "<min 8 chars>" }
 
-200 → { "message": "Password updated successfully" }
+200 → { "message": "Password updated successfully", "token": "<new JWT>" }
 401 → { "error": "Incorrect current password" }
 ```
-On success the server clears `mustResetPassword` **and revokes all existing
-sessions for this user — including the current token.** After a `200`, send the
-user back to Login to sign in with the new password (your global 401 handler will
-also catch the now-revoked token on the next request).
+On success the server clears `mustResetPassword` and **revokes every existing
+session for this user, including the token you called with** — then hands back a
+replacement in `token`. Store that and carry straight on into the app. Do not send
+the user back to Login.
+
+Do **not** call `/api/auth/login` again immediately instead: the revocation cutoff
+has whole-second resolution and JWT `iat` is second-resolution too, so a token
+minted in the same second as the change is rejected as revoked. Sparing you that is
+the entire reason `token` is in this response. Sessions on the user's other devices
+are signed out, which is intended.
 
 ### 1.4 Logout
 ```
@@ -427,7 +433,7 @@ Validation error shape:
 | Method | Path | Purpose |
 |--------|------|---------|
 | POST | `/api/auth/login` | Log in |
-| POST | `/api/auth/change-password` | Change password (forced reset) — revokes sessions |
+| POST | `/api/auth/change-password` | Change password (forced reset) — revokes sessions, returns a fresh `token` |
 | POST | `/api/auth/logout` | Revoke current token on sign-out |
 | GET  | `/api/parents/{parentId}/students` | Children + assigned bus/driver |
 | GET  | `/api/devices/locations` | Last-known locations of child's buses |

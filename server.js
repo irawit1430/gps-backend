@@ -174,11 +174,25 @@ app.post('/api/auth/change-password', authenticate, validate({ body: S.changePas
       where: { id: user.id },
       data: { password: hashed, mustResetPassword: false },
     });
-    // A password change ends all existing sessions for this user (including this one).
-    // The client must log in again with the new password.
+    // A password change ends every existing session for this user, including this one...
     invalidateUser(user.id);
     logoutToken(req.token);
-    res.json({ message: 'Password updated successfully' });
+
+    // ...and hands back a replacement, so the client is not pushed into an immediate
+    // re-login it cannot win. invalidateUser stamps a cutoff in whole seconds and
+    // authenticate rejects `iat <= cutoff`, but JWT iat is second-resolution — a token
+    // minted in this same second is indistinguishable from the ones just revoked, so a
+    // prompt re-login gets 401d. Dating this one a second past the cutoff keeps every
+    // prior token dead while this one lives. Nothing is given away: the caller proved
+    // knowledge of oldPassword in this very request.
+    // ponytail: dodges the second-resolution cutoff rather than fixing it. A
+    // `tokenVersion` claim (REVIEW_LOG open item 3) makes the iat shift unnecessary.
+    const token = jwt.sign(
+      { id: user.id, role: user.role, schoolId: user.schoolId, iat: Math.floor(Date.now() / 1000) + 1 },
+      config.JWT_SECRET,
+      { expiresIn: config.JWT_EXPIRES_IN || '24h' }
+    );
+    res.json({ message: 'Password updated successfully', token });
   } catch (err) {
     req.log.error({ err }, 'change password failed');
     res.status(500).json({ error: 'Internal server error' });
@@ -1890,6 +1904,41 @@ app.get('/api/drivers/:driverId/trips',
           },
         },
         orderBy: { createdAt: 'asc' },
+      });
+
+      // LeaveApplication hangs off Student, not Trip, so it cannot ride the include
+      // above. One extra bounded query covers every student on every returned trip,
+      // then fans out — the driver app reads `trip.leaveApplications` to grey out
+      // kids who are not coming, so a stop is not held for them.
+      const endOfToday = new Date(startOfToday);
+      endOfToday.setHours(23, 59, 59, 999);
+
+      const studentIdsByTrip = trips.map((t) => [
+        ...new Set((t.route?.stops || []).flatMap((s) => s.studentMappings.map((m) => m.student.id))),
+      ]);
+      const allStudentIds = [...new Set(studentIdsByTrip.flat())];
+
+      // A leave is a date range, not a single day: it covers today when it starts on
+      // or before today and ends on or after it.
+      const leaves = allStudentIds.length
+        ? await prisma.leaveApplication.findMany({
+            where: {
+              studentId: { in: allStudentIds },
+              status: 'APPROVED',
+              startDate: { lte: endOfToday },
+              endDate: { gte: startOfToday },
+            },
+            select: { id: true, studentId: true, status: true, startDate: true, endDate: true },
+          })
+        : [];
+
+      const leavesByStudent = new Map();
+      for (const l of leaves) {
+        if (!leavesByStudent.has(l.studentId)) leavesByStudent.set(l.studentId, []);
+        leavesByStudent.get(l.studentId).push(l);
+      }
+      trips.forEach((t, i) => {
+        t.leaveApplications = studentIdsByTrip[i].flatMap((id) => leavesByStudent.get(id) || []);
       });
       res.json(trips);
     } catch (err) {
