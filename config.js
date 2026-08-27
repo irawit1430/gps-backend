@@ -22,6 +22,15 @@ const schema = z.object({
 
   FIREBASE_SERVICE_ACCOUNT: z.string().optional(),
 
+  // SMTP rather than a provider SDK, so switching providers is a credential change.
+  // Unset = email silently disabled, same contract as FIREBASE_SERVICE_ACCOUNT.
+  EMAIL_SMTP_HOST: z.string().optional(),
+  EMAIL_SMTP_PORT: z.coerce.number().int().positive().default(587),
+  EMAIL_SMTP_USER: z.string().optional(),
+  EMAIL_SMTP_PASS: z.string().optional(),
+  // Must be an address on a domain with SPF/DKIM published, or it lands in spam.
+  EMAIL_FROM: z.string().optional(),
+
   TELEMETRY_HMAC_ENFORCE: boolish.default('0'),
   TELEMETRY_MAX_SKEW_SECONDS: z.coerce.number().int().positive().default(300),
 

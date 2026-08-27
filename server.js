@@ -271,6 +271,7 @@ app.post('/api/auth/forgot-password', loginLimiter, validate({ body: S.forgotPas
 const telemetryCache = require('./telemetryCache');
 const liveFixGuard = require('./liveFixGuard');
 const busPresence = require('./busPresence');
+const mailer = require('./mailer');
 const gpsWriteGate = require('./gpsWriteGate');
 app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => next(), // placeholder to satisfy ordering
   // deferred HMAC attach after prisma exists:
@@ -2151,6 +2152,30 @@ function wantsNotification(settings, key) {
 // Deliver an OS push to users who have registered a device token. Socket events only
 // reach an app that is open; this is what reaches a locked phone.
 // Never throws — a push failure must not fail the request that triggered it.
+// Email the same people push reaches, for the events worth an inbox. Deliberately
+// NOT wired to routine boarding scans: that is ~26,400 mails a month for one school,
+// and a parent who filters those to spam stops seeing the emergency mail too. Push
+// carries the routine; this carries what a parent has to act on.
+//
+// Gated on the same emailAlerts preference the settings screen already exposes — a
+// toggle that has existed and done nothing until now.
+async function emailUsers(userIds, { subject, text, html }) {
+  try {
+    if (!mailer.isConfigured()) return;
+    const ids = [...new Set((userIds || []).filter(Boolean))];
+    if (ids.length === 0) return;
+    const users = await prisma.user.findMany({
+      where: { id: { in: ids }, email: { not: null } },
+      select: { email: true, notificationSettings: true },
+    });
+    const to = users.filter((u) => wantsNotification(u.notificationSettings, 'emailAlerts')).map((u) => u.email);
+    if (to.length === 0) return;
+    await mailer.sendMailTo(to, { subject, text, html });
+  } catch (err) {
+    logger.error({ err: err.message }, 'emailUsers failed');
+  }
+}
+
 async function pushToUsers(userIds, payload) {
   try {
     const ids = [...new Set((userIds || []).filter(Boolean))];
