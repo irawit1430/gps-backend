@@ -13,7 +13,13 @@ module.exports = {
       instances: 1,
       autorestart: true,
       watch: false,
-      max_memory_restart: '512M',
+      // Raised from 512M on the VM after the OOM restart loop in REVIEW_LOG — pm2 was
+      // killing the process every 1–4 minutes in production, dropping every socket, so
+      // dashboards flapped online/offline. The admin-stats queries that caused it were
+      // fixed, but the ceiling was raised too and had been living only on the server:
+      // any clean checkout would have silently reverted it and brought the loop back.
+      // Safe on the 4 GB e2-medium alongside Postgres.
+      max_memory_restart: '1024M',
       kill_timeout: 20000, // must exceed the graceful-shutdown deadline in index.js
       wait_ready: false,
       env: {
