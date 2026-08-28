@@ -554,6 +554,16 @@ app.get('/api/schools/:schoolId/routes', requireTenant('schoolId'), async (req, 
     // Overview and the students page do not, and they call this on every load.
     //
     // Opt-in rather than a new default so the editor keeps working unchanged.
+    // Most-recently-started first, so a running leg always beats a finished one and a
+    // trip that has not started sorts last. `createdAt: 'desc'` was correct while a
+    // route had one trip a day; the scheduler is about to make two the norm, at which
+    // point it hands back an arbitrary leg. This is the sweep item that has to ship
+    // with the change that makes it live, rather than after it.
+    const currentTrip = {
+      take: 1,
+      orderBy: [{ startTime: { sort: 'desc', nulls: 'last' } }, { createdAt: 'asc' }],
+    };
+
     if (req.query.summary) {
       const routes = await prisma.route.findMany({
         where: { schoolId: req.params.schoolId },
@@ -563,6 +573,11 @@ app.get('/api/schools/:schoolId/routes', requireTenant('schoolId'), async (req, 
           distanceKm: true,
           estimatedDuration: true,
           _count: { select: { stops: true } },
+          // The Active Routes widget reads this and nothing else, so without it the
+          // panel renders perfectly and shows nothing — a silently empty screen rather
+          // than an error. Stops are still excluded; screens that need a routeStopId
+          // must fetch the full shape.
+          trips: { ...currentTrip, select: { id: true, status: true, startTime: true, scheduledStart: true, direction: true } },
         },
         orderBy: { name: 'asc' },
       });
@@ -573,7 +588,7 @@ app.get('/api/schools/:schoolId/routes', requireTenant('schoolId'), async (req, 
 
     const routes = await prisma.route.findMany({
       where: { schoolId: req.params.schoolId },
-      include: { stops: { orderBy: { orderIdx: 'asc' } }, trips: { take: 1, orderBy: { createdAt: 'desc' } } },
+      include: { stops: { orderBy: { orderIdx: 'asc' } }, trips: currentTrip },
     });
     res.json(routes);
   } catch (err) {

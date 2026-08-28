@@ -116,10 +116,11 @@ model School {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
-  users    User[]
-  buses    Bus[]
-  routes   Route[]
-  students Student[]
+  users        User[]
+  buses        Bus[]
+  routes       Route[]
+  students     Student[]
+  calendarDays CalendarDay[]
 }
 
 model Bus {
@@ -153,8 +154,102 @@ model Route {
 
   stops RouteStop[]
   trips Trip[]
+  runs  Run[]
 
   @@index([schoolId])
+}
+
+// The layer this system has never had.
+//
+// A route is a path. A trip is one day's execution. Between them the rest of this
+// industry has a RUN: the recurring service — home to school, school to home — that
+// carries the direction and the weekday pattern. Without it every trip is typed in by
+// hand, so a school with 20 routes creates 40 trips before 7am and the fleet does not
+// move if nobody does. It also explains why nothing here knows which way a bus is
+// going: direction is a property of a run, and there were no runs.
+model Run {
+  id      String @id @default(uuid())
+  routeId String
+  route   Route  @relation(fields: [routeId], references: [id], onDelete: Cascade)
+
+  // Default crew. A materialised trip may override either — substitute drivers are
+  // the normal case, not the exception.
+  busId    String?
+  driverId String?
+
+  name      String       // "Morning pickup"
+  direction RunDirection
+  // Wall-clock time, "07:15". NOT a DateTime: a recurring departure is a time of day,
+  // and storing it as an instant forces a fictional date onto it and invites exactly
+  // the UTC drift that made the school day start at 05:30 IST.
+  departure String
+
+  // GTFS calendar.txt — the weekday pattern plus a validity window.
+  mon       Boolean  @default(false)
+  tue       Boolean  @default(false)
+  wed       Boolean  @default(false)
+  thu       Boolean  @default(false)
+  fri       Boolean  @default(false)
+  sat       Boolean  @default(false)
+  sun       Boolean  @default(false)
+  startDate DateTime @db.Date
+  endDate   DateTime @db.Date
+
+  active     Boolean        @default(true)
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+  exceptions RunException[]
+  trips      Trip[]
+
+  @@index([routeId, active])
+}
+
+enum RunDirection {
+  TO_SCHOOL
+  FROM_SCHOOL
+}
+
+// GTFS calendar_dates.txt. The weekly pattern is never edited to accommodate a single
+// day — an exception is recorded against the date instead. That is what keeps the
+// pattern readable after a term of amendments, and it is why a recurrence model
+// without an exception layer gets abandoned back to manual creation by the first
+// holiday.
+model RunException {
+  id        String        @id @default(uuid())
+  runId     String
+  run       Run           @relation(fields: [runId], references: [id], onDelete: Cascade)
+  date      DateTime      @db.Date
+  type      ExceptionType
+  departure String?       // exam day: same run, different time
+  reason    String?
+
+  @@unique([runId, date])
+}
+
+enum ExceptionType {
+  ADDED
+  REMOVED
+}
+
+// Shared closures. schoolId null means every school on the platform, so one Diwali
+// row closes the whole fleet rather than several hundred run-level exceptions.
+//
+// Holidays are identical across schools and exam days are not, which is why closures
+// and timing overrides are separate layers rather than one table.
+model CalendarDay {
+  id       String   @id @default(uuid())
+  schoolId String?
+  school   School?  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  date     DateTime @db.Date
+  closed   Boolean  @default(true)
+  reason   String
+  trips    Trip[]
+
+  // NOT sufficient on its own: Postgres treats NULLs as DISTINCT, so this permits two
+  // platform-wide rows for one date. A partial unique index in the migration covers
+  // that case — Prisma cannot express it.
+  @@unique([schoolId, date])
+  @@index([date])
 }
 
 model RouteStop {
@@ -250,12 +345,43 @@ model Trip {
   createdAt         DateTime   @default(now())
   updatedAt         DateTime   @updatedAt
 
+  // A trip keeps its exact meaning — one day's execution, with live state. It gains a
+  // parent. Nullable throughout, so every hand-created trip stays valid forever and
+  // manual creation remains available for a one-off replacement service.
+  runId       String?
+  run         Run?      @relation(fields: [runId], references: [id])
+  serviceDate DateTime? @db.Date
+
+  // Denormalised from the run rather than read through it, because three separate
+  // consumers need it and a manually created trip has no run: the driver app labels a
+  // stop "board" or "drop off", the parent app distinguishes "reached school" from
+  // "reached home", and the mapping layer needs it to place a child's two stops.
+  direction RunDirection?
+
+  // A human has hand-edited this trip, so a reaching-forward write from a run
+  // exception must skip it. Most specific intent wins — the same precedence the
+  // three calendar layers follow.
+  isOverridden Boolean @default(false)
+
+  // Which closure cancelled this, so reopening a day restores only the trips that
+  // closure cancelled and leaves driver- and school-cancelled ones alone. Restoring
+  // everything CANCELLED for a date would dispatch buses for runs somebody had
+  // deliberately called off.
+  cancelledByCalendarDayId String?
+  cancelledBy              CalendarDay? @relation(fields: [cancelledByCalendarDayId], references: [id])
+
   gpsLogs        GpsLog[]
   attendanceLogs AttendanceLog[]
 
   @@index([driverId, status])
   @@index([busId, status])
   @@index([routeId, status])
+  // The materialiser's idempotency guarantee, and the whole reason a second pass is
+  // safe: it can run twice, be retried after a crash, or overlap itself and still
+  // produce exactly one trip per run per day. Postgres treats NULLs as distinct, so
+  // hand-created trips with both columns null are unaffected.
+  @@unique([runId, serviceDate])
+  @@index([serviceDate])
 }
 
 model GpsLog {
