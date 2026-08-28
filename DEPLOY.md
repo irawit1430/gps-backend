@@ -266,3 +266,15 @@ Uptime check (from Cloud Console → Monitoring → Uptime checks):
 - **Rotating a device secret**: `POST /api/devices/:id/rotate-secret` (SUPER_ADMIN),
   then re-flash the returned secret to the device.
 - **Deploys**: `git pull && npm ci && npm run build && npm run migrate:deploy && pm2 reload voltava-fleet`.
+- **Never skip `npm ci` on a deploy.** The GCP cheatsheet`s shorter sequence omits it,
+  and the first deploy that added a dependency (nodemailer) crash-looped the API ~190
+  times before anyone noticed — `curl -s` prints nothing on connection-refused, so it
+  looked like silence rather than an outage. Use `curl -i` when verifying.
+- **The database was created with `prisma db push`**, so it had no `_prisma_migrations`
+  history and `migrate deploy` refused with **P3005**. Resolved 2026-08-28 by confirming
+  `prisma migrate diff` was empty and baselining all five with `migrate resolve --applied`.
+  It cannot recur. Do not `db push` against this database again — it desyncs the history
+  and cannot express partial indexes the schema will need.
+- **`TZ=Asia/Kolkata` lives in `ecosystem.config.js`, not `.env`.** Node fixes its timezone
+  at process start, before dotenv runs, so a TZ line in `.env` changes nothing. Verify with
+  `curl -i localhost:3000/healthz` — `utcOffsetMinutes` must read 330.

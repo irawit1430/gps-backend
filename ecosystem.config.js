@@ -18,6 +18,16 @@ module.exports = {
       wait_ready: false,
       env: {
         NODE_ENV: 'production',
+        // Every "today" boundary in this service is server-local: today's attendance,
+        // the no-show window, the GpsLog retention cutoff. On a UTC host the school day
+        // starts at 05:30 IST — invisible while every run happens between 06:00 and
+        // 18:00 local, and wrong the moment one doesn't.
+        //
+        // It has to live here and not in .env: Node fixes its timezone at process
+        // start, long before dotenv assigns process.env.TZ, so a TZ line in .env sets a
+        // variable and changes nothing. PM2 sets this before spawning, so it takes.
+        // /healthz reports utcOffsetMinutes, which is how to check it actually applied.
+        TZ: 'Asia/Kolkata',
       },
       out_file: '/var/log/voltava/api.out.log',
       error_file: '/var/log/voltava/api.err.log',
