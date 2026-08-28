@@ -1,0 +1,11 @@
+-- "Every scan in this school today" is asked by the students list and the parent
+-- payload on every load. The existing indexes both lead with an id (studentId,
+-- tripId) and this query has neither — it filters on a timestamp range and joins to
+-- Student for the school. Without this it degrades to reading the whole table as
+-- attendance accumulates.
+--
+-- Not CONCURRENTLY: Prisma runs each migration inside a transaction and CREATE INDEX
+-- CONCURRENTLY cannot, so it would fail outright. The brief write lock is irrelevant
+-- on a table this size today. If AttendanceLog ever grows to where the lock matters,
+-- build it concurrently by hand outside the migration runner instead.
+CREATE INDEX IF NOT EXISTS "AttendanceLog_timestamp_idx" ON "AttendanceLog"("timestamp");

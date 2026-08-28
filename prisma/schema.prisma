@@ -285,6 +285,12 @@ model AttendanceLog {
 
   @@index([studentId, timestamp])
   @@index([tripId, timestamp])
+  // "Every scan in this school today" — the students list and the parent payload both
+  // ask it on every load. Neither index above serves it: both lead with an id, and
+  // this query has neither. Today's rows are a tiny slice of the table, so a range
+  // scan on timestamp and then a join is the right plan; without this it degrades to
+  // reading the whole table as attendance accumulates.
+  @@index([timestamp])
 }
 
 model LeaveApplication {

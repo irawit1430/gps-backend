@@ -546,6 +546,31 @@ app.put('/api/parent/leaves/:id',
 // Routes
 app.get('/api/schools/:schoolId/routes', requireTenant('schoolId'), async (req, res) => {
   try {
+    // ?summary=1 for the screens that only need names.
+    //
+    // The full shape ships every route's OSRM polyline and every one of its stops. A
+    // 12-route school with 40 stops each is a dozen encoded polylines and ~480 stop
+    // rows — sent to populate a dropdown. The map editor genuinely needs all of it;
+    // Overview and the students page do not, and they call this on every load.
+    //
+    // Opt-in rather than a new default so the editor keeps working unchanged.
+    if (req.query.summary) {
+      const routes = await prisma.route.findMany({
+        where: { schoolId: req.params.schoolId },
+        select: {
+          id: true,
+          name: true,
+          distanceKm: true,
+          estimatedDuration: true,
+          _count: { select: { stops: true } },
+        },
+        orderBy: { name: 'asc' },
+      });
+      return res.json(
+        routes.map(({ _count, ...r }) => ({ ...r, stopCount: _count.stops }))
+      );
+    }
+
     const routes = await prisma.route.findMany({
       where: { schoolId: req.params.schoolId },
       include: { stops: { orderBy: { orderIdx: 'asc' } }, trips: { take: 1, orderBy: { createdAt: 'desc' } } },
