@@ -19,6 +19,8 @@ const mockPrisma = (runs, exceptions = [], closures = []) => ({
   runException: { findMany: jest.fn().mockResolvedValue(exceptions) },
   calendarDay: { findMany: jest.fn().mockResolvedValue(closures) },
   trip: { createMany: jest.fn().mockResolvedValue({ count: 0 }) },
+  user: { findMany: jest.fn().mockResolvedValue([{ id: 'admin-1' }]) },
+  notification: { findFirst: jest.fn().mockResolvedValue(null), createMany: jest.fn().mockResolvedValue({ count: 1 }) },
 });
 
 describe('materialiseRuns', () => {
@@ -97,13 +99,19 @@ describe('materialiseRuns', () => {
   // no bus. It has to be counted and logged.
   it('reports a run with no crew instead of silently producing nothing', async () => {
     const warn = jest.fn();
+    // Full stub: the alert path also logs on success, and a partial logger would make
+    // this test fail for a reason unrelated to what it is checking.
+    const logger = { warn, info: jest.fn(), error: jest.fn() };
     const p = mockPrisma([run({ busId: null })]);
 
-    const res = await materialiseRuns(p, { days: 1, now: MONDAY, logger: { warn } });
+    const res = await materialiseRuns(p, { days: 1, now: MONDAY, logger });
 
     expect(res.crewless).toBe(1);
     expect(res.created).toBe(0);
     expect(warn).toHaveBeenCalled();
+    // A log nobody reads is the same as silence — the admin has to be told.
+    expect(p.notification.createMany).toHaveBeenCalled();
+    expect(p.notification.createMany.mock.calls[0][0].data[0].message).toMatch(/no bus is assigned/i);
     expect(p.trip.createMany).not.toHaveBeenCalled();
   });
 

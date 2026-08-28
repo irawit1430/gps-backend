@@ -1417,6 +1417,19 @@ app.post('/api/student-route-mappings',
 
 // ─── Runs (the recurring schedule) ─────────────────────────
 
+// Active runs still pointing at a bus or driver. Named in the 409 so an admin can act
+// on it rather than being told no: "this bus is in use" without saying where is the
+// same dead end as "please try again" on a conflict.
+async function runsDependingOn(where) {
+  const runs = await prisma.run.findMany({
+    where: { ...where, active: true },
+    select: { id: true, name: true, direction: true, route: { select: { id: true, name: true } } },
+  });
+  return runs.map((r) => ({
+    id: r.id, name: r.name, direction: r.direction, routeName: r.route?.name || null,
+  }));
+}
+
 // A run belongs to a route and the route carries the school, so tenancy is checked by
 // walking to the route rather than trusting anything in the request.
 async function loadRunForCaller(req, res) {
@@ -1486,7 +1499,20 @@ app.get('/api/routes/:routeId/runs', async (req, res) => {
       where: { routeId: req.params.routeId },
       orderBy: [{ direction: 'asc' }, { departure: 'asc' }],
     });
-    res.json(runs.map((r) => ({ ...r, startDate: ymd(r.startDate), endDate: ymd(r.endDate) })));
+    // Inactive runs are returned deliberately, not filtered: a soft-deleted run is
+    // invisible but still occupies its slot, and an admin recreating it would collide
+    // with something they cannot see. The client hides them.
+    res.json(
+      runs.map((r) => ({
+        ...r,
+        startDate: ymd(r.startDate),
+        endDate: ymd(r.endDate),
+        // A run without both cannot become a trip. Derived here so a run list can show
+        // what will not run tomorrow, without fetching every bus and driver to work it
+        // out.
+        hasCrew: Boolean(r.busId && r.driverId),
+      }))
+    );
   } catch (err) {
     req.log.error({ err }, 'list runs failed');
     res.status(500).json({ error: 'Internal server error' });
@@ -1576,19 +1602,45 @@ app.post('/api/runs/:runId/exceptions',
     try {
       const run = await loadRunForCaller(req, res);
       if (!run) return;
-      const date = dateOnly(req.body.date);
       const payload = {
         type: req.body.type,
         departure: req.body.departure ?? null,
         reason: req.body.reason ?? null,
       };
-      const row = await prisma.runException.upsert({
-        where: { runId_date: { runId: run.id, date } },
-        update: payload,
-        create: { runId: run.id, date, ...payload },
+      const dates = [...new Set(req.body.dates)].map(dateOnly);
+
+      // All of them or none. A half-applied exam week — some days shifted, some not,
+      // and nothing on screen saying which — is worse than a clean failure the admin
+      // can retry.
+      const rows = await prisma.$transaction(
+        dates.map((date) =>
+          prisma.runException.upsert({
+            where: { runId_date: { runId: run.id, date } },
+            update: payload,
+            create: { runId: run.id, date, ...payload },
+          })
+        )
+      );
+
+      // Reaching forward is per-date and outside the transaction on purpose: an
+      // exception that saved correctly must not be rolled back because one already
+      // materialised trip could not be updated. The exception is the durable fact;
+      // touching today's trip is a courtesy on top of it.
+      const appliedTo = [];
+      for (const date of dates) {
+        if (await applyExceptionToExistingTrip(run, date, req.body, req.log)) {
+          appliedTo.push(ymd(date));
+        }
+      }
+
+      res.json({
+        saved: rows.length,
+        exceptions: rows.map((r) => ({ ...r, date: ymd(r.date) })),
+        // Which dates were close enough to have already materialised, so the client
+        // can say "these take effect now, the rest at the next pass" rather than
+        // guessing which side of the horizon a date fell on.
+        appliedToExistingTrips: appliedTo,
       });
-      const applied = await applyExceptionToExistingTrip(run, date, req.body, req.log);
-      res.json({ ...row, date: ymd(row.date), appliedToExistingTrip: applied });
     } catch (err) {
       req.log.error({ err }, 'save run exception failed');
       res.status(500).json({ error: 'Internal server error' });
@@ -2625,7 +2677,18 @@ app.delete('/api/drivers/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), as
     const driver = await prisma.user.findUnique({ where: { id: req.params.id, role: 'DRIVER' } });
     if (!driver) return res.status(404).json({ error: 'Driver not found' });
     if (req.user.role === 'SCHOOL_ADMIN' && driver.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
-    
+
+    // Same as deleting a bus: a run that loses its driver silently stops producing
+    // trips, and nothing about this action would have told anyone.
+    const dependentRuns = await runsDependingOn({ driverId: req.params.id });
+    if (dependentRuns.length > 0) {
+      return res.status(409).json({
+        error: 'This driver is assigned to a recurring run',
+        runs: dependentRuns,
+        hint: 'Assign another driver to these runs first, or deactivate them.',
+      });
+    }
+
     await prisma.user.delete({ where: { id: req.params.id } });
     res.status(204).send();
   } catch (err) {
@@ -3420,6 +3483,21 @@ app.delete('/api/devices/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), as
       const existing = await prisma.bus.findUnique({ where: { id: req.params.id } });
       if (!existing || existing.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
     }
+    // Refuse if a recurring run depends on it, and name them.
+    //
+    // Nothing about deleting a bus touches a run, so a run that has worked for six
+    // weeks would silently stop producing trips and the first signal would be a stop
+    // full of children. The materialiser now warns the school when that happens, but
+    // catching it at the moment of the deletion is better than telling them after.
+    const dependentRuns = await runsDependingOn({ busId: req.params.id });
+    if (dependentRuns.length > 0) {
+      return res.status(409).json({
+        error: 'This bus is assigned to a recurring run',
+        runs: dependentRuns,
+        hint: 'Assign another bus to these runs first, or deactivate them.',
+      });
+    }
+
     await prisma.bus.delete({ where: { id: req.params.id } });
     emitToSchool(io, null, 'device_status_change', { deviceId: req.params.id, status: 'OFFLINE', message: 'Device decommissioned' });
     res.json({ success: true });

@@ -66,6 +66,7 @@ async function materialiseRuns(prisma, { days = 3, now = new Date(), logger } = 
     closureFor.get(`${schoolId}::${day}`) || closureFor.get(`*::${day}`) || null;
 
   const rows = [];
+  const crewlessRuns = new Map();
   let skipped = 0;
   let crewless = 0;
 
@@ -87,6 +88,7 @@ async function materialiseRuns(prisma, { days = 3, now = new Date(), logger } = 
       // route has no bus. Counted and logged so it surfaces before the morning.
       if (!run.busId || !run.driverId) {
         crewless += 1;
+        crewlessRuns.set(run.id, { run, firstDate: crewlessRuns.get(run.id)?.firstDate || day });
         logger?.warn(
           { runId: run.id, runName: run.name, date: day },
           'Run cannot materialise: no bus or driver assigned'
@@ -106,12 +108,59 @@ async function materialiseRuns(prisma, { days = 3, now = new Date(), logger } = 
     }
   }
 
+  // A run that was saved correctly and LATER lost its crew — bus deleted, driver
+  // reassigned — is the dangerous case. Nothing about that action touches the run, so
+  // one that has worked for six weeks silently stops producing trips, and a log line
+  // nobody reads is the same as silence. The first signal would be a stop full of
+  // children at 07:15.
+  if (crewlessRuns.size > 0) await warnSchoolsAboutCrewlessRuns(prisma, crewlessRuns, logger);
+
   if (rows.length === 0) return { created: 0, skipped, crewless };
 
   // skipDuplicates rather than checking first: the unique constraint is the arbiter,
   // and a check-then-create would race two overlapping passes.
   const { count } = await prisma.trip.createMany({ data: rows, skipDuplicates: true });
   return { created: count, skipped, crewless };
+}
+
+// Tells the school admins, once a day per run, rather than logging into the void.
+// Deduped by looking for the same notification already raised today: the materialiser
+// runs every four hours, and six identical alerts a day is how an admin learns to
+// ignore the one that matters.
+async function warnSchoolsAboutCrewlessRuns(prisma, crewlessRuns, logger) {
+  try {
+    const since = startOfLocalDay(new Date());
+    for (const { run, firstDate } of crewlessRuns.values()) {
+      const schoolId = run.route?.schoolId;
+      if (!schoolId) continue;
+
+      const title = `Run has no bus or driver`;
+      const message =
+        `"${run.name}" cannot run on ${firstDate} — ` +
+        `${!run.busId && !run.driverId ? "no bus and no driver are" : !run.busId ? "no bus is" : "no driver is"} assigned. ` +
+        `No trip will be created until one is.`;
+
+      const admins = await prisma.user.findMany({
+        where: { schoolId, role: { in: ["SCHOOL_ADMIN", "SUPER_ADMIN"] } },
+        select: { id: true },
+      });
+      if (admins.length === 0) continue;
+
+      const already = await prisma.notification.findFirst({
+        where: { userId: { in: admins.map((a) => a.id) }, message, createdAt: { gte: since } },
+        select: { id: true },
+      });
+      if (already) continue;
+
+      await prisma.notification.createMany({
+        data: admins.map((a) => ({ userId: a.id, title, message, type: "SYSTEM" })),
+      });
+      logger?.info({ runId: run.id, schoolId, admins: admins.length }, "Warned school about a crewless run");
+    }
+  } catch (err) {
+    // Never let the alert path fail the materialisation it is reporting on.
+    logger?.error({ err: err.message }, "Failed to warn about crewless runs");
+  }
 }
 
 module.exports = { materialiseRuns, startOfLocalDay, addDays };

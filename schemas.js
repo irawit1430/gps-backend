@@ -308,8 +308,12 @@ exports.updateRun = exports.createRun.partial().extend({
   active: z.boolean().optional(),
 });
 
+// Dates, plural, applied atomically. Exam periods are weeks, not days: one POST per
+// date means a five-day exam week is five calls and twenty runs is a hundred, and a
+// partially applied week leaves some days shifted and some not with nothing to show
+// which. Same one-at-a-time trap as stop assignment and card rotation.
 exports.runException = z.object({
-  date: DATE_ONLY,
+  dates: z.array(DATE_ONLY).min(1).max(90),
   type: z.enum(['ADDED', 'REMOVED']),
   departure: HHMM.optional().nullable(),
   reason: z.string().max(200).optional().nullable(),
