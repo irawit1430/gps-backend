@@ -29,7 +29,7 @@ describe('GET /api/schools/:schoolId/students', () => {
     prisma.student.findMany.mockResolvedValue([
       {
         id: 1, rfidTag: 'TAG1', name: 'Student 1', grade: '5th', photoUrl: 'url1',
-        guardianPhone: null, parent: null, routeMappings: [],
+        guardianPhone: null, parent: null, qrCodeImported: false, routeMappings: [],
       },
     ]);
 
@@ -39,7 +39,7 @@ describe('GET /api/schools/:schoolId/students', () => {
     expect(res.body).toEqual([
       {
         id: 1, rfidTag: 'TAG1', name: 'Student 1', grade: '5th', photoUrl: 'url1',
-        guardianPhone: null, parentName: null, parentPhone: null,
+        guardianPhone: null, parentName: null, parentPhone: null, qrCodeImported: false,
         assignedRoute: 'Unassigned', routeStopName: 'Unassigned',
         boardingStatus: null, lastCheckIn: null,
       },

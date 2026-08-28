@@ -1026,6 +1026,14 @@ app.get('/api/schools/:schoolId/students', requireTenant('schoolId'), async (req
           // which is not the same as absent and must not render as it.
           boardingStatus: a?.type || null,
           lastCheckIn: a?.timestamp?.toISOString() || null,
+          // Whether this child already holds a card the school issued itself. The
+          // print screen filters on this BEFORE calling /qr-cards, so it has to be
+          // here and not only on that response — otherwise the exclusion reads
+          // undefined for everyone, silently selects the whole school, and a school
+          // with 40 imported codes prints 40 unnecessary cards. Harmless while the
+          // flag is false for everyone; wrong the day imports land, and quiet either
+          // way. The token itself is never on this payload.
+          qrCodeImported: s.qrCodeImported,
         };
       })
     );
