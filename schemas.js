@@ -285,3 +285,45 @@ exports.updateMe = z.object({
 exports.fcmToken = z.object({
   fcmToken: z.string().min(10).max(4096).nullable(),
 });
+
+// ─── Run scheduler ────────────────────────────────────────
+const HHMM = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'expected HH:MM');
+const DATE_ONLY = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'expected YYYY-MM-DD');
+
+exports.createRun = z.object({
+  name: z.string().min(1).max(120),
+  direction: z.enum(['TO_SCHOOL', 'FROM_SCHOOL']),
+  // Wall clock, not a timestamp. A recurring departure is a time of day.
+  departure: HHMM,
+  busId: uuid.optional().nullable(),
+  driverId: uuid.optional().nullable(),
+  mon: z.boolean().optional(), tue: z.boolean().optional(), wed: z.boolean().optional(),
+  thu: z.boolean().optional(), fri: z.boolean().optional(), sat: z.boolean().optional(),
+  sun: z.boolean().optional(),
+  startDate: DATE_ONLY,
+  endDate: DATE_ONLY,
+});
+
+exports.updateRun = exports.createRun.partial().extend({
+  active: z.boolean().optional(),
+});
+
+exports.runException = z.object({
+  date: DATE_ONLY,
+  type: z.enum(['ADDED', 'REMOVED']),
+  departure: HHMM.optional().nullable(),
+  reason: z.string().max(200).optional().nullable(),
+});
+
+exports.calendarDay = z.object({
+  // Explicit rather than "omit schoolId for platform-wide". Omission meaning maximum
+  // blast radius is backwards: a dropped key would silently escalate one school's
+  // closure into every school's. This way the accident is a 400.
+  scope: z.enum(['PLATFORM', 'SCHOOL']),
+  schoolId: uuid.optional().nullable(),
+  date: DATE_ONLY,
+  reason: z.string().min(1).max(200),
+}).refine((v) => v.scope === 'PLATFORM' || Boolean(v.schoolId), {
+  message: 'schoolId is required when scope is SCHOOL',
+  path: ['schoolId'],
+});

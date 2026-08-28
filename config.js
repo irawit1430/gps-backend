@@ -42,6 +42,12 @@ const schema = z.object({
   // Days of GpsLog to keep. 0 disables pruning entirely.
   GPS_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(30),
 
+  // How many days ahead to materialise trips from runs. 0 disables the scheduler
+  // entirely, which is the state every school is in until runs are created for it.
+  // Short window on purpose: the trip table stays small, a schedule change takes
+  // effect almost immediately, and an edit never has to rewrite months of rows.
+  RUN_MATERIALISER_DAYS: z.coerce.number().int().nonnegative().default(3),
+
   RUN_MIGRATIONS: boolish.default('0'),
   ALLOW_SEED: boolish.default('0'),
   SEED_ADMIN_EMAIL: z.string().email().optional().or(z.literal('').transform(() => undefined)),

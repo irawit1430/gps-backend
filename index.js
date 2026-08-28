@@ -24,6 +24,7 @@ const { startTcpServer } = require('./tcp-server.js');
 const { flushFirestore } = require('./firebase.js');
 const { emitToSchool } = require('./middleware/socketAuth');
 const busPresence = require('./busPresence');
+const { materialiseRuns } = require('./materialiseRuns');
 
 const httpServer = server.listen(config.PORT, () => {
   logger.info({ port: config.PORT }, 'HTTP + Socket.IO server listening');
@@ -67,6 +68,35 @@ setInterval(async () => {
     logger.error({err}, 'Stale bus sweep failed');
   }
 }, 5 * 60 * 1000);
+
+// Materialise runs into trips.
+//
+// In-process for the same reason retention is: a cron installed by hand is a step
+// somebody can skip, mistype, or install under an account that does not exist — which
+// is exactly how GpsLog went unpruned for the life of this deployment.
+//
+// Every four hours rather than nightly. A single overnight pass means one failure
+// costs a school its morning with nobody awake to notice; repeating through the day
+// means a missed run is picked up long before anyone needs it, and re-running is free
+// because the unique constraint makes it a no-op.
+if (config.RUN_MATERIALISER_DAYS > 0) {
+  const runMaterialiser = async () => {
+    const res = await materialiseRuns(prisma, {
+      days: config.RUN_MATERIALISER_DAYS,
+      logger,
+    });
+    if (res.created > 0 || res.crewless > 0) {
+      logger.info(res, 'Materialised runs');
+    }
+  };
+
+  // Once at boot as well as on the interval: a VM that was down overnight should
+  // catch up when it comes back, not wait for the next tick.
+  runMaterialiser().catch((err) => logger.error({ err }, 'Run materialiser failed at boot'));
+  setInterval(() => {
+    runMaterialiser().catch((err) => logger.error({ err }, 'Run materialiser failed'));
+  }, 4 * 60 * 60 * 1000);
+}
 
 // GpsLog retention.
 //

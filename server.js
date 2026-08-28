@@ -295,6 +295,7 @@ const liveFixGuard = require('./liveFixGuard');
 const busPresence = require('./busPresence');
 const mailer = require('./mailer');
 const gpsWriteGate = require('./gpsWriteGate');
+const { resolveRunOnDate, departureAt, ymd } = require('./runSchedule');
 app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => next(), // placeholder to satisfy ordering
   // deferred HMAC attach after prisma exists:
   async (req, res, next) => (await telemetryHmac(prisma))(req, res, next),
@@ -1413,6 +1414,399 @@ app.post('/api/student-route-mappings',
     }
   }
 );
+
+// ─── Runs (the recurring schedule) ─────────────────────────
+
+// A run belongs to a route and the route carries the school, so tenancy is checked by
+// walking to the route rather than trusting anything in the request.
+async function loadRunForCaller(req, res) {
+  const run = await prisma.run.findUnique({
+    where: { id: req.params.runId },
+    include: { route: { select: { schoolId: true } } },
+  });
+  if (!run) { res.status(404).json({ error: 'Run not found' }); return null; }
+  if (req.user.role !== 'SUPER_ADMIN' && run.route.schoolId !== req.user.schoolId) {
+    res.status(403).json({ error: 'Forbidden' }); return null;
+  }
+  return run;
+}
+
+// Dates arrive as YYYY-MM-DD and are calendar days in the school's timezone, which is
+// the server's — TZ is pinned in ecosystem.config.js precisely so this is a local day
+// and not a UTC one beginning at 05:30 IST.
+function dateOnly(str) {
+  const d = new Date(`${str}T00:00:00`);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+// Applies an exception to a trip that already exists for that date, and reports
+// whether it changed anything so the client can say so rather than assume.
+//
+// Exceptions and closures reach FORWARD into trips that already exist; the
+// materialiser never reaches backward. Without this an override saved for a date
+// inside the materialisation window does nothing at all — the trip departs at the old
+// time and the preview confidently shows the new one.
+async function applyExceptionToExistingTrip(run, date, exception, log) {
+  const trip = await prisma.trip.findUnique({
+    where: { runId_serviceDate: { runId: run.id, serviceDate: date } },
+  });
+  if (!trip) return false;
+  // A trip a human has already adjusted outranks a pattern-level exception. Most
+  // specific intent wins, same precedence the three calendar layers follow.
+  if (trip.isOverridden) return false;
+  if (['COMPLETED', 'CANCELLED'].includes(trip.status)) return false;
+
+  if (exception.type === 'REMOVED') {
+    await prisma.trip.update({ where: { id: trip.id }, data: { status: 'CANCELLED' } });
+    log?.info({ tripId: trip.id, runId: run.id }, 'Exception cancelled an existing trip');
+    return true;
+  }
+  if (exception.departure) {
+    await prisma.trip.update({
+      where: { id: trip.id },
+      data: { scheduledStart: departureAt(date, exception.departure) },
+    });
+    log?.info({ tripId: trip.id, runId: run.id }, 'Exception shifted an existing trip');
+    return true;
+  }
+  return false;
+}
+
+app.get('/api/routes/:routeId/runs', async (req, res) => {
+  try {
+    const route = await prisma.route.findUnique({
+      where: { id: req.params.routeId }, select: { schoolId: true },
+    });
+    if (!route) return res.status(404).json({ error: 'Route not found' });
+    if (req.user.role !== 'SUPER_ADMIN' && route.schoolId !== req.user.schoolId) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const runs = await prisma.run.findMany({
+      where: { routeId: req.params.routeId },
+      orderBy: [{ direction: 'asc' }, { departure: 'asc' }],
+    });
+    res.json(runs.map((r) => ({ ...r, startDate: ymd(r.startDate), endDate: ymd(r.endDate) })));
+  } catch (err) {
+    req.log.error({ err }, 'list runs failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.post('/api/routes/:routeId/runs',
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  validate({ body: S.createRun }),
+  async (req, res) => {
+    try {
+      const route = await prisma.route.findUnique({
+        where: { id: req.params.routeId }, select: { schoolId: true },
+      });
+      if (!route) return res.status(404).json({ error: 'Route not found' });
+      if (req.user.role !== 'SUPER_ADMIN' && route.schoolId !== req.user.schoolId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      const { startDate, endDate, ...rest } = req.body;
+      if (dateOnly(endDate) < dateOnly(startDate)) {
+        return res.status(400).json({ error: 'endDate is before startDate' });
+      }
+      const run = await prisma.run.create({
+        data: { ...rest, routeId: req.params.routeId, startDate: dateOnly(startDate), endDate: dateOnly(endDate) },
+      });
+      res.json({ ...run, startDate: ymd(run.startDate), endDate: ymd(run.endDate) });
+    } catch (err) {
+      req.log.error({ err }, 'create run failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
+app.put('/api/runs/:runId',
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  validate({ body: S.updateRun }),
+  async (req, res) => {
+    try {
+      if (!(await loadRunForCaller(req, res))) return;
+      const { startDate, endDate, ...rest } = req.body;
+      const data = { ...rest };
+      if (startDate) data.startDate = dateOnly(startDate);
+      if (endDate) data.endDate = dateOnly(endDate);
+      // Edits apply from the next materialisation. Trips already generated are
+      // snapshots: the per-trip edit screen owns today, and a run edit silently
+      // rewriting a trip somebody adjusted at 07:00 would fight that control with no
+      // indication why it snapped back.
+      const run = await prisma.run.update({ where: { id: req.params.runId }, data });
+      res.json({ ...run, startDate: ymd(run.startDate), endDate: ymd(run.endDate) });
+    } catch (err) {
+      req.log.error({ err }, 'update run failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
+// Soft delete. Hard-deleting a run with materialised trips behind it either orphans
+// their history or cascades it away, and both are worse than a flag.
+app.delete('/api/runs/:runId', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), async (req, res) => {
+  try {
+    if (!(await loadRunForCaller(req, res))) return;
+    await prisma.run.update({ where: { id: req.params.runId }, data: { active: false } });
+    res.json({ success: true, active: false });
+  } catch (err) {
+    req.log.error({ err }, 'deactivate run failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.get('/api/runs/:runId/exceptions', async (req, res) => {
+  try {
+    if (!(await loadRunForCaller(req, res))) return;
+    const rows = await prisma.runException.findMany({
+      where: { runId: req.params.runId }, orderBy: { date: 'asc' },
+    });
+    res.json(rows.map((r) => ({ ...r, date: ymd(r.date) })));
+  } catch (err) {
+    req.log.error({ err }, 'list run exceptions failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.post('/api/runs/:runId/exceptions',
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  validate({ body: S.runException }),
+  async (req, res) => {
+    try {
+      const run = await loadRunForCaller(req, res);
+      if (!run) return;
+      const date = dateOnly(req.body.date);
+      const payload = {
+        type: req.body.type,
+        departure: req.body.departure ?? null,
+        reason: req.body.reason ?? null,
+      };
+      const row = await prisma.runException.upsert({
+        where: { runId_date: { runId: run.id, date } },
+        update: payload,
+        create: { runId: run.id, date, ...payload },
+      });
+      const applied = await applyExceptionToExistingTrip(run, date, req.body, req.log);
+      res.json({ ...row, date: ymd(row.date), appliedToExistingTrip: applied });
+    } catch (err) {
+      req.log.error({ err }, 'save run exception failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
+app.delete('/api/exceptions/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), async (req, res) => {
+  try {
+    const ex = await prisma.runException.findUnique({
+      where: { id: req.params.id },
+      include: { run: { include: { route: { select: { schoolId: true } } } } },
+    });
+    if (!ex) return res.status(404).json({ error: 'Exception not found' });
+    if (req.user.role !== 'SUPER_ADMIN' && ex.run.route.schoolId !== req.user.schoolId) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    await prisma.runException.delete({ where: { id: req.params.id } });
+    res.status(204).send();
+  } catch (err) {
+    req.log.error({ err }, 'delete exception failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ─── Shared calendar ──────────────────────────────────────
+
+// What closing this date would actually do. The SAME function serves the dry run and
+// the write, so a preview cannot disagree with the outcome — a preview that hands an
+// operator a comforting wrong number is worse than no preview.
+async function closureImpact(schoolId, date) {
+  const routeScope = schoolId ? { schoolId } : {};
+  const [schools, tripCount, runCount] = await Promise.all([
+    prisma.school.findMany({ where: schoolId ? { id: schoolId } : {}, select: { id: true, name: true } }),
+    prisma.trip.count({
+      where: {
+        serviceDate: date,
+        status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] },
+        ...(schoolId ? { route: { schoolId } } : {}),
+      },
+    }),
+    prisma.run.count({
+      where: { active: true, startDate: { lte: date }, endDate: { gte: date }, route: routeScope },
+    }),
+  ]);
+  const d = new Date(date);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return {
+    date: ymd(date),
+    // A mistyped year lands on a different weekday. An operator who meant a Saturday
+    // and reads 'Friday' stops — cheaper and more reliable than any warning copy.
+    weekday: d.toLocaleDateString('en-GB', { weekday: 'long' }),
+    isPast: d < today,
+    schools,
+    schoolCount: schools.length,
+    // Runs that WOULD have operated, regardless of the materialisation horizon.
+    // tripCount is rows that exist right now and will be cancelled — for a holiday
+    // marked weeks out that is legitimately zero, which must not read as no impact.
+    runCount,
+    tripCount,
+  };
+}
+
+app.get('/api/calendar', async (req, res) => {
+  try {
+    const from = req.query.from ? dateOnly(req.query.from) : (() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; })();
+    const to = req.query.to ? dateOnly(req.query.to) : new Date(from.getTime() + 90 * 86400000);
+    // Not merged: a super admin has to tell their own platform rows from a school's,
+    // and merged they are indistinguishable.
+    const where = { date: { gte: from, lte: to } };
+    if (req.user.role !== 'SUPER_ADMIN') {
+      where.OR = [{ schoolId: req.user.schoolId }, { schoolId: null }];
+    }
+    const rows = await prisma.calendarDay.findMany({
+      where, orderBy: { date: 'asc' },
+      include: { school: { select: { id: true, name: true } } },
+    });
+    res.json(rows.map((r) => ({ ...r, date: ymd(r.date) })));
+  } catch (err) {
+    req.log.error({ err }, 'list calendar failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.post('/api/calendar', validate({ body: S.calendarDay }), async (req, res) => {
+  try {
+    const platform = req.body.scope === 'PLATFORM';
+    // A platform closure shuts every school. That is the only new privilege this
+    // feature introduces, and it is enforced here rather than in a console — a school
+    // admin's token can reach this endpoint directly whatever any UI renders.
+    if (platform && req.user.role !== 'SUPER_ADMIN') {
+      return res.status(403).json({ error: 'Only a super admin can close a date for every school' });
+    }
+    const schoolId = platform ? null : req.body.schoolId;
+    if (!platform && req.user.role !== 'SUPER_ADMIN' && schoolId !== req.user.schoolId) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const date = dateOnly(req.body.date);
+    const impact = await closureImpact(schoolId, date);
+
+    if (req.query.dryRun) return res.json({ ...impact, applied: false });
+
+    const existing = await prisma.calendarDay.findFirst({ where: { schoolId, date } });
+    if (existing) return res.status(409).json({ error: 'That date is already closed', id: existing.id });
+
+    const row = await prisma.calendarDay.create({
+      data: { schoolId, date, closed: true, reason: req.body.reason },
+    });
+
+    // Cancel rather than delete, so reopening can restore — and record WHICH closure
+    // did it. Restoring everything CANCELLED for a date would resurrect trips a
+    // driver or a school had deliberately called off, dispatching a bus for a run
+    // somebody had explicitly stopped.
+    const { count } = await prisma.trip.updateMany({
+      where: {
+        serviceDate: date,
+        status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] },
+        ...(schoolId ? { route: { schoolId } } : {}),
+      },
+      data: { status: 'CANCELLED', cancelledByCalendarDayId: row.id },
+    });
+
+    res.json({ ...row, date: ymd(row.date), ...impact, tripsCancelled: count, applied: true });
+  } catch (err) {
+    req.log.error({ err }, 'create calendar day failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.delete('/api/calendar/:id', async (req, res) => {
+  try {
+    const row = await prisma.calendarDay.findUnique({ where: { id: req.params.id } });
+    if (!row) return res.status(404).json({ error: 'Calendar entry not found' });
+    if (!row.schoolId && req.user.role !== 'SUPER_ADMIN') {
+      return res.status(403).json({ error: 'Only a super admin can reopen a platform-wide closure' });
+    }
+    if (row.schoolId && req.user.role !== 'SUPER_ADMIN' && row.schoolId !== req.user.schoolId) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    // Reopening must RESTORE, not merely remove the row. Once the materialiser has
+    // run for that date, deleting the closure alone regenerates nothing: no trips, no
+    // error, no alarm — the undo path would itself be the outage it was undoing.
+    const { count } = await prisma.trip.updateMany({
+      where: { cancelledByCalendarDayId: row.id },
+      data: { status: 'PLANNED', cancelledByCalendarDayId: null },
+    });
+    await prisma.calendarDay.delete({ where: { id: row.id } });
+
+    res.json({ success: true, tripsRestored: count });
+  } catch (err) {
+    req.log.error({ err }, 'delete calendar day failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ─── Preview ──────────────────────────────────────────────
+//
+// A verdict per date, never a bare list of surviving days. 'Thursday is missing' and
+// 'Thursday is missing because Diwali' are different screens, and a bare list forces
+// the dashboard to re-derive the reason — which is the duplicated-logic trap that
+// lets a preview and reality drift apart. Both this and the materialiser call the
+// same resolver, so they cannot disagree.
+app.get('/api/routes/:routeId/schedule-preview', async (req, res) => {
+  try {
+    const route = await prisma.route.findUnique({
+      where: { id: req.params.routeId }, select: { schoolId: true },
+    });
+    if (!route) return res.status(404).json({ error: 'Route not found' });
+    if (req.user.role !== 'SUPER_ADMIN' && route.schoolId !== req.user.schoolId) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const days = Math.min(parseInt(req.query.days, 10) || 14, 60);
+    const from = req.query.from
+      ? dateOnly(req.query.from)
+      : (() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; })();
+    const dates = Array.from({ length: days }, (_, i) => {
+      const d = new Date(from); d.setDate(d.getDate() + i); return d;
+    });
+    const to = dates[dates.length - 1];
+
+    const runs = await prisma.run.findMany({ where: { routeId: req.params.routeId } });
+    const [exceptions, closures] = await Promise.all([
+      prisma.runException.findMany({
+        where: { runId: { in: runs.map((r) => r.id) }, date: { gte: from, lte: to } },
+      }),
+      prisma.calendarDay.findMany({
+        where: { date: { gte: from, lte: to }, OR: [{ schoolId: route.schoolId }, { schoolId: null }] },
+      }),
+    ]);
+    const exFor = new Map(exceptions.map((e) => [`${e.runId}::${ymd(e.date)}`, e]));
+    const closureFor = new Map();
+    for (const c of closures) closureFor.set(`${c.schoolId || '*'}::${ymd(c.date)}`, c);
+
+    res.json(
+      runs.map((run) => ({
+        runId: run.id,
+        name: run.name,
+        direction: run.direction,
+        dates: dates.map((date) => {
+          const day = ymd(date);
+          const v = resolveRunOnDate(
+            run,
+            date,
+            exFor.get(`${run.id}::${day}`) || null,
+            closureFor.get(`${route.schoolId}::${day}`) || closureFor.get(`*::${day}`) || null
+          );
+          return { date: day, status: v.status, reason: v.reason, departure: v.departure };
+        }),
+      }))
+    );
+  } catch (err) {
+    req.log.error({ err }, 'schedule preview failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 // ─── QR cards ─────────────────────────────────────────────
 //
