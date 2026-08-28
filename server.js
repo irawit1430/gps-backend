@@ -1366,6 +1366,118 @@ app.post('/api/student-route-mappings',
   }
 );
 
+// ─── QR cards ─────────────────────────────────────────────
+//
+// The ONLY response in this system that emits qrToken. Not the students list, not
+// search, not the CSV export, not any driver or parent payload. One response shape
+// means "who can see card credentials" has exactly one answer, and the day someone
+// adds a field to the students endpoint they cannot leak it by accident.
+//
+// POST with explicit ids rather than GET over a school: a GET returning every
+// credential would sit in browser history and in any school proxy log, and schools run
+// filtered, logged connections as a matter of course.
+app.post('/api/schools/:schoolId/qr-cards',
+  requireTenant('schoolId'),
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  validate({ body: S.qrCards }),
+  async (req, res) => {
+    try {
+      const students = await prisma.student.findMany({
+        // schoolId is not optional here even though the ids are explicit — without it
+        // an admin could print another school's cards by pasting their ids.
+        where: { id: { in: req.body.studentIds }, schoolId: req.params.schoolId },
+        select: {
+          id: true, name: true, grade: true, qrToken: true, qrCodeImported: true,
+          routeMappings: {
+            select: { routeStop: { select: { name: true } } },
+            orderBy: { createdAt: 'asc' },
+            take: 1,
+          },
+        },
+        orderBy: [{ grade: 'asc' }, { name: 'asc' }],
+      });
+
+      req.log.info(
+        { schoolId: req.params.schoolId, requested: req.body.studentIds.length, returned: students.length },
+        'qr cards issued'
+      );
+
+      res.json(
+        students.map((st) => ({
+          studentId: st.id,
+          name: st.name,
+          grade: st.grade,
+          routeStopName: st.routeMappings[0]?.routeStop?.name || null,
+          qrToken: st.qrToken,
+          // A school that brought its own codes already has cards for these children.
+          // Printing again hands a child a second, competing code.
+          qrCodeImported: st.qrCodeImported,
+        }))
+      );
+    } catch (err) {
+      req.log.error({ err }, 'qr cards failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
+// Resolve a scanned card that is not on the caller's own roster — the wrong-bus case.
+//
+// Rate limited and school-scoped rather than a free resolver, because imported codes
+// are roll and admission numbers: short, sequential and guessable. Without both, a
+// driver token would be an oracle for enumerating children.
+const qrLookupLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many card lookups — slow down' },
+});
+
+app.post('/api/qr-lookup',
+  authorizeRoles('DRIVER', 'SCHOOL_ADMIN', 'SUPER_ADMIN'),
+  qrLookupLimiter,
+  validate({ body: S.qrLookup }),
+  async (req, res) => {
+    try {
+      // A driver's school comes from their own record, never from the request.
+      const me = await prisma.user.findUnique({
+        where: { id: req.user.id },
+        select: { schoolId: true },
+      });
+      const schoolId = req.user.role === 'SUPER_ADMIN' ? undefined : me?.schoolId;
+      if (!schoolId && req.user.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
+      // qrToken is not stored hashed, so this compares in the application. At one
+      // school's roll it is a bounded scan; if that ever stops being true, store the
+      // hash as a column and index it rather than widening this.
+      const students = await prisma.student.findMany({
+        where: schoolId ? { schoolId } : {},
+        select: { id: true, name: true, grade: true, photoUrl: true, schoolId: true, qrToken: true },
+      });
+      const match = students.find((st) => st.qrToken && qrHash(st.qrToken) === req.body.qrHash);
+
+      if (!match) {
+        // Deliberately the same answer for "no such card" and "not this school": a
+        // driver must not be able to probe which codes exist elsewhere.
+        return res.status(404).json({ error: 'No student matches this card' });
+      }
+
+      res.json({
+        studentId: match.id,
+        name: match.name,
+        grade: match.grade,
+        photoUrl: match.photoUrl,
+      });
+    } catch (err) {
+      req.log.error({ err }, 'qr lookup failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
 app.get('/api/schools/:schoolId/attendance/today', requireTenant('schoolId'), async (req, res) => {
   try {
     const today = new Date();
@@ -2278,13 +2390,30 @@ app.post('/api/attendance', validate({ body: S.attendance }), async (req, res) =
     // the office and not for the driver: once a driver has ended a run, a missed scan
     // is a records question, and records belong to the school.
     const isAdmin = req.user.role !== 'DRIVER';
+
+    // A queued scan flushed after the trip ended is a legitimate scan that arrived
+    // late, not an invalid one — and the end of a route is exactly where signal dies,
+    // so this is the common case rather than the edge. Judge it by when it happened.
+    const occurredAt = req.body.occurredAt ? new Date(req.body.occurredAt) : new Date();
+    // A phone with a wrong clock must not be able to file boardings into the future.
+    if (occurredAt.getTime() > Date.now() + 60_000) {
+      return res.status(400).json({ error: 'Scan time is in the future' });
+    }
+    const duringTheRun = Boolean(
+      trip.startTime &&
+        occurredAt >= trip.startTime &&
+        (!trip.endTime || occurredAt <= trip.endTime)
+    );
+
     if (trip.status === 'CANCELLED') {
       return res.status(409).json({ error: 'This trip was cancelled — nobody travelled on it' });
     }
     if (trip.status === 'PLANNED') {
       return res.status(409).json({ error: 'Start the trip before marking attendance' });
     }
-    if (trip.status === 'COMPLETED' && !isAdmin) {
+    // Refuse a driver scanning a trip that is over — unless the scan itself happened
+    // while it was running, in which case it is a late flush and belongs in the record.
+    if (trip.status === 'COMPLETED' && !isAdmin && !duringTheRun) {
       return res.status(409).json({ error: 'This trip has ended. Ask the school office to correct the record' });
     }
 
@@ -2319,7 +2448,7 @@ app.post('/api/attendance', validate({ body: S.attendance }), async (req, res) =
     }
 
     const log = await prisma.attendanceLog.create({
-      data: { studentId: req.body.studentId, tripId: req.body.tripId, type: req.body.type },
+      data: { studentId: req.body.studentId, tripId: req.body.tripId, type: req.body.type, timestamp: occurredAt },
     });
 
     if (student.parentId) {

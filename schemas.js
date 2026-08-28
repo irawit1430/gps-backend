@@ -127,6 +127,12 @@ exports.attendance = z.object({
   studentId: uuid,
   tripId: uuid,
   type: z.enum(ATTENDANCE_TYPE),
+  // When the scan actually happened, for anything replayed off the offline queue.
+  // Without it a scan taken at 07:30 and flushed at 08:30 is recorded as 08:30, and
+  // once the trip has ended it is refused outright — losing a boarding that really
+  // happened, at the end of a route, which is exactly where signal dies. Omit it and
+  // the server stamps receipt time, as before.
+  occurredAt: z.string().datetime().optional(),
 });
 
 exports.leaveApp = z.object({
@@ -192,6 +198,18 @@ exports.sos = z.object({
   message: z.string().max(500).optional().nullable(),
   tripId: uuid.optional().nullable(),
   type: z.enum(EMERGENCY_TYPE).optional(),
+});
+
+// Card printing takes explicit ids rather than a whole school: this is the only
+// response in the system that emits qrToken, and a GET returning everything would sit
+// in browser history and any school proxy log. 600 is a full school in one request.
+exports.qrCards = z.object({
+  studentIds: z.array(uuid).min(1).max(600),
+});
+
+// Resolving a scanned card that is not on the driver's own roster.
+exports.qrLookup = z.object({
+  qrHash: z.string().regex(/^[0-9a-f]{64}$/, 'expected a sha256 hex digest'),
 });
 
 exports.mapping = z.object({

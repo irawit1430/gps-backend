@@ -92,3 +92,70 @@ describe('POST /api/attendance — the trip has to be happening', () => {
     expect((await post(admin)).status).toBe(200);
   });
 });
+
+// The end of a route is where signal dies, so a scan taken offline and flushed after
+// the trip ended is the common case, not an edge one. Refusing it loses a boarding
+// that really happened — and the driver never finds out, because the queue drops a
+// permanent 4xx silently.
+describe('POST /api/attendance — late flush from the offline queue', () => {
+  const startedAt = new Date('2026-08-28T07:00:00.000Z');
+  const endedAt = new Date('2026-08-28T08:21:00.000Z');
+
+  const finishedTrip = {
+    id: TRIP, status: 'COMPLETED', driverId: 'driver-1',
+    startTime: startedAt, endTime: endedAt, route: { schoolId: 'school-1' },
+  };
+
+  const postAt = (who, occurredAt) =>
+    request(app)
+      .post('/api/attendance')
+      .set('Authorization', `Bearer ${who}`)
+      .send({ studentId: STUDENT, tripId: TRIP, type: 'BOARDED', occurredAt });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    prisma.student.findUnique.mockResolvedValue({
+      id: STUDENT, schoolId: 'school-1', name: 'Asha', parentId: null, parent: null,
+    });
+    prisma.attendanceLog.findFirst.mockResolvedValue(null);
+    prisma.attendanceLog.create.mockResolvedValue({ id: 'log-1', type: 'BOARDED' });
+    prisma.trip.findUnique.mockResolvedValue(finishedTrip);
+  });
+
+  it('accepts a scan that happened while the trip was running, flushed after it ended', async () => {
+    const res = await postAt(driver, '2026-08-28T07:30:00.000Z');
+
+    expect(res.status).toBe(200);
+    // and records when it happened, not when it arrived
+    expect(prisma.attendanceLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ timestamp: new Date('2026-08-28T07:30:00.000Z') }),
+      })
+    );
+  });
+
+  it('still refuses a scan taken after the trip had already ended', async () => {
+    const res = await postAt(driver, '2026-08-28T09:00:00.000Z');
+    expect(res.status).toBe(409);
+    expect(prisma.attendanceLog.create).not.toHaveBeenCalled();
+  });
+
+  it('still refuses a scan taken before the trip departed', async () => {
+    expect((await postAt(driver, '2026-08-28T06:30:00.000Z')).status).toBe(409);
+  });
+
+  // A phone with a wrong clock must not be able to file boardings into the future.
+  it('refuses a scan time in the future', async () => {
+    const res = await postAt(driver, new Date(Date.now() + 3600_000).toISOString());
+    expect(res.status).toBe(400);
+    expect(prisma.attendanceLog.create).not.toHaveBeenCalled();
+  });
+
+  it('omitting occurredAt still stamps receipt time, as before', async () => {
+    prisma.trip.findUnique.mockResolvedValue(tripInState('ON_SCHEDULE'));
+    const res = await post(driver);
+    expect(res.status).toBe(200);
+    const data = prisma.attendanceLog.create.mock.calls[0][0].data;
+    expect(data.timestamp).toBeInstanceOf(Date);
+  });
+});
