@@ -199,6 +199,12 @@ model Student {
   qrToken        String?
   // True when the school brought its own code, so no card needs printing for them.
   qrCodeImported Boolean @default(false)
+  // Stamped by the card-printing endpoint as a side effect of printing, so it cannot
+  // be forgotten the way a checkbox can. Two readers: the office needs it to reprint
+  // one lost card instead of reissuing 75 sheets, and the driver app needs it to know
+  // a card physically exists — a token in the database is not a card in a child's
+  // hand, and backfilling tokens made every roster claim otherwise.
+  qrCardPrintedAt DateTime?
   parentId  String?
   parent    User?    @relation("ParentStudents", fields: [parentId], references: [id])
   createdAt DateTime @default(now())

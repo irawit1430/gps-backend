@@ -1405,6 +1405,22 @@ app.post('/api/schools/:schoolId/qr-cards',
         orderBy: [{ grade: 'asc' }, { name: 'asc' }],
       });
 
+      // Stamp what we just handed out. Printing is the act that creates a card, so
+      // recording it here means nobody has to remember to tick anything — and it is
+      // the only honest signal that a card exists in a child's hand rather than a
+      // token existing in a table.
+      //
+      // Deliberately not conditional on the sheet actually reaching paper: we cannot
+      // observe a printer. "These were issued for printing" is what we know, and
+      // reissuing is cheap, so erring towards marking them is the right way round.
+      const issuedAt = new Date();
+      if (students.length > 0) {
+        await prisma.student.updateMany({
+          where: { id: { in: students.map((st) => st.id) } },
+          data: { qrCardPrintedAt: issuedAt },
+        });
+      }
+
       req.log.info(
         { schoolId: req.params.schoolId, requested: req.body.studentIds.length, returned: students.length },
         'qr cards issued'
@@ -1420,6 +1436,7 @@ app.post('/api/schools/:schoolId/qr-cards',
           // A school that brought its own codes already has cards for these children.
           // Printing again hands a child a second, competing code.
           qrCodeImported: st.qrCodeImported,
+          printedAt: issuedAt.toISOString(),
         }))
       );
     } catch (err) {
@@ -1645,9 +1662,45 @@ app.get('/api/parents/:parentId/students',
           },
         },
       });
+      // Today's boarding state and approved leave, in two bounded queries across this
+      // parent's children. The home screen said "On board" off a bus telemetry packet
+      // because it had nothing else to read — a child at home sick showed as on board
+      // while the bus ran its route. These are what it should have been reading.
+      const startOfToday = new Date();
+      startOfToday.setHours(0, 0, 0, 0);
+      const endOfToday = new Date(startOfToday);
+      endOfToday.setHours(23, 59, 59, 999);
+      const childIds = students.map((s) => s.id);
+
+      const [todaysLogs, todaysLeave] = await Promise.all([
+        childIds.length
+          ? prisma.attendanceLog.findMany({
+              where: { studentId: { in: childIds }, timestamp: { gte: startOfToday } },
+              orderBy: { timestamp: 'desc' },
+              select: { studentId: true, type: true, timestamp: true, tripId: true, source: true },
+            })
+          : [],
+        childIds.length
+          ? prisma.leaveApplication.findMany({
+              where: {
+                studentId: { in: childIds },
+                status: 'APPROVED',
+                startDate: { lte: endOfToday },
+                endDate: { gte: startOfToday },
+              },
+              select: { studentId: true },
+            })
+          : [],
+      ]);
+
+      const latestScan = new Map();
+      for (const l of todaysLogs) if (!latestScan.has(l.studentId)) latestScan.set(l.studentId, l);
+      const onLeaveToday = new Set(todaysLeave.map((l) => l.studentId));
+
       const formatted = students.map((s) => {
         const stop = s.routeMappings[0]?.routeStop || null;
         const t = stop?.route?.trips[0] || null;
+        const scan = latestScan.get(s.id) || null;
         let tripStatus = 'NOT_STARTED';
         if (t) {
           if (t.status === 'ON_SCHEDULE') tripStatus = 'IN_TRANSIT';
@@ -1662,6 +1715,18 @@ app.get('/api/parents/:parentId/students',
           driverName: t?.driver?.name || 'Unassigned',
           licensePlate: t?.bus?.licensePlate || 'Unassigned',
           tripStatus,
+          // Where the CHILD is, as opposed to where the bus is. null status means no
+          // scan today — genuinely unknown, and not the same as absent. The app must
+          // render unknown as unknown; that distinction is the whole point.
+          attendance: {
+            status: scan?.type || null,
+            at: scan?.timestamp?.toISOString() || null,
+            tripId: scan?.tripId || null,
+            source: scan?.source || null,
+          },
+          // Approved leave covering today. A child on leave who never boards is not a
+          // no-show, and must not read as one on any screen.
+          onLeave: onLeaveToday.has(s.id),
           busId: t?.busId || null,
           tripId: t?.id || null,
           // The child's own stop — needed to draw the pin and to measure an ETA against.
@@ -1790,7 +1855,10 @@ app.get('/api/parents/:parentId/students/:studentId/attendance',
           where: { studentId: student.id },
           orderBy: { timestamp: 'desc' },
           take: limit,
-          select: { id: true, type: true, timestamp: true, tripId: true },
+          // `source` belongs here rather than only on the card's latest-scan object:
+          // this is the screen where a school reconstructs a disputed day, and
+          // "scanned" versus "asserted by the office" is precisely what is in question.
+          select: { id: true, type: true, timestamp: true, tripId: true, source: true },
         }),
         prisma.studentRouteMapping.findFirst({
           where: { studentId: student.id },
@@ -1806,6 +1874,7 @@ app.get('/api/parents/:parentId/students/:studentId/attendance',
           id: l.id,
           type: l.type,
           tripId: l.tripId,
+          source: l.source,
           timestamp: l.timestamp,
           createdAt: l.timestamp,
           stopName,
@@ -2151,7 +2220,7 @@ app.get('/api/drivers/:driverId/trips',
                 include: {
                   studentMappings: {
                     include: {
-                      student: { select: { id: true, name: true, rfidTag: true, grade: true, photoUrl: true, guardianPhone: true, qrToken: true } },
+                      student: { select: { id: true, name: true, rfidTag: true, grade: true, photoUrl: true, guardianPhone: true, qrToken: true, qrCardPrintedAt: true } },
                     },
                   },
                 },
@@ -2215,7 +2284,12 @@ app.get('/api/drivers/:driverId/trips',
           for (const m of stop.studentMappings || []) {
             if (!m.student) continue;
             m.student.qrHash = qrHash(m.student.qrToken);
+            // A token exists for every child; a CARD exists only once the office has
+            // printed one. The scanner gates on this, not on the hash — otherwise it
+            // opens for a school that has printed nothing and refuses every child.
+            m.student.hasCard = Boolean(m.student.qrCardPrintedAt);
             delete m.student.qrToken;
+            delete m.student.qrCardPrintedAt;
           }
         }
       }
@@ -2432,6 +2506,34 @@ app.post('/api/attendance', validate({ body: S.attendance }), async (req, res) =
     if (!student) return res.status(404).json({ error: 'Student not found' });
     if (student.schoolId !== trip.route.schoolId) return res.status(400).json({ error: 'Student not on this trip route' });
 
+    // A child on approved leave is not a no-show. Recording one would tell a family
+    // their child failed to board on a day the school had already agreed they would
+    // not — and because every planned absence would generate one, the alert becomes
+    // noise inside a week and stops being read at all. That would destroy the only
+    // notification in this product with a window in which a parent can still act.
+    if (req.body.type === 'NO_SHOW') {
+      const startOfDay = new Date(occurredAt);
+      startOfDay.setHours(0, 0, 0, 0);
+      const endOfDay = new Date(startOfDay);
+      endOfDay.setHours(23, 59, 59, 999);
+
+      const onLeave = await prisma.leaveApplication.findFirst({
+        where: {
+          studentId: req.body.studentId,
+          status: 'APPROVED',
+          startDate: { lte: endOfDay },
+          endDate: { gte: startOfDay },
+        },
+        select: { id: true },
+      });
+      if (onLeave) {
+        return res.status(409).json({
+          error: 'This child is on approved leave today — not a no-show',
+          onLeave: true,
+        });
+      }
+    }
+
     // Idempotency for the driver app's offline check-in queue: a replayed scan must
     // not create a second row or fire a second notification to the parent. Callers
     // opt in with an Idempotency-Key header; the same scan (student + trip + type)
@@ -2455,18 +2557,39 @@ app.post('/api/attendance', validate({ body: S.attendance }), async (req, res) =
       if (existing) return res.status(200).json({ ...existing, duplicate: true });
     }
 
+    // MANUAL is an office correction. It asserts the same fact a scan does, so it
+    // belongs in the record — but the parent stopped worrying hours ago, and pushing
+    // "your child boarded" at 15:02 about a 07:38 boarding would manufacture exactly
+    // the alarm this product exists to prevent.
+    const source = isAdmin && req.body.source === 'MANUAL' ? 'MANUAL' : 'SCAN';
+
     const log = await prisma.attendanceLog.create({
-      data: { studentId: req.body.studentId, tripId: req.body.tripId, type: req.body.type, timestamp: occurredAt },
+      data: {
+        studentId: req.body.studentId,
+        tripId: req.body.tripId,
+        type: req.body.type,
+        timestamp: occurredAt,
+        source,
+      },
     });
 
-    if (student.parentId) {
-      const typeEnum = req.body.type === 'BOARDED' ? 'BOARDING' : 'ARRIVAL';
-      const title = `Student ${req.body.type}`;
-      const message = `${student.name} has been marked ${req.body.type}.`;
+    if (student.parentId && source === 'SCAN') {
+      const NOTIFY = {
+        BOARDED: { type: 'BOARDING', title: 'Boarded the bus', body: (n) => `${n} is on board.` },
+        ALIGHTED: { type: 'ARRIVAL', title: 'Off the bus', body: (n) => `${n} has been dropped off.` },
+        // The one message in this product a parent can still act on, so it is worded
+        // as the fact rather than as a status change, and never softened.
+        NO_SHOW: { type: 'SOS', title: 'Did not board', body: (n) => `${n} was not at the stop and did not board.` },
+      };
+      const spec = NOTIFY[req.body.type] || NOTIFY.BOARDED;
+      const typeEnum = spec.type;
+      const title = spec.title;
+      const message = spec.body(student.name);
 
       // The parent's toggles were being read and then ignored. `boarding` off means
-      // no row and no push for check-in/drop-off; absent means on.
-      if (wantsNotification(student.parent?.notificationSettings, 'boarding')) {
+      // no row and no push for check-in/drop-off; absent means on. A no-show is not a
+      // routine boarding update and is not silenced by that toggle.
+      if (req.body.type === 'NO_SHOW' || wantsNotification(student.parent?.notificationSettings, 'boarding')) {
         const notif = await prisma.notification.create({
           data: { userId: student.parentId, title, message, type: typeEnum }
         });

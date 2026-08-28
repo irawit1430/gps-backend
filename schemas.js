@@ -3,7 +3,11 @@ const { z } = require('zod');
 const ROLES = ['SUPER_ADMIN', 'SCHOOL_ADMIN', 'DRIVER', 'PARENT'];
 const TRIP_STATUS = ['PLANNED', 'ON_SCHEDULE', 'DELAYED', 'COMPLETED', 'CANCELLED'];
 const LEAVE_STATUS = ['PENDING', 'APPROVED', 'REJECTED'];
-const ATTENDANCE_TYPE = ['BOARDED', 'ALIGHTED'];
+// Must track the AttendanceType enum in schema.prisma. These are two copies of one
+// fact in two languages, which is the shape that produced six DELAYED bugs across
+// four codebases — a value added to the database and not here is accepted by Postgres
+// and rejected by validation, which reads as a client bug.
+const ATTENDANCE_TYPE = ['BOARDED', 'ALIGHTED', 'NO_SHOW'];
 const EMERGENCY_TYPE = ['DRIVER_SOS', 'HARDWARE_SOS', 'ADMIN_BROADCAST', 'DELAY'];
 
 const uuid = z.string().uuid();
@@ -133,6 +137,9 @@ exports.attendance = z.object({
   // happened, at the end of a route, which is exactly where signal dies. Omit it and
   // the server stamps receipt time, as before.
   occurredAt: z.string().datetime().optional(),
+  // Only honoured for an admin — a driver's scan is always a SCAN. MANUAL suppresses
+  // the parent notification, so a driver must not be able to record silently.
+  source: z.enum(['SCAN', 'MANUAL']).optional(),
 });
 
 exports.leaveApp = z.object({
