@@ -20,6 +20,19 @@ function qrHash(token) {
   return token ? crypto.createHash('sha256').update(token).digest('hex') : null;
 }
 
+// Migration 5 backfilled a token for every student that existed then, and nothing
+// generated one for anybody created afterwards — so every new admission was invisible
+// to the entire QR system: no card could be printed for them, and the driver roster
+// carried qrHash: null so a scan could never match. Worse, one such child in a print
+// selection fails the whole batch, because the card screen generates QR images from
+// the token client-side.
+//
+// Random rather than derived: an imported code may be a guessable roll number, but one
+// we generate should never be.
+function newQrToken() {
+  return crypto.randomBytes(16).toString('hex');
+}
+
 const config = require('./config');
 const logger = require('./logger');
 const S = require('./schemas');
@@ -1127,7 +1140,7 @@ async function studentCreateHandler(req, res) {
         parentId = parent.id;
       }
       const student = await tx.student.create({
-        data: { schoolId, rfidTag, name, grade: grade || 'General', guardianPhone: guardianPhone || null, parentId },
+        data: { schoolId, rfidTag, name, grade: grade || 'General', guardianPhone: guardianPhone || null, parentId, qrToken: newQrToken() },
       });
       return { student, generatedPassword };
     });
@@ -1296,6 +1309,7 @@ app.post('/api/schools/:schoolId/students/bulk', requireTenant('schoolId'), auth
             grade: st.grade,
             guardianPhone: st.guardianPhone || null,
             parentId: parent ? parent.id : null,
+            qrToken: newQrToken(),
           }
         });
         createdCount++;
