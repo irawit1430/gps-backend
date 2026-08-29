@@ -23,3 +23,7 @@
 **Vulnerability:** Parent-related endpoints (`/api/parents/:id/preferences`, `/api/parents/:parentId/*`) lacked explicit authorization checks to verify if the authenticated user owns the requested resource, allowing users to potentially access or modify data belonging to other parents.
 **Learning:** The global `authenticate` middleware only verifies token presence; it does not ensure resource ownership. Without explicit IDOR protection, authenticated users can access resources they shouldn't by modifying the resource ID in the request.
 **Prevention:** Always implement explicit authorization checks (e.g., using a custom `authorizeParentResource` middleware) for endpoints that access resources belonging to a specific user to prevent IDOR.
+## 2025-02-23 - Password Leak in Search API
+**Vulnerability:** The global search API (`/api/search`) was returning password hashes when querying for drivers.
+**Learning:** Returning entire user records, especially from endpoints that query sensitive tables like `User`, can lead to unintentional data exposure.
+**Prevention:** Always use explicit `select` clauses in database queries to fetch only the necessary fields, excluding sensitive data like `password`.

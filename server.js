@@ -1206,7 +1206,18 @@ app.get('/api/search', async (req, res) => {
         }),
         prisma.user.findMany({
           where: { schoolId, role: 'DRIVER', name: { contains: q } },
-          include: { driverTrips: { include: { bus: true } } },
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            role: true,
+            photoUrl: true,
+            notificationSettings: true,
+            schoolId: true,
+            createdAt: true,
+            updatedAt: true,
+            driverTrips: { include: { bus: true } }
+          },
           take: 10
         }),
         prisma.bus.findMany({
