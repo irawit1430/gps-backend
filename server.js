@@ -3300,9 +3300,22 @@ app.get('/api/devices', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), async (re
     const search = req.query.search || '';
     const where = {};
     if (search) where.OR = [{ licensePlate: { contains: search } }, { deviceId: { contains: search } }];
-    if (req.user.role === 'SCHOOL_ADMIN') where.schoolId = req.user.schoolId;
-    else if (req.query.schoolId !== undefined) where.schoolId = req.query.schoolId === 'null' ? null : req.query.schoolId;
-    if (req.query.assigned === 'false') where.schoolId = null;
+    if (req.user.role === 'SCHOOL_ADMIN') {
+      where.schoolId = req.user.schoolId;
+    } else {
+      if (req.query.schoolId !== undefined) where.schoolId = req.query.schoolId === 'null' ? null : req.query.schoolId;
+      // Unassigned devices are platform inventory, so listing them is a SUPER_ADMIN
+      // question. This line used to sit OUTSIDE the role branch and overwrite the
+      // scoping above it, so `?assigned=false` handed any school admin every
+      // unassigned device on the platform with its IMEI — the only confirmed
+      // cross-tenant read in the system. Read-only, since the update path re-checks
+      // ownership and an unassigned device fails that check, but a leak nonetheless.
+      //
+      // The super-admin console's Assign Device picker is the caller, and it was
+      // relying on its own client-side filter to make this safe. Scoping is not a
+      // client's job.
+      if (req.query.assigned === 'false') where.schoolId = null;
+    }
     if (req.query.status) where.status = req.query.status;
     const [devices, total] = await Promise.all([
       prisma.bus.findMany({ where, include: { school: { select: { name: true } } }, skip: (page - 1) * limit, take: limit, orderBy: { licensePlate: 'asc' } }),
