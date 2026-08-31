@@ -825,7 +825,7 @@ app.get(['/api/admin/stats', '/api/stats'], async (req, res) => {
 
 // --- 6. SUPER ADMIN DATA ---
 // School Management
-app.get('/api/schools', async (req, res) => {
+app.get('/api/schools', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 50;
@@ -850,7 +850,7 @@ app.get('/api/schools', async (req, res) => {
   }
 });
 
-app.get('/api/schools/:id', async (req, res) => {
+app.get('/api/schools/:id', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     const school = await prisma.school.findUnique({ where: { id: req.params.id } });
     if (!school) return res.status(404).json({ error: 'School not found' });
@@ -910,7 +910,7 @@ app.delete('/api/schools/:id', authorizeRoles('SUPER_ADMIN'), async (req, res) =
 });
 
 // Device Provisioning
-app.get('/api/devices', async (req, res) => {
+app.get('/api/devices', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 50;
@@ -946,7 +946,7 @@ app.get('/api/devices', async (req, res) => {
 });
 
 // Initial Map State & Real-time Status
-app.get('/api/devices/locations', async (req, res) => {
+app.get('/api/devices/locations', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     let where = {};
     if (req.query.schoolId) where.schoolId = req.query.schoolId;
@@ -977,7 +977,7 @@ app.get('/api/devices/locations', async (req, res) => {
   }
 });
 
-app.get('/api/devices/:id', async (req, res) => {
+app.get('/api/devices/:id', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     const device = await prisma.bus.findUnique({
       where: { id: req.params.id },
@@ -991,7 +991,7 @@ app.get('/api/devices/:id', async (req, res) => {
   }
 });
 
-app.post('/api/devices', async (req, res) => {
+app.post('/api/devices', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     const { deviceId, licensePlate, capacity, schoolId } = req.body;
     // Note: schoolId is now optional, so it can be unassigned (null)
@@ -1006,7 +1006,7 @@ app.post('/api/devices', async (req, res) => {
   }
 });
 
-app.put('/api/devices/:id', async (req, res) => {
+app.put('/api/devices/:id', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     const { deviceId, licensePlate, capacity, schoolId } = req.body;
     const device = await prisma.bus.update({
@@ -1020,7 +1020,7 @@ app.put('/api/devices/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/devices/:id', async (req, res) => {
+app.delete('/api/devices/:id', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
   try {
     await prisma.bus.delete({ where: { id: req.params.id } });
     io.emit('device_status_change', { deviceId: req.params.id, status: 'OFFLINE', message: 'Device decommissioned' });
