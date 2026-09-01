@@ -23,3 +23,7 @@
 **Vulnerability:** Parent-related endpoints (`/api/parents/:id/preferences`, `/api/parents/:parentId/*`) lacked explicit authorization checks to verify if the authenticated user owns the requested resource, allowing users to potentially access or modify data belonging to other parents.
 **Learning:** The global `authenticate` middleware only verifies token presence; it does not ensure resource ownership. Without explicit IDOR protection, authenticated users can access resources they shouldn't by modifying the resource ID in the request.
 **Prevention:** Always implement explicit authorization checks (e.g., using a custom `authorizeParentResource` middleware) for endpoints that access resources belonging to a specific user to prevent IDOR.
+## 2024-05-24 - Missing Route-Level RBAC Middleware
+**Vulnerability:** Authorization Bypass on Device Provisioning Endpoints
+**Learning:** The application uses manual, route-by-route application of the `authorizeRoles` middleware instead of applying it at a router level (e.g., `app.use('/api/devices', ...)`). This pattern makes it extremely easy to omit authorization checks on newly added endpoints, allowing any authenticated user to perform sensitive actions.
+**Prevention:** When adding new restricted resource endpoints, always verify that `authorizeRoles` is explicitly passed as a middleware, or consider grouping restricted routes under a common path protected by a single `app.use` statement.
