@@ -23,3 +23,7 @@
 **Vulnerability:** Parent-related endpoints (`/api/parents/:id/preferences`, `/api/parents/:parentId/*`) lacked explicit authorization checks to verify if the authenticated user owns the requested resource, allowing users to potentially access or modify data belonging to other parents.
 **Learning:** The global `authenticate` middleware only verifies token presence; it does not ensure resource ownership. Without explicit IDOR protection, authenticated users can access resources they shouldn't by modifying the resource ID in the request.
 **Prevention:** Always implement explicit authorization checks (e.g., using a custom `authorizeParentResource` middleware) for endpoints that access resources belonging to a specific user to prevent IDOR.
+## 2024-05-19 - Missing Authorization on Device Endpoints
+**Vulnerability:** Missing authorization on sensitive endpoints (/api/devices*).
+**Learning:** Endpoints meant for administrative provisioning were left without role-based access control, allowing any authenticated user to manage devices.
+**Prevention:** Always apply role-based authorization middleware (e.g., `authorizeRoles('SUPER_ADMIN')`) to sensitive or administrative endpoints.
