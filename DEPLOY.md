@@ -25,7 +25,7 @@ Target scale: 10–50 schools / ~500 buses. **Hard cut** from the Render staging
 
 - `gcloud` CLI authenticated: `gcloud auth login`
 - A billing account ID: `gcloud billing accounts list`
-- A domain you control (for TLS) — e.g. `api.voltava.app`
+- A domain you control (for TLS) — e.g. `api.voltava.in`
 
 Set shell variables used throughout:
 
@@ -177,7 +177,7 @@ cp .env.example .env
 # Fill in:
 #   DATABASE_URL=postgresql://voltava:<DB_PASS>@localhost:5432/voltava_fleet?schema=public
 #   JWT_SECRET=<from Secret Manager>
-#   CORS_ORIGINS=https://admin.voltava.app,https://school.voltava.app,https://app.voltava.app
+#   CORS_ORIGINS=https://school.voltava.in,https://maindashboard.voltava.in
 #   FIREBASE_SERVICE_ACCOUNT=<base64 of prod service-account JSON>
 #   TELEMETRY_HMAC_ENFORCE=1
 #   NODE_ENV=production
@@ -191,7 +191,7 @@ gcloud secrets versions access latest --secret=voltava-jwt-secret
 npm run migrate:deploy
 
 # Seed the ONE super admin (no demo fixtures in prod)
-ALLOW_SEED=1 SEED_ADMIN_EMAIL='you@voltava.app' SEED_ADMIN_PASSWORD='<strong-pass>' \
+ALLOW_SEED=1 SEED_ADMIN_EMAIL='you@voltava.in' SEED_ADMIN_PASSWORD='<strong-pass>' \
   SEED_INCLUDE_DEMO=0 npm run seed
 ```
 
@@ -221,8 +221,8 @@ sudo cp ~voltava/app/deploy/nginx-voltava.conf /etc/nginx/sites-available/voltav
 sudo ln -s /etc/nginx/sites-available/voltava /etc/nginx/sites-enabled/voltava
 sudo rm -f /etc/nginx/sites-enabled/default
 
-# DNS: point api.voltava.app A record → the reserved static IP (step 2) first!
-sudo certbot --nginx -d api.voltava.app
+# DNS: point api.voltava.in A record → the reserved static IP (step 2) first!
+sudo certbot --nginx -d api.voltava.in
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
@@ -237,16 +237,16 @@ sudo bash add-google-cloud-ops-agent.sh --also-install
 ```
 
 Uptime check (from Cloud Console → Monitoring → Uptime checks):
-- HTTPS `GET https://api.voltava.app/healthz` every 60s.
+- HTTPS `GET https://api.voltava.in/healthz` every 60s.
 
 ---
 
 ## 9. Cut-over checklist (hard cut)
 
-1. GCP app is green: `curl https://api.voltava.app/healthz` → `{"status":"ok"}`,
+1. GCP app is green: `curl https://api.voltava.in/healthz` → `{"status":"ok"}`,
    and `/readyz` → `200`.
 2. Point all frontend builds (Super Admin, School Admin, Parent, Driver) at
-   `https://api.voltava.app` and `wss://api.voltava.app`.
+   `https://api.voltava.in` and `wss://api.voltava.in`.
 3. Send the SIP-reconfigure SMS to every TM-100 SIM (see top of doc).
 4. Watch `pm2 logs` + Cloud Logging for incoming telemetry from real devices.
 5. Once telemetry + logins confirmed from all client types → shut down Render.
