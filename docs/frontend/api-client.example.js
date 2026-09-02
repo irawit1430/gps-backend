@@ -93,7 +93,7 @@ export function connectSocket() {
 }
 
 // ─── Example usage ───
-// const user = await login('admin@voltava.app', '••••');
+// const user = await login('admin@voltava.in', '••••');
 // if (user.mustResetPassword) navigate('/reset-password');
 //
 // const stats = await api('/stats');

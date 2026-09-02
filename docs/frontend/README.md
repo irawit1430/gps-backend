@@ -9,7 +9,7 @@ and what changed during the migration from the Render staging server.
 - **Static IP (fallback):** `8.234.123.112`
 
 ## Test credentials (seeded super admin):
-- Email: `admin@voltava.app`
+- Email: `admin@voltava.in`
 - Password: *(rotate this before real use)*
 
 ---
