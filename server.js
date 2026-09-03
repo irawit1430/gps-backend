@@ -2241,6 +2241,10 @@ app.get('/api/parents/:parentId/students',
             ? {
                 id: t.id,
                 status: t.status,
+                // Which way the bus is going. Null on a hand-created trip — only the
+                // materialiser sets it — so "reached school" vs "reached home" is a
+                // three-way render, not a boolean.
+                direction: t.direction ?? null,
                 scheduledStart: t.scheduledStart,
                 startTime: t.startTime,
                 endTime: t.endTime,
@@ -2272,9 +2276,14 @@ app.get('/api/parents/:parentId/students/:studentId/trip',
       const student = await loadParentStudent(req, res);
       if (!student) return;
 
+      // Oldest mapping first. A child mapped to two routes — a morning one and an
+      // afternoon one — has no direction column to choose by yet, so this cannot pick
+      // the RIGHT one. It can stop picking a DIFFERENT one each request, which is the
+      // difference between a stop label that is wrong and one that flickers.
       const mapping = await prisma.studentRouteMapping.findFirst({
         where: { studentId: student.id },
         include: { routeStop: { select: { id: true, routeId: true } } },
+        orderBy: { createdAt: 'asc' },
       });
       if (!mapping) return res.status(404).json({ error: 'Student is not mapped to a route stop' });
 
@@ -2292,7 +2301,11 @@ app.get('/api/parents/:parentId/students/:studentId/trip',
           bus: { select: { id: true, licensePlate: true } },
           driver: { select: { name: true } },
         },
-        orderBy: { createdAt: 'asc' },
+        // Same rule as the students list above, and for the same reason: createdAt
+        // alone let an abandoned morning trip stuck in ON_SCHEDULE win all afternoon.
+        // The two endpoints back the same screen, so they must pick the same trip —
+        // disagreeing here shows a parent one trip on the card and another on tap.
+        orderBy: [{ startTime: { sort: 'desc', nulls: 'last' } }, { createdAt: 'asc' }],
       });
       if (!trip) return res.status(404).json({ error: 'No active trip on this route' });
 
@@ -2327,6 +2340,7 @@ app.get('/api/parents/:parentId/students/:studentId/trip',
       res.json({
         id: trip.id,
         status: trip.status,
+        direction: trip.direction ?? null,
         startTime: trip.startTime,
         endTime: trip.endTime,
         busId: trip.busId,
@@ -2360,9 +2374,13 @@ app.get('/api/parents/:parentId/students/:studentId/attendance',
           // "scanned" versus "asserted by the office" is precisely what is in question.
           select: { id: true, type: true, timestamp: true, tripId: true, source: true },
         }),
+        // Same ordering as the trip endpoint above — these two label the same child's
+        // stop on two screens, and picking differently is how a parent sees one stop
+        // on the card and another in history.
         prisma.studentRouteMapping.findFirst({
           where: { studentId: student.id },
           include: { routeStop: { select: { name: true } } },
+          orderBy: { createdAt: 'asc' },
         }),
       ]);
 
