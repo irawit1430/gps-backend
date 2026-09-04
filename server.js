@@ -3415,6 +3415,12 @@ app.get('/api/devices/locations', async (req, res) => {
     });
     const locations = buses
       .map((b) => ({
+        // Both names for the same value. /api/schools/:schoolId/buses spreads the row
+        // and so keys on `id`, this endpoint mapped explicitly and keyed on `busId`,
+        // and a client joining the two lists gets undefined on every lookup with no
+        // error to explain it. Renaming would break live readers; carrying both costs
+        // nothing and means neither spelling is wrong.
+        id: b.id,
         busId: b.id,
         licensePlate: b.licensePlate,
         schoolName: b.school?.name || 'Unassigned',
