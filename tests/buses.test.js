@@ -16,7 +16,7 @@ describe('GET /api/schools/:schoolId/buses', () => {
   let token;
 
   beforeAll(() => {
-    token = jwt.sign({ id: 1, role: 'ADMIN', schoolId: 'school-1' }, process.env.JWT_SECRET || 'super-secret');
+    token = jwt.sign({ id: 1, role: 'SCHOOL_ADMIN', schoolId: 'school-1' }, process.env.JWT_SECRET || 'super-secret');
   });
 
   beforeEach(() => {

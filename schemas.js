@@ -211,7 +211,10 @@ exports.sos = z.object({
 // response in the system that emits qrToken, and a GET returning everything would sit
 // in browser history and any school proxy log. 600 is a full school in one request.
 exports.qrCards = z.object({
-  studentIds: z.array(uuid).min(1).max(600),
+  studentIds: z.array(uuid).min(1).max(600).refine(
+    (ids) => new Set(ids).size === ids.length,
+    { message: 'studentIds must be unique' }
+  ),
 });
 
 // Resolving a scanned card that is not on the driver's own roster.
@@ -272,7 +275,9 @@ exports.broadcast = z.object({
   type: z.enum(['SOS', 'SYSTEM', 'DELAY']).optional(),
 });
 
-exports.bulkStudents = z.array(exports.createStudent).min(1).max(2000);
+// Bounded below the global 256 KB JSON cap as a second, semantic abuse boundary.
+// Five hundred rows is still a full large intake and keeps transaction time bounded.
+exports.bulkStudents = z.array(exports.createStudent).min(1).max(500);
 
 exports.updateMe = z.object({
   name: z.string().min(1).max(200).optional(),

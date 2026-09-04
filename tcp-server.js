@@ -6,6 +6,7 @@ const { emitToSchool, emitToUser } = require('./middleware/socketAuth');
 const liveFixGuard = require('./liveFixGuard');
 const busPresence = require('./busPresence');
 const gpsWriteGate = require('./gpsWriteGate');
+const positionAudience = require('./positionAudience');
 const config = require('./config');
 const logger = require('./logger');
 
@@ -128,7 +129,7 @@ function startTcpServer(io, tcpPort = config.TCP_PORT) {
               });
 
               if (io) {
-                emitToSchool(io, bus.schoolId, 'location_update', {
+                const positionPayload = {
                   busId: bus.id,
                   licensePlate: bus.licensePlate,
                   lat: parsed.lat,
@@ -136,7 +137,13 @@ function startTcpServer(io, tcpPort = config.TCP_PORT) {
                   speed: parsed.speed,
                   heading: parsed.heading || 0,
                   timestamp: fixAt,
-                });
+                };
+                emitToSchool(io, bus.schoolId, 'location_update', positionPayload);
+                // The school room holds admins only. Parents and the driver are
+                // addressed individually, scoped to the trip they are actually on.
+                await positionAudience.emitToRiders(
+                  io, prisma, activeTripId, 'location_update', positionPayload, logger
+                );
               }
             }
           }

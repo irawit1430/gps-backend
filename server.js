@@ -39,7 +39,8 @@ const S = require('./schemas');
 const { validate } = require('./middleware/validate');
 const { authenticate, authorizeRoles, requireTenant, requireSelfOrRoles, logoutToken, invalidateUser } = require('./middleware/auth');
 const { telemetryHmac } = require('./middleware/telemetryHmac');
-const { attachSocketAuth, emitToSchool, emitToUser } = require('./middleware/socketAuth');
+const { attachSocketAuth, emitToSchool, emitToUser, emitToUsers } = require('./middleware/socketAuth');
+const positionAudience = require('./positionAudience');
 const { getSimulatedAlerts, getMockNotifications } = require('./mock-data');
 const {
   syncGpsLogToFirebase,
@@ -99,6 +100,13 @@ const globalLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
+const bulkImportLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many bulk imports; try again shortly.' },
+});
 app.use(globalLimiter);
 
 // ─── Public routes (health, login, telemetry) ──────────────
@@ -139,10 +147,14 @@ app.post('/api/auth/login', loginLimiter, validate({ body: S.login }), async (re
     const user = await prisma.user.findUnique({ where: { email } });
     if (!user) {
       await bcrypt.compare(password, DUMMY_HASH);
+      req.log.warn('login rejected');
       return res.status(401).json({ error: 'Invalid credentials' });
     }
     const ok = await bcrypt.compare(password, user.password);
-    if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
+    if (!ok) {
+      req.log.warn({ userId: user.id }, 'login rejected');
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
 
     await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
     const token = jwt.sign(
@@ -150,22 +162,7 @@ app.post('/api/auth/login', loginLimiter, validate({ body: S.login }), async (re
       config.JWT_SECRET,
       { expiresIn: config.JWT_EXPIRES_IN || '24h' }
     );
-
-    // DEPRECATED: shipping the long-lived HMAC deviceSecret in every login response
-    // is a security smell. Clients should migrate to GET /api/driver/telemetry-credentials
-    // (fetched only when phone-GPS is needed). These fields will be removed once the
-    // driver app has switched over.
-    let deviceId, deviceSecret;
-    if (user.role === 'DRIVER') {
-      const activeTrip = await prisma.trip.findFirst({
-        where: { driverId: user.id, status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
-        include: { bus: true }
-      });
-      if (activeTrip && activeTrip.bus) {
-        deviceId = activeTrip.bus.deviceId;
-        deviceSecret = activeTrip.bus.deviceSecret;
-      }
-    }
+    req.log.info({ userId: user.id, role: user.role, schoolId: user.schoolId }, 'login succeeded');
 
     let preferences = {};
     if (user.notificationSettings) {
@@ -186,8 +183,6 @@ app.post('/api/auth/login', loginLimiter, validate({ body: S.login }), async (re
         mustResetPassword: user.mustResetPassword || false,
         preferences,
       },
-      deviceId,
-      deviceSecret,
     });
   } catch (err) {
     req.log.error({ err }, 'login failed');
@@ -381,15 +376,14 @@ app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => 
           timestamp: fixAt,
         });
 
-        emitToSchool(io, bus.schoolId, 'location_update', {
-          // location_update is POSITION ONLY, and both ingest paths must agree on that.
-          //
-          // This event goes to the whole school room, so every parent receives every
-          // bus in their school. driverName and routeName used to ride along, which
-          // meant every parent held every driver name on their device — and only for
-          // phone-GPS buses, because the TM-100 path never sent them. So the fields
-          // were present in testing, absent in production, and a privacy leak in
-          // between. Identity now comes from GET /api/devices/locations.
+        // location_update is POSITION ONLY, and both ingest paths must agree on that.
+        //
+        // driverName and routeName used to ride along, which meant every parent held
+        // every driver name on their device — and only for phone-GPS buses, because
+        // the TM-100 path never sent them. So the fields were present in testing,
+        // absent in production, and a privacy leak in between. Identity now comes
+        // from GET /api/devices/locations.
+        const positionPayload = {
           busId: bus.id,
           licensePlate: bus.licensePlate,
           capacity: bus.capacity,
@@ -397,7 +391,14 @@ app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => 
           lng,
           speed,
           timestamp: fixAt,
-        });
+        };
+        emitToSchool(io, bus.schoolId, 'location_update', positionPayload);
+        // Admins get every bus in their school; a parent or driver gets only the bus
+        // their own trip is on. Both halves are required — the school room no longer
+        // contains parents, so without this the tracking screen never updates.
+        await positionAudience.emitToRiders(
+          io, prisma, activeTrip?.id, 'location_update', positionPayload, req.log
+        );
       } else {
         req.log.debug({ busId: bus.id, timestamp: fixAt }, 'telemetry: skipping live broadcast for stale fix');
       }
@@ -417,9 +418,10 @@ app.use(authenticate);
 app.use('/api/admin', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'));
 app.use('/api/admins', authorizeRoles('SUPER_ADMIN'));
 app.use('/api/settings', authorizeRoles('SUPER_ADMIN'));
+const schoolAdminsOnly = authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN');
 
 // ─── Tenant-scoped: /api/schools/:schoolId/* ──────────────
-app.get('/api/schools/:schoolId/buses', requireTenant('schoolId'), async (req, res) => {
+app.get('/api/schools/:schoolId/buses', requireTenant('schoolId'), schoolAdminsOnly, async (req, res) => {
   try {
     const buses = await prisma.bus.findMany({
       where: { schoolId: req.params.schoolId },
@@ -446,7 +448,7 @@ app.get('/api/schools/:schoolId/buses', requireTenant('schoolId'), async (req, r
   }
 });
 
-app.get('/api/schools/:schoolId/leaves', requireTenant('schoolId'), async (req, res) => {
+app.get('/api/schools/:schoolId/leaves', requireTenant('schoolId'), schoolAdminsOnly, async (req, res) => {
   try {
     const { status } = req.query;
     const where = { student: { schoolId: req.params.schoolId } };
@@ -493,7 +495,7 @@ app.delete('/api/leaves/:id', authorizeRoles('PARENT', 'SUPER_ADMIN', 'SCHOOL_AD
 });
 
 // Doc-parity alias: /api/schools/:schoolId/leaves/pending
-app.get('/api/schools/:schoolId/leaves/pending', requireTenant('schoolId'), async (req, res) => {
+app.get('/api/schools/:schoolId/leaves/pending', requireTenant('schoolId'), schoolAdminsOnly, async (req, res) => {
   try {
     const leaves = await prisma.leaveApplication.findMany({
       where: { student: { schoolId: req.params.schoolId }, status: 'PENDING' },
@@ -558,7 +560,7 @@ app.put('/api/parent/leaves/:id',
 );
 
 // Routes
-app.get('/api/schools/:schoolId/routes', requireTenant('schoolId'), async (req, res) => {
+app.get('/api/schools/:schoolId/routes', requireTenant('schoolId'), schoolAdminsOnly, async (req, res) => {
   try {
     // ?summary=1 for the screens that only need names.
     //
@@ -800,7 +802,7 @@ app.delete('/api/routes/:routeId/stops/:id',
 );
 
 // Drivers
-app.get('/api/schools/:schoolId/parents', requireTenant('schoolId'), async (req, res) => {
+app.get('/api/schools/:schoolId/parents', requireTenant('schoolId'), schoolAdminsOnly, async (req, res) => {
   try {
     const parents = await prisma.user.findMany({
       where: { schoolId: req.params.schoolId, role: 'PARENT' },
@@ -848,7 +850,7 @@ app.put('/api/parents/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), valid
   }
 });
 
-app.get('/api/schools/:schoolId/drivers', requireTenant('schoolId'), async (req, res) => {
+app.get('/api/schools/:schoolId/drivers', requireTenant('schoolId'), schoolAdminsOnly, async (req, res) => {
   try {
     const drivers = await prisma.user.findMany({
       where: { schoolId: req.params.schoolId, role: 'DRIVER' },
@@ -1031,7 +1033,7 @@ app.put('/api/trips/:tripId',
   }
 );
 
-app.get('/api/schools/:schoolId/students', requireTenant('schoolId'), async (req, res) => {
+app.get('/api/schools/:schoolId/students', requireTenant('schoolId'), schoolAdminsOnly, async (req, res) => {
   try {
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
@@ -1123,6 +1125,11 @@ async function studentCreateHandler(req, res) {
       let generatedPassword = null;
       if (parentEmail) {
         let parent = await tx.user.findUnique({ where: { email: parentEmail } });
+        if (parent && (parent.role !== 'PARENT' || parent.schoolId !== schoolId)) {
+          const err = new Error('Parent account belongs to another tenant or role');
+          err.code = 'PARENT_TENANT_CONFLICT';
+          throw err;
+        }
         if (!parent) {
           generatedPassword = crypto.randomBytes(16).toString('hex');
           const hashed = await bcrypt.hash(generatedPassword, 10);
@@ -1152,6 +1159,9 @@ async function studentCreateHandler(req, res) {
         : null,
     });
   } catch (err) {
+    if (err.code === 'PARENT_TENANT_CONFLICT') {
+      return res.status(409).json({ error: 'Parent email is already associated with another account' });
+    }
     if (err.code === 'P2002') {
       return res.status(400).json({ error: 'RFID Tag is already assigned to another student.' });
     }
@@ -1160,21 +1170,9 @@ async function studentCreateHandler(req, res) {
   }
 }
 
-app.post('/api/schools/:schoolId/students', requireTenant('schoolId'), validate({ body: S.createStudent }), studentCreateHandler);
+app.post('/api/schools/:schoolId/students', requireTenant('schoolId'), schoolAdminsOnly, validate({ body: S.createStudent }), studentCreateHandler);
 app.post('/api/schools/:schoolId/broadcast', requireTenant('schoolId'), authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), validate({ body: S.broadcast }), async (req, res) => {
   try {
-    // NOTE: EmergencyAlert has no routeId column — only tripId. Passing routeId
-    // would throw. senderId records who broadcast it.
-    const alert = await prisma.emergencyAlert.create({
-      data: {
-        schoolId: req.params.schoolId,
-        senderId: req.user.id,
-        type: 'ADMIN_BROADCAST',
-        message: req.body.message,
-        tripId: req.body.tripId || null,
-      }
-    });
-    
     const audience = req.body.audience || 'PARENTS';
     const wantsParents = audience === 'PARENTS' || audience === 'ALL';
     const wantsDrivers = audience === 'DRIVERS' || audience === 'ALL';
@@ -1188,7 +1186,24 @@ app.post('/api/schools/:schoolId/broadcast', requireTenant('schoolId'), authoriz
         where: { id: req.body.tripId },
         include: { route: { include: { stops: { include: { studentMappings: { select: { student: { select: { parentId: true } } } } } } } } }
       });
+      if (!trip) return res.status(404).json({ error: 'Trip not found' });
+      if (trip.route.schoolId !== req.params.schoolId) {
+        return res.status(403).json({ error: 'Forbidden: trip belongs to another school' });
+      }
     }
+
+    // NOTE: EmergencyAlert has no routeId column — only tripId. Passing routeId
+    // would throw. senderId records who broadcast it. Create only after every
+    // referenced resource has passed tenant authorization.
+    const alert = await prisma.emergencyAlert.create({
+      data: {
+        schoolId: req.params.schoolId,
+        senderId: req.user.id,
+        type: 'ADMIN_BROADCAST',
+        message: req.body.message,
+        tripId: req.body.tripId || null,
+      }
+    });
 
     const recipientIds = new Set();
 
@@ -1257,7 +1272,8 @@ app.post('/api/schools/:schoolId/broadcast', requireTenant('schoolId'), authoriz
       });
     }
 
-    // Still broadcast to the general school room for the admin dashboards
+    // Also notify the tenant's admin-only realtime room. Parents and drivers receive
+    // only the per-user notifications selected above.
     if (io) emitToSchool(io, req.params.schoolId, 'emergency_alert', alert);
 
     // recipientCount lets the sending dashboard show "sent to N people" instead of
@@ -1269,7 +1285,7 @@ app.post('/api/schools/:schoolId/broadcast', requireTenant('schoolId'), authoriz
   }
 });
 
-app.post('/api/schools/:schoolId/students/bulk', requireTenant('schoolId'), authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), validate({ body: S.bulkStudents }), async (req, res) => {
+app.post('/api/schools/:schoolId/students/bulk', bulkImportLimiter, requireTenant('schoolId'), authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), validate({ body: S.bulkStudents }), async (req, res) => {
   try {
     const students = req.body;
     let createdCount = 0;
@@ -1285,6 +1301,11 @@ app.post('/api/schools/:schoolId/students/bulk', requireTenant('schoolId'), auth
         if (st.parentEmail) {
           const existing = await tx.user.findUnique({ where: { email: st.parentEmail } });
           if (existing) {
+            if (existing.role !== 'PARENT' || existing.schoolId !== req.params.schoolId) {
+              const err = new Error('Parent account belongs to another tenant or role');
+              err.code = 'PARENT_TENANT_CONFLICT';
+              throw err;
+            }
             parent = existing;
           } else {
             const tempPassword = crypto.randomBytes(16).toString('hex');
@@ -1317,6 +1338,9 @@ app.post('/api/schools/:schoolId/students/bulk', requireTenant('schoolId'), auth
     });
     res.json({ success: true, message: `Created ${createdCount} students successfully.`, parentCredentials });
   } catch (err) {
+    if (err.code === 'PARENT_TENANT_CONFLICT') {
+      return res.status(409).json({ error: 'Import aborted: a parent email belongs to another account' });
+    }
     if (err.code === 'P2002') {
       return res.status(400).json({ error: 'Import aborted: an RFID tag or parent email in this batch is already in use.' });
     }
@@ -1325,7 +1349,7 @@ app.post('/api/schools/:schoolId/students/bulk', requireTenant('schoolId'), auth
   }
 });
 
-app.post('/api/students', validate({ body: S.createStudent }), studentCreateHandler);
+app.post('/api/students', schoolAdminsOnly, validate({ body: S.createStudent }), studentCreateHandler);
 
 app.put('/api/students/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), validate({ body: S.updateStudent }), async (req, res) => {
   try {
@@ -1385,20 +1409,26 @@ app.post('/api/student-route-mappings',
   async (req, res) => {
     try {
       const { studentId, routeStopId } = req.body;
-      const stop = await prisma.routeStop.findUnique({
-        where: { id: routeStopId },
-        select: { routeId: true, route: { select: { schoolId: true } } },
-      });
+      const [student, stop] = await Promise.all([
+        prisma.student.findUnique({ where: { id: studentId }, select: { schoolId: true } }),
+        prisma.routeStop.findUnique({
+          where: { id: routeStopId },
+          select: { routeId: true, route: { select: { schoolId: true } } },
+        }),
+      ]);
 
       // Tenant check: the student and route stop must belong to caller's school
       if (req.user.role === 'SCHOOL_ADMIN') {
-        const student = await prisma.student.findUnique({ where: { id: studentId }, select: { schoolId: true } });
         if (!student || student.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
         // 403 and not 404 on a missing stop: a school admin must not be able to probe
         // which stop ids exist outside their own school.
         if (!stop || stop.route.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
-      } else if (!stop) {
-        return res.status(404).json({ error: 'Route stop not found' });
+      } else {
+        if (!student) return res.status(404).json({ error: 'Student not found' });
+        if (!stop) return res.status(404).json({ error: 'Route stop not found' });
+        if (student.schoolId !== stop.route.schoolId) {
+          return res.status(400).json({ error: 'Student and route stop must belong to the same school' });
+        }
       }
 
       // One stop per student per route. The @@unique is (studentId, routeStopId), which
@@ -1500,7 +1530,7 @@ async function applyExceptionToExistingTrip(run, date, exception, log) {
   return false;
 }
 
-app.get('/api/routes/:routeId/runs', async (req, res) => {
+app.get('/api/routes/:routeId/runs', schoolAdminsOnly, async (req, res) => {
   try {
     const route = await prisma.route.findUnique({
       where: { id: req.params.routeId }, select: { schoolId: true },
@@ -1596,7 +1626,7 @@ app.delete('/api/runs/:runId', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), as
   }
 });
 
-app.get('/api/runs/:runId/exceptions', async (req, res) => {
+app.get('/api/runs/:runId/exceptions', schoolAdminsOnly, async (req, res) => {
   try {
     if (!(await loadRunForCaller(req, res))) return;
     const rows = await prisma.runException.findMany({
@@ -1719,7 +1749,7 @@ async function closureImpact(schoolId, date) {
   };
 }
 
-app.get('/api/calendar', async (req, res) => {
+app.get('/api/calendar', schoolAdminsOnly, async (req, res) => {
   try {
     const from = req.query.from ? dateOnly(req.query.from) : (() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; })();
     const to = req.query.to ? dateOnly(req.query.to) : new Date(from.getTime() + 90 * 86400000);
@@ -1740,7 +1770,7 @@ app.get('/api/calendar', async (req, res) => {
   }
 });
 
-app.post('/api/calendar', validate({ body: S.calendarDay }), async (req, res) => {
+app.post('/api/calendar', schoolAdminsOnly, validate({ body: S.calendarDay }), async (req, res) => {
   try {
     const platform = req.body.scope === 'PLATFORM';
     // A platform closure shuts every school. That is the only new privilege this
@@ -1785,7 +1815,7 @@ app.post('/api/calendar', validate({ body: S.calendarDay }), async (req, res) =>
   }
 });
 
-app.delete('/api/calendar/:id', async (req, res) => {
+app.delete('/api/calendar/:id', schoolAdminsOnly, async (req, res) => {
   try {
     const row = await prisma.calendarDay.findUnique({ where: { id: req.params.id } });
     if (!row) return res.status(404).json({ error: 'Calendar entry not found' });
@@ -1819,7 +1849,7 @@ app.delete('/api/calendar/:id', async (req, res) => {
 // the dashboard to re-derive the reason — which is the duplicated-logic trap that
 // lets a preview and reality drift apart. Both this and the materialiser call the
 // same resolver, so they cannot disagree.
-app.get('/api/routes/:routeId/schedule-preview', async (req, res) => {
+app.get('/api/routes/:routeId/schedule-preview', schoolAdminsOnly, async (req, res) => {
   try {
     const route = await prisma.route.findUnique({
       where: { id: req.params.routeId }, select: { schoolId: true },
@@ -1904,6 +1934,12 @@ app.post('/api/schools/:schoolId/qr-cards',
         },
         orderBy: [{ grade: 'asc' }, { name: 'asc' }],
       });
+
+      // A partial result would conceal forged or stale ids. Reject the entire request
+      // without revealing which id belongs to another tenant.
+      if (students.length !== req.body.studentIds.length) {
+        return res.status(403).json({ error: 'Forbidden: one or more students are outside this school' });
+      }
 
       // Stamp what we just handed out. Printing is the act that creates a card, so
       // recording it here means nobody has to remember to tick anything — and it is
@@ -2003,7 +2039,7 @@ app.post('/api/qr-lookup',
   }
 );
 
-app.get('/api/schools/:schoolId/attendance/today', requireTenant('schoolId'), async (req, res) => {
+app.get('/api/schools/:schoolId/attendance/today', requireTenant('schoolId'), schoolAdminsOnly, async (req, res) => {
   try {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -2019,7 +2055,7 @@ app.get('/api/schools/:schoolId/attendance/today', requireTenant('schoolId'), as
 });
 
 // School stats
-app.get('/api/schools/:schoolId/stats', requireTenant('schoolId'), async (req, res) => {
+app.get('/api/schools/:schoolId/stats', requireTenant('schoolId'), schoolAdminsOnly, async (req, res) => {
   try {
     const schoolId = req.params.schoolId;
     const today = new Date();
@@ -2106,7 +2142,7 @@ async function parentIdsOnTrip(tripId) {
 }
 
 // Confirms the student belongs to this parent. Admins pass through — the route-level
-// requireSelfOrRoles has already established they may act for this parent.
+// tenant-user guard has already established they may act for this parent.
 async function loadParentStudent(req, res) {
   const student = await prisma.student.findUnique({
     where: { id: req.params.studentId },
@@ -2123,8 +2159,32 @@ async function loadParentStudent(req, res) {
   return student;
 }
 
+function requireTenantUserAccess(paramName, expectedRole) {
+  return async (req, res, next) => {
+    if (req.user.role === 'SUPER_ADMIN') return next();
+    const targetId = req.params[paramName];
+    if (req.user.role === expectedRole && req.user.id === targetId) return next();
+    if (req.user.role !== 'SCHOOL_ADMIN') return res.status(403).json({ error: 'Forbidden' });
+
+    try {
+      const target = await prisma.user.findUnique({
+        where: { id: targetId },
+        select: { role: true, schoolId: true },
+      });
+      if (target?.role === expectedRole && target.schoolId === req.user.schoolId) return next();
+      return res.status(403).json({ error: 'Forbidden' });
+    } catch (err) {
+      req.log.error({ err }, 'tenant user authorization failed');
+      return res.status(500).json({ error: 'Internal server error' });
+    }
+  };
+}
+
+const requireParentAccess = requireTenantUserAccess('parentId', 'PARENT');
+const requireDriverAccess = requireTenantUserAccess('driverId', 'DRIVER');
+
 app.get('/api/parents/:parentId/students',
-  requireSelfOrRoles('parentId', 'SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  requireParentAccess,
   async (req, res) => {
     try {
       const students = await prisma.student.findMany({
@@ -2270,7 +2330,7 @@ app.get('/api/parents/:parentId/students',
 // Trip detail for a parent: the same route/stop shape drivers get, minus every other
 // child's identity. studentMappings are reduced to counts before they leave the server.
 app.get('/api/parents/:parentId/students/:studentId/trip',
-  requireSelfOrRoles('parentId', 'SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  requireParentAccess,
   async (req, res) => {
     try {
       const student = await loadParentStudent(req, res);
@@ -2357,7 +2417,7 @@ app.get('/api/parents/:parentId/students/:studentId/trip',
 
 // Attendance history for one child.
 app.get('/api/parents/:parentId/students/:studentId/attendance',
-  requireSelfOrRoles('parentId', 'SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  requireParentAccess,
   async (req, res) => {
     try {
       const student = await loadParentStudent(req, res);
@@ -2408,7 +2468,7 @@ app.get('/api/parents/:parentId/students/:studentId/attendance',
 // Cold-start companion to the `emergency_alert` socket event: alerts raised on the
 // trips this parent's children ride. School-wide alerts for other buses are excluded.
 app.get('/api/parents/:parentId/alerts',
-  requireSelfOrRoles('parentId', 'SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  requireParentAccess,
   async (req, res) => {
     try {
       const limit = Math.min(parseInt(req.query.limit) || 20, 100);
@@ -2478,7 +2538,7 @@ app.post('/api/leaves', validate({ body: S.leaveApp }), async (req, res) => {
 });
 
 app.get('/api/parents/:parentId/leaves',
-  requireSelfOrRoles('parentId', 'SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  requireParentAccess,
   async (req, res) => {
     try {
       const leaves = await prisma.leaveApplication.findMany({
@@ -2570,9 +2630,10 @@ app.get('/api/alerts/:id', async (req, res) => {
     if (!alert) return res.status(404).json({ error: 'Alert not found' });
 
     const isSuper = req.user.role === 'SUPER_ADMIN';
-    const isOwnSchool = Boolean(req.user.schoolId) && alert.schoolId === req.user.schoolId;
+    const isOwnSchoolAdmin = req.user.role === 'SCHOOL_ADMIN' &&
+      Boolean(req.user.schoolId) && alert.schoolId === req.user.schoolId;
     const isSender = alert.senderId === req.user.id;
-    if (!isSuper && !isOwnSchool && !isSender) return res.status(403).json({ error: 'Forbidden' });
+    if (!isSuper && !isOwnSchoolAdmin && !isSender) return res.status(403).json({ error: 'Forbidden' });
 
     res.json({ ...alert, alertId: alert.id, acknowledged: alert.status !== 'ACTIVE' });
   } catch (err) {
@@ -2581,8 +2642,8 @@ app.get('/api/alerts/:id', async (req, res) => {
   }
 });
 
-app.post('/api/alerts/sos', validate({ body: S.sos }), sosHandler);
-app.post('/api/driver/emergency', validate({ body: S.sos }), sosHandler); // doc-parity alias
+app.post('/api/alerts/sos', authorizeRoles('DRIVER', 'SUPER_ADMIN'), validate({ body: S.sos }), sosHandler);
+app.post('/api/driver/emergency', authorizeRoles('DRIVER', 'SUPER_ADMIN'), validate({ body: S.sos }), sosHandler); // doc-parity alias
 
 // Phone-GPS telemetry credentials for the authenticated driver's assigned bus.
 // Preferred over the (deprecated) login-response deviceSecret: fetch this only when
@@ -2722,6 +2783,7 @@ app.delete('/api/drivers/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), as
     }
 
     await prisma.user.delete({ where: { id: req.params.id } });
+    invalidateUser(req.params.id);
     res.status(204).send();
   } catch (err) {
     req.log.error({ err }, 'delete driver failed');
@@ -2730,7 +2792,7 @@ app.delete('/api/drivers/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), as
 });
 
 app.get('/api/drivers/:driverId/trips',
-  requireSelfOrRoles('driverId', 'SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  requireDriverAccess,
   async (req, res) => {
     try {
       // This is the driver app's polling endpoint — by far the most requested one,
@@ -3266,7 +3328,7 @@ app.get('/api/schools/summary', authorizeRoles('SUPER_ADMIN'), async (req, res) 
   }
 });
 
-app.get('/api/schools/:id', async (req, res) => {
+app.get('/api/schools/:id', schoolAdminsOnly, async (req, res) => {
   try {
     if (req.user.role !== 'SUPER_ADMIN' && req.user.schoolId !== req.params.id) {
       return res.status(403).json({ error: 'Forbidden' });

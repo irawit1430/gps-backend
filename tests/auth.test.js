@@ -19,6 +19,7 @@ jest.mock('@prisma/client', () => {
     notification: {
       createMany: jest.fn(),
     },
+    trip: { findFirst: jest.fn() },
   };
   return { PrismaClient: jest.fn(() => mockPrisma) };
 });
@@ -125,6 +126,25 @@ describe('POST /api/auth/login', () => {
 
     expect(res.status).toBe(500);
     expect(res.body).toEqual({ error: 'Internal server error' });
+  });
+
+  it('does not return telemetry device credentials in a driver login response', async () => {
+    prisma.user.findUnique.mockResolvedValue({
+      id: 'driver-1', name: 'Driver', email: 'driver@test.com', password: 'hashedpassword',
+      role: 'DRIVER', schoolId: 'school-1',
+    });
+    prisma.trip.findFirst.mockResolvedValue({
+      bus: { deviceId: 'device-1', deviceSecret: 'long-lived-secret' },
+    });
+    bcrypt.compare.mockResolvedValue(true);
+
+    const res = await request(app)
+      .post('/api/auth/login')
+      .send({ email: 'driver@test.com', password: 'driver-password' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.deviceId).toBeUndefined();
+    expect(res.body.deviceSecret).toBeUndefined();
   });
 });
 

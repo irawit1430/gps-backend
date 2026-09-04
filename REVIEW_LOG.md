@@ -57,13 +57,13 @@
 | _(uncommitted)_ | `GET /api/drivers/:driverId/trips` (the driver app's poll endpoint — ~6× the traffic of anything else in prod logs) pulled unbounded `attendanceLogs` and whole student rows on every poll. Scoped to today's logs + the fields `docs/frontend/driver-app.md` §2 documents |
 | _(uncommitted)_ | Open Item 6 closed: `PATCH /api/trips/:tripId/status` re-checks bus/driver conflict before ON_SCHEDULE/DELAYED |
 | _(uncommitted)_ | Open Item 8 closed: bulk student import generates a random temp password per parent and returns `parentCredentials[]` (was the shared literal `password123`) |
+| _(uncommitted)_ | Security incident hardening: admin-only tenant REST/realtime rooms, cross-tenant parent/driver access guards, broadcast/QR/mapping integrity checks, Socket.IO revocation, bounded/rate-limited bulk import, and removal of telemetry secrets from login responses |
 
 ## Open items (not yet done — coordinate before acting)
 
-1. **deviceSecret migration — Stage 2.** `POST /api/auth/login` still returns
-   `deviceId`/`deviceSecret` for drivers (marked DEPRECATED in `server.js`). Remove
-   these fields **once the driver app switches to `GET /api/driver/telemetry-credentials`.**
-   App team confirmed they will migrate; ping the review agent when done.
+1. ~~**deviceSecret migration — Stage 2.**~~ ✅ RESOLVED (uncommitted) — driver
+   login no longer returns `deviceId`/`deviceSecret`; phone tracking retrieves them
+   only from the driver-only `GET /api/driver/telemetry-credentials` endpoint.
 2. ~~**P2002 on email updates.**~~ ✅ RESOLVED in `c55f6e5` — parents/drivers/users
    PUT now return 400 "Email already in use" on a duplicate-email collision.
 3. **JWT revocation is in-memory** (`middleware/auth.js`) — per-instance, resets on

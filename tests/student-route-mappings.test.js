@@ -25,6 +25,7 @@ describe('POST /api/student-route-mappings', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    prisma.student.findUnique.mockResolvedValue({ schoolId: 'school-1' });
     // Stop exists and the student is not already on this route, unless a case says so.
     prisma.routeStop.findUnique.mockResolvedValue({ routeId: 'route-1', route: { schoolId: 'school-1' } });
     prisma.studentRouteMapping.findFirst.mockResolvedValue(null);
@@ -128,6 +129,16 @@ describe('POST /api/student-route-mappings', () => {
 
     const res = await post({ studentId: STUDENT_ID, routeStopId: STOP_ID }, admin);
     expect(res.status).toBe(403);
+    expect(prisma.studentRouteMapping.upsert).not.toHaveBeenCalled();
+  });
+
+  it('rejects a SUPER_ADMIN mapping a student and stop from different schools', async () => {
+    prisma.student.findUnique.mockResolvedValue({ schoolId: 'school-1' });
+    prisma.routeStop.findUnique.mockResolvedValue({ routeId: 'route-9', route: { schoolId: 'school-2' } });
+
+    const res = await post({ studentId: STUDENT_ID, routeStopId: STOP_ID });
+
+    expect(res.status).toBe(400);
     expect(prisma.studentRouteMapping.upsert).not.toHaveBeenCalled();
   });
 });

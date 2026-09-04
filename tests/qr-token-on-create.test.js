@@ -52,4 +52,18 @@ describe('a newly created student gets a QR token', () => {
     const [a, b] = prisma.__tx.student.create.mock.calls.map((c) => c[0].data.qrToken);
     expect(a).not.toBe(b);
   });
+
+  it('does not attach an existing parent account from another school', async () => {
+    prisma.__tx.user.findUnique.mockResolvedValue({
+      id: 'parent-other', role: 'PARENT', schoolId: 'school-other',
+    });
+
+    const res = await request(app)
+      .post(`/api/schools/${SCHOOL}/students`)
+      .set('Authorization', `Bearer ${jwt.sign({ id: 'a1', role: 'SCHOOL_ADMIN', schoolId: SCHOOL }, SECRET)}`)
+      .send({ name: 'Asha', grade: '5th', parentEmail: 'parent@example.com' });
+
+    expect(res.status).toBe(409);
+    expect(prisma.__tx.student.create).not.toHaveBeenCalled();
+  });
 });

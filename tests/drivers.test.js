@@ -3,9 +3,31 @@ const jwt = require('jsonwebtoken');
 
 jest.mock('@prisma/client', () => {
   const mockPrisma = {
-    user: { findMany: jest.fn() },
+    user: { findMany: jest.fn(), findUnique: jest.fn(), delete: jest.fn() },
+    run: { findMany: jest.fn() },
   };
   return { PrismaClient: jest.fn(() => mockPrisma) };
+});
+
+describe('DELETE /api/drivers/:id revokes sessions', () => {
+  it('rejects the deleted driver\'s existing JWT', async () => {
+    const driverId = 'deleted-driver';
+    const driverToken = jwt.sign({ id: driverId, role: 'DRIVER', schoolId: 'school-1' }, SECRET);
+    const superToken = jwt.sign({ id: 'super-1', role: 'SUPER_ADMIN' }, SECRET);
+    prisma.user.findUnique.mockResolvedValue({ id: driverId, role: 'DRIVER', schoolId: 'school-1' });
+    prisma.run.findMany.mockResolvedValue([]);
+    prisma.user.delete.mockResolvedValue({ id: driverId });
+
+    const deleted = await request(app)
+      .delete(`/api/drivers/${driverId}`)
+      .set('Authorization', `Bearer ${superToken}`);
+    expect(deleted.status).toBe(204);
+
+    const reused = await request(app)
+      .get('/api/users/me')
+      .set('Authorization', `Bearer ${driverToken}`);
+    expect(reused.status).toBe(401);
+  });
 });
 
 const { app, prisma } = require('../server');
