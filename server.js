@@ -3824,7 +3824,11 @@ app.get('/api/search', async (req, res) => {
     if (role === 'SCHOOL_ADMIN' && schoolId) {
       const [students, drivers, buses, routes] = await Promise.all([
         prisma.student.findMany({ where: { schoolId, name: { contains: q } }, include: { routeMappings: { include: { routeStop: { include: { route: true } } } } }, take: 10 }),
-        prisma.user.findMany({ where: { schoolId, role: 'DRIVER', name: { contains: q } }, include: { driverTrips: { include: { bus: { select: { id: true, licensePlate: true } } } } }, take: 10 }),
+        // select, not include: `include` pulls the whole User row — password hash and
+        // all — into memory. Nothing leaks today because the response below is built
+        // field by field, but that is one careless `res.json(drivers)` away from being
+        // a credential dump, and the next person to touch this will not know that.
+        prisma.user.findMany({ where: { schoolId, role: 'DRIVER', name: { contains: q } }, select: { id: true, name: true, driverTrips: { include: { bus: { select: { id: true, licensePlate: true } } } } }, take: 10 }),
         prisma.bus.findMany({ where: { schoolId, licensePlate: { contains: q } }, take: 10 }),
         prisma.route.findMany({ where: { schoolId, name: { contains: q } }, take: 10 }),
       ]);
