@@ -33,6 +33,41 @@ function newQrToken() {
   return crypto.randomBytes(16).toString('hex');
 }
 
+// The QR columns for a student, given whatever the school supplied.
+//
+// A school that already prints cards has to be able to say what is on them, otherwise
+// onboarding means reprinting 600 cards to replace 600 that work. When they do, the
+// card physically exists in a child's hand — so it is printed, by definition, and
+// qrCardPrintedAt is stamped. That field is what the driver app reads as `hasCard`;
+// leaving it null would tell a driver to expect no card from a child holding one.
+function qrFieldsFor(suppliedToken) {
+  if (!suppliedToken) {
+    return { qrToken: newQrToken(), qrCodeImported: false, qrCardPrintedAt: null };
+  }
+  return { qrToken: suppliedToken, qrCodeImported: true, qrCardPrintedAt: new Date() };
+}
+
+// Knowing a token is enough to print a working card, so it leaves the server through
+// exactly one response: POST /api/schools/:schoolId/qr-cards. Create and update both
+// returned the whole row, which quietly made that claim false — and put the token in
+// browser history and every proxy log along the way.
+function withoutQrToken(student) {
+  if (!student) return student;
+  const { qrToken, ...rest } = student;
+  return rest;
+}
+
+// P2002 on Student can now come from two different unique constraints, and telling an
+// admin "RFID tag already assigned" when they pasted a duplicate QR code sends them
+// looking at the wrong column.
+function duplicateStudentFieldError(err) {
+  const target = String(err?.meta?.target || '');
+  if (target.includes('qrToken')) {
+    return 'That QR code is already assigned to another student in this school.';
+  }
+  return 'RFID Tag is already assigned to another student.';
+}
+
 const config = require('./config');
 const logger = require('./logger');
 const S = require('./schemas');
@@ -1147,13 +1182,17 @@ async function studentCreateHandler(req, res) {
         parentId = parent.id;
       }
       const student = await tx.student.create({
-        data: { schoolId, rfidTag, name, grade: grade || 'General', guardianPhone: guardianPhone || null, parentId, qrToken: newQrToken() },
+        data: {
+          schoolId, rfidTag, name, grade: grade || 'General',
+          guardianPhone: guardianPhone || null, parentId,
+          ...qrFieldsFor(req.body.qrToken),
+        },
       });
       return { student, generatedPassword };
     });
 
     res.json({
-      student: result.student,
+      student: withoutQrToken(result.student),
       parentCredentials: result.generatedPassword
         ? { email: parentEmail, temporaryPassword: result.generatedPassword }
         : null,
@@ -1163,7 +1202,7 @@ async function studentCreateHandler(req, res) {
       return res.status(409).json({ error: 'Parent email is already associated with another account' });
     }
     if (err.code === 'P2002') {
-      return res.status(400).json({ error: 'RFID Tag is already assigned to another student.' });
+      return res.status(400).json({ error: duplicateStudentFieldError(err) });
     }
     req.log.error({ err }, 'create student failed');
     res.status(500).json({ error: 'Internal server error' });
@@ -1296,7 +1335,7 @@ app.post('/api/schools/:schoolId/students/bulk', bulkImportLimiter, requireTenan
 
     // Process in transaction
     await prisma.$transaction(async (tx) => {
-      for (const st of students) {
+      for (const [i, st] of students.entries()) {
         let parent = null;
         if (st.parentEmail) {
           const existing = await tx.user.findUnique({ where: { email: st.parentEmail } });
@@ -1322,17 +1361,32 @@ app.post('/api/schools/:schoolId/students/bulk', bulkImportLimiter, requireTenan
             parentCredentials.push({ email: st.parentEmail, temporaryPassword: tempPassword });
           }
         }
-        await tx.student.create({
-          data: {
-            schoolId: req.params.schoolId,
-            rfidTag: st.rfidTag,
-            name: st.name,
-            grade: st.grade,
-            guardianPhone: st.guardianPhone || null,
-            parentId: parent ? parent.id : null,
-            qrToken: newQrToken(),
+        try {
+          await tx.student.create({
+            data: {
+              schoolId: req.params.schoolId,
+              rfidTag: st.rfidTag,
+              name: st.name,
+              grade: st.grade,
+              guardianPhone: st.guardianPhone || null,
+              parentId: parent ? parent.id : null,
+              ...qrFieldsFor(st.qrToken),
+            }
+          });
+        } catch (rowErr) {
+          // A 600-row import that fails with "a code is already in use" and no row
+          // number is a spreadsheet someone has to bisect by hand. Name the row and
+          // the student; the transaction still aborts, so nothing is half-applied.
+          if (rowErr.code === 'P2002') {
+            const err = new Error('duplicate in import');
+            err.code = 'IMPORT_ROW_CONFLICT';
+            err.row = i + 1;
+            err.studentName = st.name;
+            err.detail = duplicateStudentFieldError(rowErr);
+            throw err;
           }
-        });
+          throw rowErr;
+        }
         createdCount++;
       }
     });
@@ -1340,6 +1394,13 @@ app.post('/api/schools/:schoolId/students/bulk', bulkImportLimiter, requireTenan
   } catch (err) {
     if (err.code === 'PARENT_TENANT_CONFLICT') {
       return res.status(409).json({ error: 'Import aborted: a parent email belongs to another account' });
+    }
+    if (err.code === 'IMPORT_ROW_CONFLICT') {
+      return res.status(409).json({
+        error: `Import aborted at row ${err.row} (${err.studentName}): ${err.detail}`,
+        row: err.row,
+        studentName: err.studentName,
+      });
     }
     if (err.code === 'P2002') {
       return res.status(400).json({ error: 'Import aborted: an RFID tag or parent email in this batch is already in use.' });
@@ -1357,14 +1418,19 @@ app.put('/api/students/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), vali
     if (!student) return res.status(404).json({ error: 'Student not found' });
     if (req.user.role === 'SCHOOL_ADMIN' && student.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
     
+    // A supplied qrToken is an imported card, so it carries the same two companion
+    // facts as it does on create. Spreading req.body alone would set the token and
+    // leave qrCodeImported false and qrCardPrintedAt null — the driver app would then
+    // read hasCard: false for a child holding a card we just recorded.
+    const { qrToken, ...rest } = req.body;
     const updated = await prisma.student.update({
       where: { id: req.params.id },
-      data: req.body
+      data: qrToken ? { ...rest, ...qrFieldsFor(qrToken) } : rest,
     });
-    res.json(updated);
+    res.json(withoutQrToken(updated));
   } catch (err) {
     if (err.code === 'P2002') {
-      return res.status(400).json({ error: 'RFID Tag is already assigned to another student.' });
+      return res.status(400).json({ error: duplicateStudentFieldError(err) });
     }
     req.log.error({ err }, 'update student failed');
     res.status(500).json({ error: 'Internal server error' });

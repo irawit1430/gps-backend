@@ -46,6 +46,11 @@ exports.createSchool = z.object({
 
 exports.updateSchool = exports.createSchool.partial();
 
+// qrToken is accepted on the way IN and never sent back out — a school arriving with
+// cards already printed has to be able to tell us what is on them, but knowing a token
+// is enough to print a working duplicate. Only POST /api/schools/:id/qr-cards emits it.
+const importedQrToken = z.string().trim().min(4).max(128);
+
 exports.createStudent = z.object({
   schoolId: uuid.optional(),
   rfidTag: z.string().max(64).optional().nullable(),
@@ -54,6 +59,7 @@ exports.createStudent = z.object({
   guardianPhone: z.string().min(6).max(20).optional().nullable(),
   parentEmail: z.string().email().optional().nullable(),
   parentName: z.string().max(200).optional().nullable(),
+  qrToken: importedQrToken.optional(),
 });
 
 // Only real Student columns are updatable. createStudent also carries
@@ -66,6 +72,9 @@ exports.updateStudent = z.object({
   rfidTag: z.string().min(1).max(64).optional(),
   photoUrl: z.string().max(500).optional().nullable(),
   guardianPhone: z.string().min(6).max(20).optional().nullable(),
+  // Attaching a card to a student who already exists — the common case when a school
+  // onboards students first and their existing cards afterwards.
+  qrToken: importedQrToken.optional(),
 });
 
 exports.updateDriver = z.object({
