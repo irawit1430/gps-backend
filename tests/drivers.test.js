@@ -117,7 +117,17 @@ describe('POST /api/schools/:schoolId/drivers', () => {
           name: 'New Driver',
           email: 'driver@test.com',
           role: 'DRIVER'
-        })
+        }),
+        select: {
+          id: true,
+          email: true,
+          role: true,
+          name: true,
+          photoUrl: true,
+          notificationSettings: true,
+          schoolId: true,
+          createdAt: true
+        }
       })
     );
   });
