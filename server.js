@@ -326,6 +326,16 @@ app.post('/api/schools/:schoolId/drivers', async (req, res) => {
         email,
         password: hashedPassword,
         role: "DRIVER"
+      },
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        name: true,
+        photoUrl: true,
+        notificationSettings: true,
+        schoolId: true,
+        createdAt: true
       }
     });
     

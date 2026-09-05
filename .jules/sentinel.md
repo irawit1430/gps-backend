@@ -23,3 +23,7 @@
 **Vulnerability:** Parent-related endpoints (`/api/parents/:id/preferences`, `/api/parents/:parentId/*`) lacked explicit authorization checks to verify if the authenticated user owns the requested resource, allowing users to potentially access or modify data belonging to other parents.
 **Learning:** The global `authenticate` middleware only verifies token presence; it does not ensure resource ownership. Without explicit IDOR protection, authenticated users can access resources they shouldn't by modifying the resource ID in the request.
 **Prevention:** Always implement explicit authorization checks (e.g., using a custom `authorizeParentResource` middleware) for endpoints that access resources belonging to a specific user to prevent IDOR.
+## 2024-10-27 - Driver Password Hash Exposure
+**Vulnerability:** The POST `/api/schools/:schoolId/drivers` endpoint leaked the newly created driver's hashed password in the JSON response because it omitted a `select` clause in the Prisma `create` call.
+**Learning:** Prisma's default behavior returns all scalar fields. Always explicitly restrict fields when sensitive data like password hashes is present on the model.
+**Prevention:** Enforce a strict `select` list in all Prisma mutations that return User objects, and explicitly test the response payload structure to ensure passwords are not present.
