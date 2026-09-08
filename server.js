@@ -165,6 +165,21 @@ app.post('/api/telemetry', async (req, res) => {
 
 // --- 2. ADMIN DASHBOARD ---
 // Buses
+
+// 🛡️ Sentinel: Prevent IDOR on school-specific endpoints
+const authorizeSchoolResource = (req, res, next) => {
+  const targetSchoolId = req.params.schoolId;
+  if (!targetSchoolId) return next();
+
+  if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+  if (req.user.role !== 'SUPER_ADMIN' && String(req.user.schoolId) !== String(targetSchoolId)) {
+    return res.status(403).json({ error: 'Forbidden: Access denied to this school resource' });
+  }
+  next();
+};
+
+app.use('/api/schools/:schoolId', authorizeSchoolResource);
+
 app.get('/api/schools/:schoolId/buses', async (req, res) => {
   try {
     const buses = await prisma.bus.findMany({
