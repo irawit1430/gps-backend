@@ -242,6 +242,10 @@ exports.qrLookup = z.object({
 exports.mapping = z.object({
   studentId: uuid,
   routeStopId: uuid,
+  // Which leg this stop serves. Omitted means both, which is what every mapping made
+  // before this column meant — send it only when the morning and afternoon stops
+  // genuinely differ.
+  direction: z.enum(RUN_DIRECTION).optional().nullable(),
 });
 
 exports.globalSettings = z.object({

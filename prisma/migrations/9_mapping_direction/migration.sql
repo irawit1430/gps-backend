@@ -1,0 +1,15 @@
+-- A child's pickup stop and drop-off stop are not always the same place. One stop per
+-- student per route was the only shape available, so the second one had to be modelled
+-- as an entire separate Route — and the child then appeared on both legs of both
+-- routes, which is how a driver ends up holding a stop for a child who is not coming.
+--
+-- Additive and nullable: NULL means the stop serves both legs, which is precisely what
+-- every existing row already means. No backfill, no default, nothing to re-save.
+--
+-- Deliberately NOT widening the (studentId, routeStopId) unique index. The same stop
+-- recorded twice with two directions says nothing a single NULL row does not, so it
+-- stays unrepresentable. The real rule — one mapping per student per route per leg,
+-- where NULL occupies both legs — needs to treat NULL as a conflicting value rather
+-- than a distinct one, which no unique index in Postgres can express. It lives in
+-- POST /api/student-route-mappings.
+ALTER TABLE "StudentRouteMapping" ADD COLUMN "direction" "RunDirection";

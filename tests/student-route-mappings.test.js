@@ -58,8 +58,10 @@ describe('POST /api/student-route-mappings', () => {
     expect(res.body).toEqual(mockMapping);
     expect(prisma.studentRouteMapping.upsert).toHaveBeenCalledWith({
       where: { studentId_routeStopId: { studentId: STUDENT_ID, routeStopId: STOP_ID } },
-      update: {},
-      create: { studentId: STUDENT_ID, routeStopId: STOP_ID },
+      // No direction sent means the stop serves both legs, which is what every mapping
+      // meant before the column existed.
+      update: { direction: null },
+      create: { studentId: STUDENT_ID, routeStopId: STOP_ID, direction: null },
       include: { student: true, routeStop: { include: { route: true } } },
     });
   });
@@ -96,7 +98,7 @@ describe('POST /api/student-route-mappings', () => {
 
     expect(prisma.studentRouteMapping.findFirst).toHaveBeenCalledWith({
       where: { studentId: STUDENT_ID, routeStopId: { not: STOP_ID }, routeStop: { routeId: 'route-1' } },
-      select: { routeStop: { select: { id: true, name: true } } },
+      select: { direction: true, routeStop: { select: { id: true, name: true } } },
     });
   });
 

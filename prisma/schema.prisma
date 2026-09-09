@@ -320,6 +320,22 @@ model StudentRouteMapping {
   student     Student   @relation(fields: [studentId], references: [id], onDelete: Cascade)
   routeStopId String
   routeStop   RouteStop @relation(fields: [routeStopId], references: [id], onDelete: Cascade)
+
+  // Which leg this stop serves. NULL means both — the child is collected and returned
+  // at the same place, which is every mapping that existed before this column and the
+  // common case, so nothing needed backfilling.
+  //
+  // Set it only when the two differ: picked up outside the house in the morning,
+  // dropped at a grandparent's in the afternoon. Until this existed the second stop
+  // had to be modelled as a whole separate Route, because one stop per route was the
+  // only shape available — and then the child rode both legs of both routes on paper.
+  //
+  // The (studentId, routeStopId) unique stays as it is: the same stop twice with two
+  // directions says nothing a single NULL row does not, so it stays unrepresentable.
+  // One mapping per route per leg is enforced in the endpoint, where NULL can be read
+  // as occupying both slots — a constraint SQL cannot express.
+  direction RunDirection?
+
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 

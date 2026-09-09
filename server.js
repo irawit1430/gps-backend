@@ -864,7 +864,14 @@ app.get('/api/schools/:schoolId/parents', requireTenant('schoolId'), schoolAdmin
         id: true, name: true, email: true, phone: true, role: true, photoUrl: true,
         createdAt: true, updatedAt: true,
         parentStudents: {
-          include: { routeMappings: { include: { routeStop: { include: { route: true } } } } }
+          include: {
+            routeMappings: {
+              // Oldest first: a child can hold a pickup and a drop-off mapping now, and
+              // the screens below read [0]. Unordered, that label changes per refresh.
+              orderBy: { createdAt: 'asc' },
+              include: { routeStop: { include: { route: true } } },
+            },
+          }
         }
       },
     });
@@ -1112,6 +1119,9 @@ app.get('/api/schools/:schoolId/students', requireTenant('schoolId'), schoolAdmi
         // `route: true` dragged the whole row, including the OSRM polyline, for every
         // student — to read two names.
         routeMappings: {
+          // Oldest first: a child can hold a pickup and a drop-off mapping now, and the
+          // office list renders one stop. Unordered, that label changes per refresh.
+          orderBy: { createdAt: 'asc' },
           include: { routeStop: { select: { name: true, route: { select: { name: true } } } } },
         },
       },
@@ -1526,24 +1536,47 @@ app.post('/api/student-route-mappings',
         }
       }
 
-      // One stop per student per route. The @@unique is (studentId, routeStopId), which
-      // only makes re-assigning the SAME stop idempotent — a second stop on the same
-      // route slips past it and the student then appears twice on the driver roster.
+      // One stop per student per route PER LEG. The @@unique is (studentId,
+      // routeStopId), which only makes re-assigning the SAME stop idempotent — a second
+      // stop on the same route slips past it and the student then appears twice on the
+      // driver roster.
+      //
+      // A null direction means "both legs", so it collides with everything on the route
+      // and everything collides with it: that is the old one-stop-per-route rule, kept
+      // exactly as it was for anyone not using directions. Two stops are allowed only
+      // when both name a leg and the legs differ — morning outside the house, afternoon
+      // at a grandparent's. No unique index can express this, because it needs NULL to
+      // conflict rather than be distinct.
+      const direction = req.body.direction ?? null;
+      const conflictsWith = direction
+        ? { OR: [{ direction: null }, { direction }] }
+        : {}; // a both-legs mapping conflicts with any existing mapping on the route
       const elsewhere = await prisma.studentRouteMapping.findFirst({
-        where: { studentId, routeStopId: { not: routeStopId }, routeStop: { routeId: stop.routeId } },
-        select: { routeStop: { select: { id: true, name: true } } },
+        where: {
+          studentId,
+          routeStopId: { not: routeStopId },
+          routeStop: { routeId: stop.routeId },
+          ...conflictsWith,
+        },
+        select: { direction: true, routeStop: { select: { id: true, name: true } } },
       });
       if (elsewhere) {
         return res.status(409).json({
-          error: 'Student is already assigned to another stop on this route',
+          error: elsewhere.direction
+            ? `Student already has a ${elsewhere.direction === 'TO_SCHOOL' ? 'pickup' : 'drop-off'} stop on this route`
+            : 'Student is already assigned to another stop on this route',
           stopId: elsewhere.routeStop.id,
           stopName: elsewhere.routeStop.name,
+          // So the UI can offer "make that one morning-only" instead of a dead end.
+          conflictingDirection: elsewhere.direction,
         });
       }
       const mapping = await prisma.studentRouteMapping.upsert({
         where: { studentId_routeStopId: { studentId, routeStopId } },
-        update: {},
-        create: { studentId, routeStopId },
+        // Re-posting the same stop with a direction is how an existing both-legs
+        // mapping is narrowed to one leg, so this can no longer be a no-op.
+        update: { direction },
+        create: { studentId, routeStopId, direction },
         include: { student: true, routeStop: { include: { route: true } } },
       });
       res.json(mapping);
@@ -2313,6 +2346,8 @@ app.get('/api/parents/:parentId/students',
         include: {
           school: { select: { phone: true, contactPhone: true } },
           routeMappings: {
+            // Oldest first, so the fallbacks below are stable across refreshes.
+            orderBy: { createdAt: 'asc' },
             include: {
               routeStop: {
                 include: {
@@ -2379,8 +2414,23 @@ app.get('/api/parents/:parentId/students',
       const onLeaveToday = new Set(todaysLeave.map((l) => l.studentId));
 
       const formatted = students.map((s) => {
-        const stop = s.routeMappings[0]?.routeStop || null;
-        const t = stop?.route?.trips[0] || null;
+        // A child can hold a pickup mapping and a drop-off mapping, each on its own
+        // route with its own active trip, so [0] showed the morning stop all afternoon
+        // — and picked whichever row Postgres returned first while doing it. Prefer the
+        // leg whose trip direction matches the mapping, then a trip that has actually
+        // started, then any trip at all. One symmetric mapping resolves to itself,
+        // exactly as before.
+        const candidates = (s.routeMappings || [])
+          .filter((m) => m.routeStop)
+          .map((m) => ({ stop: m.routeStop, direction: m.direction, trip: m.routeStop.route?.trips[0] || null }));
+        const best =
+          candidates.find((c) => c.trip?.direction && c.trip.direction === c.direction) ||
+          candidates.find((c) => c.trip?.startTime) ||
+          candidates.find((c) => c.trip) ||
+          candidates[0] ||
+          null;
+        const stop = best?.stop || null;
+        const t = best?.trip || null;
         const scan = latestScan.get(s.id) || null;
         let tripStatus = 'NOT_STARTED';
         if (t) {
@@ -2457,25 +2507,31 @@ app.get('/api/parents/:parentId/students/:studentId/trip',
       const student = await loadParentStudent(req, res);
       if (!student) return;
 
-      // Oldest mapping first. A child mapped to two routes — a morning one and an
-      // afternoon one — has no direction column to choose by yet, so this cannot pick
-      // the RIGHT one. It can stop picking a DIFFERENT one each request, which is the
-      // difference between a stop label that is wrong and one that flickers.
-      const mapping = await prisma.studentRouteMapping.findFirst({
+      // Every mapping the child has, not the oldest one. A child can be collected at
+      // one stop and returned to another, so which stop is "theirs" depends on the leg
+      // that is running — and locking to the oldest mapping meant the afternoon screen
+      // was labelled with the morning stop, on whichever route happened to be saved
+      // first.
+      const mappings = await prisma.studentRouteMapping.findMany({
         where: { studentId: student.id },
         include: { routeStop: { select: { id: true, routeId: true } } },
         orderBy: { createdAt: 'asc' },
       });
-      if (!mapping) return res.status(404).json({ error: 'Student is not mapped to a route stop' });
+      if (mappings.length === 0) return res.status(404).json({ error: 'Student is not mapped to a route stop' });
 
       const trip = await prisma.trip.findFirst({
-        where: { routeId: mapping.routeStop.routeId, status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
+        where: {
+          routeId: { in: [...new Set(mappings.map((m) => m.routeStop.routeId))] },
+          status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] },
+        },
         include: {
           route: {
             include: {
               stops: {
                 orderBy: { orderIdx: 'asc' },
-                include: { studentMappings: { select: { studentId: true } } },
+                // `direction` rides along so a stop's boarding count covers the children
+                // riding THIS leg, not everyone ever mapped to the stop.
+                include: { studentMappings: { select: { studentId: true, direction: true } } },
               },
             },
           },
@@ -2490,13 +2546,26 @@ app.get('/api/parents/:parentId/students/:studentId/trip',
       });
       if (!trip) return res.status(404).json({ error: 'No active trip on this route' });
 
+      // The leg that is running decides which stop is this child's. Exact direction
+      // match first, then a both-legs mapping, then anything on that route — so a
+      // child with one symmetric stop resolves exactly as it always did.
+      const onThisRoute = (m) => m.routeStop.routeId === trip.routeId;
+      const mapping =
+        mappings.find((m) => onThisRoute(m) && m.direction === trip.direction) ||
+        mappings.find((m) => onThisRoute(m) && !m.direction) ||
+        mappings.find(onThisRoute) ||
+        mappings[0];
+
       const logs = await prisma.attendanceLog.findMany({
         where: { tripId: trip.id },
         select: { studentId: true, type: true, timestamp: true },
       });
 
+      const ridesThisLeg = (m) => !trip.direction || !m.direction || m.direction === trip.direction;
       const stops = trip.route.stops.map((stop) => {
-        const stopStudentIds = new Set(stop.studentMappings.map((m) => m.studentId));
+        const stopStudentIds = new Set(
+          stop.studentMappings.filter(ridesThisLeg).map((m) => m.studentId)
+        );
         const boardings = logs.filter((l) => l.type === 'BOARDED' && stopStudentIds.has(l.studentId));
         // No per-stop passage is recorded anywhere, so the first boarding at a stop is
         // the closest honest proxy for "the bus was here".
@@ -2951,16 +3020,30 @@ app.get('/api/drivers/:driverId/trips',
         orderBy: { createdAt: 'asc' },
       });
 
-      // A route's stops are stored in pickup order, and the app walks the list top-down.
-      // On the way home that order is backwards — houses first, school last. `orderIdx`
-      // is deliberately left alone; it is the route's canonical order and the map editor
-      // owns it. Only the sequence handed to the driver flips.
+      // Shape each trip to the leg it is actually driving, before anything downstream
+      // counts students or fans out leaves.
       //
-      // A trip with no direction keeps pickup order, which is what every trip created
-      // before this column did.
+      // Stop order: a route's stops are stored in pickup order, and the app walks the
+      // list top-down. On the way home that order is backwards — houses first, school
+      // last. `orderIdx` is deliberately left alone; it is the route's canonical order
+      // and the map editor owns it. Only the sequence handed to the driver flips.
+      //
+      // Roster: a child with separate pickup and drop-off stops has a mapping per leg,
+      // and the wrong one must not appear. A mapping with no direction serves both,
+      // which is every mapping made before that column existed.
+      //
+      // A trip with no direction gets both untouched — pickup order, every mapping —
+      // which is exactly what it got before any of this existed.
       for (const t of trips) {
+        if (!t.direction) continue;
         if (t.direction === 'FROM_SCHOOL' && t.route?.stops) t.route.stops.reverse();
+        for (const stop of t.route?.stops || []) {
+          stop.studentMappings = (stop.studentMappings || []).filter(
+            (m) => !m.direction || m.direction === t.direction
+          );
+        }
       }
+
       // LeaveApplication hangs off Student, not Trip, so it cannot ride the include
       // above. One extra bounded query covers every student on every returned trip,
       // then fans out — the driver app reads `trip.leaveApplications` to grey out
@@ -4043,7 +4126,7 @@ app.get('/api/search', async (req, res) => {
 
     if (role === 'SCHOOL_ADMIN' && schoolId) {
       const [students, drivers, buses, routes] = await Promise.all([
-        prisma.student.findMany({ where: { schoolId, name: { contains: q } }, include: { routeMappings: { include: { routeStop: { include: { route: true } } } } }, take: 10 }),
+        prisma.student.findMany({ where: { schoolId, name: { contains: q } }, include: { routeMappings: { orderBy: { createdAt: 'asc' }, include: { routeStop: { include: { route: true } } } } }, take: 10 }),
         // select, not include: `include` pulls the whole User row — password hash and
         // all — into memory. Nothing leaks today because the response below is built
         // field by field, but that is one careless `res.json(drivers)` away from being
