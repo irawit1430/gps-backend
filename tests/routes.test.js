@@ -18,7 +18,7 @@ jest.mock('@prisma/client', () => {
 const SECRET = process.env.JWT_SECRET;
 
 describe('DELETE /api/routes/:id', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => jest.resetAllMocks());
 
   const superToken = () => jwt.sign({ id: '1', role: 'SUPER_ADMIN' }, SECRET);
 
@@ -31,7 +31,39 @@ describe('DELETE /api/routes/:id', () => {
     expect(prisma.route.delete).toHaveBeenCalledWith({ where: { id: '1' } });
   });
 
+  it('returns 409 instead of attempting deletion when a cancelled trip references the route', async () => {
+    prisma.trip.count
+      .mockResolvedValueOnce(0) // no PLANNED/ON_SCHEDULE/DELAYED trips
+      .mockResolvedValueOnce(1); // one CANCELLED historical trip
+    prisma.route.delete.mockRejectedValue({ code: 'P2003' });
+
+    const res = await request(app).delete('/api/routes/1').set('Authorization', `Bearer ${superToken()}`);
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({
+      error: 'Cannot delete route: 1 trip(s) reference it. Route deletion is blocked to preserve trip history.',
+      code: 'ROUTE_HAS_TRIPS',
+      tripCount: 1,
+      activeTripCount: 0,
+    });
+    expect(prisma.route.delete).not.toHaveBeenCalled();
+  });
+
+  it('returns 409 when a dependent record is created during route deletion', async () => {
+    prisma.trip.count.mockResolvedValue(0);
+    prisma.route.delete.mockRejectedValue({ code: 'P2003' });
+
+    const res = await request(app).delete('/api/routes/1').set('Authorization', `Bearer ${superToken()}`);
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({
+      error: 'Cannot delete route because dependent records still reference it.',
+      code: 'ROUTE_IN_USE',
+    });
+  });
+
   it('should return 500 when database throws an error', async () => {
+    prisma.trip.count.mockResolvedValue(0);
     prisma.route.delete.mockRejectedValue(new Error('Database error'));
     const res = await request(app).delete('/api/routes/1').set('Authorization', `Bearer ${superToken()}`);
     expect(res.status).toBe(500);

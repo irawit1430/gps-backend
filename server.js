@@ -714,17 +714,36 @@ app.put('/api/routes/:id',
 
 app.delete('/api/routes/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), ownsRoute, async (req, res) => {
   try {
-    const activeTrips = await prisma.trip.count({
-      where: { routeId: req.params.id, status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
-    });
-    if (activeTrips > 0) {
-      return res.status(400).json({
-        error: `Cannot delete route: ${activeTrips} active trip(s) still assigned. Complete or cancel them first.`,
+    const [activeTrips, tripCount] = await Promise.all([
+      prisma.trip.count({
+        where: { routeId: req.params.id, status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
+      }),
+      // Completed and cancelled trips still reference Route through a restrictive
+      // foreign key. Deleting them would also erase the context for attendance and
+      // GPS history, so route deletion is intentionally blocked for any trip state.
+      prisma.trip.count({ where: { routeId: req.params.id } }),
+    ]);
+    if (tripCount > 0) {
+      return res.status(409).json({
+        error: `Cannot delete route: ${tripCount} trip(s) reference it. Route deletion is blocked to preserve trip history.`,
+        code: 'ROUTE_HAS_TRIPS',
+        tripCount,
+        activeTripCount: activeTrips,
       });
     }
     await prisma.route.delete({ where: { id: req.params.id } });
     res.json({ success: true });
   } catch (err) {
+    // A trip can be created after the counts above. Preserve the database constraint
+    // as the final authority and translate that race (or another dependent record)
+    // into the same intentional conflict class instead of leaking a generic 500.
+    if (err.code === 'P2003') {
+      req.log.warn({ routeId: req.params.id, err }, 'route deletion blocked by dependent records');
+      return res.status(409).json({
+        error: 'Cannot delete route because dependent records still reference it.',
+        code: 'ROUTE_IN_USE',
+      });
+    }
     req.log.error({ err }, 'delete route failed');
     res.status(500).json({ error: 'Internal server error' });
   }
