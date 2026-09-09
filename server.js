@@ -1573,6 +1573,27 @@ async function loadRunForCaller(req, res) {
   return run;
 }
 
+// Trip creation has always verified that a bus and driver belong to the school it is
+// dispatching for. Run creation spread the request body straight into the row and
+// verified neither, so a school admin could attach another school's bus or any
+// non-driver user to a run — and the materialiser would then turn that into a real
+// trip every morning, unattended. Same check, same wording, one place both run
+// endpoints call. Null is allowed: a run may legitimately be saved before its crew is
+// known, and the materialiser already warns about those.
+async function crewProblem(schoolId, { busId, driverId }) {
+  const [bus, driver] = await Promise.all([
+    busId ? prisma.bus.findUnique({ where: { id: busId }, select: { schoolId: true } }) : null,
+    driverId ? prisma.user.findUnique({ where: { id: driverId }, select: { role: true, schoolId: true } }) : null,
+  ]);
+  // An unassigned bus (schoolId null) is shared fleet and stays usable, matching
+  // POST /api/schools/:schoolId/trips.
+  if (busId && (!bus || (bus.schoolId && bus.schoolId !== schoolId))) return 'Bus not in this school';
+  if (driverId && (!driver || driver.role !== 'DRIVER' || driver.schoolId !== schoolId)) {
+    return 'Driver not in this school';
+  }
+  return null;
+}
+
 // Dates arrive as YYYY-MM-DD and are calendar days in the school's timezone, which is
 // the server's — TZ is pinned in ecosystem.config.js precisely so this is a local day
 // and not a UTC one beginning at 05:30 IST.
@@ -1664,6 +1685,8 @@ app.post('/api/routes/:routeId/runs',
       if (dateOnly(endDate) < dateOnly(startDate)) {
         return res.status(400).json({ error: 'endDate is before startDate' });
       }
+      const badCrew = await crewProblem(route.schoolId, rest);
+      if (badCrew) return res.status(400).json({ error: badCrew });
       const run = await prisma.run.create({
         data: { ...rest, routeId: req.params.routeId, startDate: dateOnly(startDate), endDate: dateOnly(endDate) },
       });
@@ -1680,8 +1703,11 @@ app.put('/api/runs/:runId',
   validate({ body: S.updateRun }),
   async (req, res) => {
     try {
-      if (!(await loadRunForCaller(req, res))) return;
+      const existing = await loadRunForCaller(req, res);
+      if (!existing) return;
       const { startDate, endDate, ...rest } = req.body;
+      const badCrew = await crewProblem(existing.route.schoolId, rest);
+      if (badCrew) return res.status(400).json({ error: badCrew });
       const data = { ...rest };
       if (startDate) data.startDate = dateOnly(startDate);
       if (endDate) data.endDate = dateOnly(endDate);
