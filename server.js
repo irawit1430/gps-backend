@@ -1006,6 +1006,10 @@ app.post('/api/schools/:schoolId/trips',
           driverId: req.body.driverId,
           status: 'PLANNED',
           scheduledStart: req.body.scheduledStart ? new Date(req.body.scheduledStart) : null,
+          // Null stays legal for a trip whose direction genuinely is not known, but
+          // three consumers read it — driver stop order, parent wording, attendance
+          // labelling — so a null here degrades all three silently.
+          direction: req.body.direction ?? null,
         },
         include: { route: { select: { schoolId: true, name: true } } },
       });
@@ -1071,6 +1075,12 @@ app.put('/api/trips/:tripId',
           ...(req.body.scheduledStart !== undefined && {
             scheduledStart: req.body.scheduledStart ? new Date(req.body.scheduledStart) : null,
           }),
+          ...(req.body.direction !== undefined && { direction: req.body.direction }),
+          // A human has now hand-edited this trip. Nothing wrote this flag, so the
+          // guard in applyExceptionToExistingTrip could never fire and a run-level
+          // exception would quietly overwrite an edit somebody made at 07:00 — the
+          // exact failure the column was added to prevent.
+          isOverridden: true,
         },
         include: { route: { select: { schoolId: true, name: true } } },
       });
@@ -2941,6 +2951,16 @@ app.get('/api/drivers/:driverId/trips',
         orderBy: { createdAt: 'asc' },
       });
 
+      // A route's stops are stored in pickup order, and the app walks the list top-down.
+      // On the way home that order is backwards — houses first, school last. `orderIdx`
+      // is deliberately left alone; it is the route's canonical order and the map editor
+      // owns it. Only the sequence handed to the driver flips.
+      //
+      // A trip with no direction keeps pickup order, which is what every trip created
+      // before this column did.
+      for (const t of trips) {
+        if (t.direction === 'FROM_SCHOOL' && t.route?.stops) t.route.stops.reverse();
+      }
       // LeaveApplication hangs off Student, not Trip, so it cannot ride the include
       // above. One extra bounded query covers every student on every returned trip,
       // then fans out — the driver app reads `trip.leaveApplications` to grey out
@@ -3283,7 +3303,28 @@ app.post('/api/attendance', validate({ body: S.attendance }), async (req, res) =
         // as the fact rather than as a status change, and never softened.
         NO_SHOW: { type: 'SOS', title: 'Did not board', body: (n) => `${n} was not at the stop and did not board.` },
       };
-      const spec = NOTIFY[req.body.type] || NOTIFY.BOARDED;
+      // One scan type means two different things depending on which way the bus is
+      // going. Alighting on the way in is arriving at school; on the way home it is the
+      // drop-off at the child's own stop. A single wording for both sent "has been
+      // dropped off" to a parent at 07:55 about a child walking into assembly — the
+      // distinction Trip.direction exists to carry, read here for the first time.
+      //
+      // The notification `type` is deliberately unchanged, because the parent app's
+      // preference toggles key off it.
+      const BY_DIRECTION = {
+        TO_SCHOOL: {
+          BOARDED: { type: 'BOARDING', title: 'Boarded for school', body: (n) => `${n} is on board, heading to school.` },
+          ALIGHTED: { type: 'ARRIVAL', title: 'Arrived at school', body: (n) => `${n} has arrived at school.` },
+        },
+        FROM_SCHOOL: {
+          BOARDED: { type: 'BOARDING', title: 'Boarded for home', body: (n) => `${n} is on board, heading home.` },
+          ALIGHTED: { type: 'ARRIVAL', title: 'Dropped off', body: (n) => `${n} has been dropped off.` },
+        },
+      };
+      // A trip with no direction — every trip created before this, and any one-off
+      // replacement service — keeps the neutral wording rather than guessing.
+      const spec =
+        BY_DIRECTION[trip.direction]?.[req.body.type] || NOTIFY[req.body.type] || NOTIFY.BOARDED;
       const typeEnum = spec.type;
       const title = spec.title;
       const message = spec.body(student.name);

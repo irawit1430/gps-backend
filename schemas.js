@@ -9,6 +9,8 @@ const LEAVE_STATUS = ['PENDING', 'APPROVED', 'REJECTED'];
 // and rejected by validation, which reads as a client bug.
 const ATTENDANCE_TYPE = ['BOARDED', 'ALIGHTED', 'NO_SHOW'];
 const EMERGENCY_TYPE = ['DRIVER_SOS', 'HARDWARE_SOS', 'ADMIN_BROADCAST', 'DELAY'];
+// Mirrors RunDirection in schema.prisma. A run carries it; a trip copies it.
+const RUN_DIRECTION = ['TO_SCHOOL', 'FROM_SCHOOL'];
 
 const uuid = z.string().uuid();
 const lat = z.number().min(-90).max(90);
@@ -123,6 +125,11 @@ exports.createTrip = z.object({
   driverId: uuid,
   // Planned departure. Stop ETAs are anchored to it until the trip actually starts.
   scheduledStart: z.string().datetime().optional().nullable(),
+  // Which way the bus is going. Optional only because every trip created before this
+  // existed has none, and rejecting those would break the one-off replacement service
+  // that manual creation exists for. Omitting it costs the driver app its stop order
+  // and the parent app its wording, so the UI should always send it.
+  direction: z.enum(RUN_DIRECTION).optional().nullable(),
 });
 
 exports.updateTrip = z.object({
@@ -130,6 +137,7 @@ exports.updateTrip = z.object({
   busId: uuid.optional(),
   driverId: uuid.optional(),
   scheduledStart: z.string().datetime().optional().nullable(),
+  direction: z.enum(RUN_DIRECTION).optional().nullable(),
 });
 
 exports.tripStatus = z.object({
@@ -306,7 +314,7 @@ const DATE_ONLY = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'expected YYYY-MM-DD')
 
 exports.createRun = z.object({
   name: z.string().min(1).max(120),
-  direction: z.enum(['TO_SCHOOL', 'FROM_SCHOOL']),
+  direction: z.enum(RUN_DIRECTION),
   // Wall clock, not a timestamp. A recurring departure is a time of day.
   departure: HHMM,
   busId: uuid.optional().nullable(),
