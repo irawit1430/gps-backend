@@ -942,7 +942,7 @@ app.post('/api/schools/:schoolId/drivers',
   async (req, res) => {
     try {
       const { name, email, phone } = req.body;
-      const tempPassword = crypto.randomBytes(16).toString('hex');
+      const tempPassword = generateTempPassword();
       const hashed = await bcrypt.hash(tempPassword, 10);
       const driver = await prisma.user.create({
         data: { schoolId: req.params.schoolId, name, email, phone: phone || null, password: hashed, role: 'DRIVER', mustResetPassword: true },
@@ -1205,7 +1205,7 @@ async function studentCreateHandler(req, res) {
           throw err;
         }
         if (!parent) {
-          generatedPassword = crypto.randomBytes(16).toString('hex');
+          generatedPassword = parentOpeningPassword();
           const hashed = await bcrypt.hash(generatedPassword, 10);
           parent = await tx.user.create({
             data: {
@@ -1368,8 +1368,14 @@ app.post('/api/schools/:schoolId/students/bulk', bulkImportLimiter, requireTenan
     const students = req.body;
     let createdCount = 0;
     // Temp passwords for parents provisioned by this import, returned once so the
-    // admin can hand them out. Never reuse a fixed password here — every account
-    // created with a shared literal is a free login for anyone who reads this file.
+    // admin can hand them out. Shape depends on PARENT_DEFAULT_PASSWORD: one shared
+    // string for the whole school when set — the owner's call, so an import of 300
+    // families is one notice rather than 300 slips — or a unique readable password per
+    // parent when it is not.
+    //
+    // Shared means exactly what it says: the string opens every parent account created
+    // since it last changed, and each of those shows a child's live location. See the
+    // note on PARENT_DEFAULT_PASSWORD in config.js before changing how this is handled.
     const parentCredentials = [];
 
     // Process in transaction
@@ -1386,7 +1392,7 @@ app.post('/api/schools/:schoolId/students/bulk', bulkImportLimiter, requireTenan
             }
             parent = existing;
           } else {
-            const tempPassword = crypto.randomBytes(16).toString('hex');
+            const tempPassword = parentOpeningPassword();
             parent = await tx.user.create({
               data: {
                 email: st.parentEmail,
@@ -1429,7 +1435,16 @@ app.post('/api/schools/:schoolId/students/bulk', bulkImportLimiter, requireTenan
         createdCount++;
       }
     });
-    res.json({ success: true, message: `Created ${createdCount} students successfully.`, parentCredentials });
+    // parentCredentials still lists every provisioned parent, because the office needs
+    // to know WHICH families now have an account. With a shared password every row
+    // carries the same string; `sharedPassword` says so, so the UI can print one notice
+    // instead of repeating it 300 times.
+    res.json({
+      success: true,
+      message: `Created ${createdCount} students successfully.`,
+      parentCredentials,
+      sharedPassword: Boolean(config.PARENT_DEFAULT_PASSWORD),
+    });
   } catch (err) {
     if (err.code === 'PARENT_TENANT_CONFLICT') {
       return res.status(409).json({ error: 'Import aborted: a parent email belongs to another account' });
@@ -3976,9 +3991,26 @@ app.delete('/api/admins/:id', async (req, res) => {
   }
 });
 
-// -- Password reset requests (admin side of the forgot-password flow) --
+// The opening password for a newly provisioned PARENT account.
+//
+// PARENT_DEFAULT_PASSWORD set: every parent gets that same string, which is what makes
+// a 300-family import one line on a notice instead of 300 slips. Unset: a unique
+// readable password per parent, returned once by the endpoint that created it.
+//
+// Parents only. Drivers and admins keep unique passwords — a driver account can start
+// and end trips, and an admin account can read the whole school.
+function parentOpeningPassword() {
+  return config.PARENT_DEFAULT_PASSWORD || generateTempPassword();
+}
+
 // Readable alphabet: no O/0/I/1, so a temp password can be read out over a phone
-// without spelling it letter by letter.
+// without spelling it letter by letter, and typed off a printed slip without a support
+// call. Every account this server provisions uses it — driver creation, student import,
+// and the reset flow below. A 32-character hex string is unusable on paper, and an
+// onboarding credential nobody can transcribe is the reason people ask for one shared
+// password instead.
+//
+// Declared below its callers but hoisted, so it is reachable from all of them.
 const TEMP_PASSWORD_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
 function generateTempPassword(length = 12) {
   const bytes = crypto.randomBytes(length);

@@ -54,6 +54,22 @@ const schema = z.object({
   SEED_ADMIN_PASSWORD: z.string().min(12).optional().or(z.literal('').transform(() => undefined)),
   ENABLE_MOCK_DATA: boolish.default('0'),
 
+  // Shared opening password for every parent account the system provisions — bulk
+  // import and single student creation. Set by the product owner so 300 families can
+  // be onboarded with one line on a notice instead of 300 printed slips.
+  //
+  // It is a shared secret with no expiry, and every account it opens holds a child's
+  // live position. Consequences, so they are on the record rather than discovered:
+  //   - One leaked slip opens every account created since the last rotation, and any
+  //     parent can reach another family's child by guessing an email.
+  //   - mustResetPassword is advisory — the login response carries it, but the token is
+  //     valid and no middleware enforces it, so an unchanged password stays usable.
+  //   - The risk compounds with time, because accounts accumulate and the string does
+  //     not change on its own.
+  // Rotate it on a schedule and after every import, which is the reason it is config
+  // and not a literal. Unset it to go back to a unique password per parent.
+  PARENT_DEFAULT_PASSWORD: z.string().min(8).optional().or(z.literal('').transform(() => undefined)),
+
   RATE_LIMIT_LOGIN_PER_MIN: z.coerce.number().int().positive().default(5),
   RATE_LIMIT_GLOBAL_PER_MIN: z.coerce.number().int().positive().default(300),
 
