@@ -812,10 +812,12 @@ app.get(['/api/admin/stats', '/api/stats'], async (req, res) => {
     if (role === 'SCHOOL_ADMIN' && schoolId) {
       const stats = await getSchoolAdminStats(prisma, schoolId);
       return res.json(stats);
-    } else {
+    } else if (role === 'SUPER_ADMIN') {
       // SUPER ADMIN (Global) STATS
       const stats = await getSuperAdminStats(prisma);
       return res.json(stats);
+    } else {
+      return res.status(403).json({ error: 'Forbidden: Unauthorized access to stats' });
     }
   } catch (err) {
     console.error(err);
@@ -1237,7 +1239,7 @@ app.get('/api/search', async (req, res) => {
       });
 
       return res.json({ results });
-    } else {
+    } else if (role === 'SUPER_ADMIN') {
       // SUPER ADMIN SEARCH (Schools, Devices, Admins)
       const [schools, devices, admins] = await Promise.all([
         prisma.school.findMany({
@@ -1273,6 +1275,8 @@ app.get('/api/search', async (req, res) => {
       ]);
 
       return res.json({ schools, devices, admins, results: [] });
+    } else {
+      return res.status(403).json({ error: 'Forbidden: Unauthorized access to search' });
     }
   } catch (err) {
     console.error(err);
@@ -1310,7 +1314,7 @@ app.get('/api/notifications', async (req, res) => {
         .slice(0, limit);
 
       return res.json(allAlerts);
-    } else {
+    } else if (role === 'SCHOOL_ADMIN' || role === 'PARENT') {
       // SCHOOL_ADMIN & PARENT notifications (targeted at user ID)
       let notifications = await prisma.notification.findMany({
         where: { userId },
@@ -1324,6 +1328,8 @@ app.get('/api/notifications', async (req, res) => {
       }
 
       return res.json(notifications);
+    } else {
+      return res.status(403).json({ error: 'Forbidden: Unauthorized access to notifications' });
     }
   } catch (err) {
     console.error(err);
