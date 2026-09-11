@@ -1547,69 +1547,145 @@ app.delete('/api/student-route-mappings/:id', authorizeRoles('SUPER_ADMIN', 'SCH
   }
 });
 
+// Student and stop must both belong to the caller's school. Returns the loaded stop, or
+// null once it has already answered the request itself.
+//
+// 403 and not 404 on a missing stop: a school admin must not be able to probe which stop
+// ids exist outside their own school.
+async function loadMappingTargets(req, res, studentId, routeStopId) {
+  const [student, stop] = await Promise.all([
+    prisma.student.findUnique({ where: { id: studentId }, select: { schoolId: true } }),
+    prisma.routeStop.findUnique({
+      where: { id: routeStopId },
+      select: { routeId: true, route: { select: { schoolId: true } } },
+    }),
+  ]);
+  if (req.user.role === 'SCHOOL_ADMIN') {
+    if (!student || student.schoolId !== req.user.schoolId) { res.status(403).json({ error: 'Forbidden' }); return null; }
+    if (!stop || stop.route.schoolId !== req.user.schoolId) { res.status(403).json({ error: 'Forbidden' }); return null; }
+  } else {
+    if (!student) { res.status(404).json({ error: 'Student not found' }); return null; }
+    if (!stop) { res.status(404).json({ error: 'Route stop not found' }); return null; }
+    if (student.schoolId !== stop.route.schoolId) {
+      res.status(400).json({ error: 'Student and route stop must belong to the same school' });
+      return null;
+    }
+  }
+  return stop;
+}
+
+// One stop per student per route PER LEG. The @@unique is (studentId, routeStopId),
+// which only makes re-assigning the SAME stop idempotent — a second stop on the same
+// route slips past it and the student then appears twice on the driver roster.
+//
+// A null direction means "both legs", so it collides with everything on the route and
+// everything collides with it: that is the old one-stop-per-route rule, kept exactly as
+// it was for anyone not using directions. Two stops are allowed only when both name a
+// leg and the legs differ — morning outside the house, afternoon at a grandparent's. No
+// unique index can express this, because it needs NULL to conflict rather than be
+// distinct.
+//
+// Shared by create and move. Two copies of this rule drifting apart is precisely how a
+// child ends up on two rosters.
+function conflictingMapping({ studentId, routeId, direction, exceptStopId, exceptId }) {
+  return prisma.studentRouteMapping.findFirst({
+    where: {
+      studentId,
+      routeStop: { routeId },
+      ...(exceptStopId ? { routeStopId: { not: exceptStopId } } : {}),
+      ...(exceptId ? { id: { not: exceptId } } : {}),
+      // A both-legs mapping narrows nothing: anything already on the route conflicts.
+      ...(direction ? { OR: [{ direction: null }, { direction }] } : {}),
+    },
+    select: { direction: true, routeStop: { select: { id: true, name: true } } },
+  });
+}
+
+// Both endpoints must answer a conflict identically, or the dialog has to handle two
+// shapes for one situation.
+function mappingConflict(res, existing) {
+  return res.status(409).json({
+    error: existing.direction
+      ? `Student already has a ${existing.direction === 'TO_SCHOOL' ? 'pickup' : 'drop-off'} stop on this route`
+      : 'Student is already assigned to another stop on this route',
+    stopId: existing.routeStop.id,
+    stopName: existing.routeStop.name,
+    // So the UI can offer "make that one morning-only" instead of a dead end.
+    conflictingDirection: existing.direction,
+  });
+}
+
+// Move an existing assignment to another stop, on this route or a different one.
+//
+// Delete-then-create was the only way to do this, which is two requests with a window
+// between them: if the create fails, the child is left assigned to nothing and the
+// office sees "Unassigned" with no idea a move was attempted. One UPDATE keeps the
+// mapping row and its id, so there is no such window and nothing to reconcile.
+app.put('/api/student-route-mappings/:id',
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  validate({ body: S.moveMapping }),
+  async (req, res) => {
+    try {
+      const existing = await prisma.studentRouteMapping.findUnique({
+        where: { id: req.params.id },
+        select: { id: true, studentId: true, direction: true },
+      });
+      if (!existing) return res.status(404).json({ error: 'Mapping not found' });
+
+      // Tenancy is checked against the mapping's OWN student, never a body field.
+      const stop = await loadMappingTargets(req, res, existing.studentId, req.body.routeStopId);
+      if (!stop) return;
+
+      // Absent means keep the leg this mapping already serves; explicit null widens it
+      // back to both.
+      const direction = req.body.direction !== undefined ? req.body.direction : existing.direction;
+
+      const elsewhere = await conflictingMapping({
+        studentId: existing.studentId,
+        routeId: stop.routeId,
+        direction,
+        exceptId: existing.id,
+      });
+      if (elsewhere) return mappingConflict(res, elsewhere);
+
+      const mapping = await prisma.studentRouteMapping.update({
+        where: { id: existing.id },
+        data: { routeStopId: req.body.routeStopId, direction },
+        include: { student: true, routeStop: { include: { route: true } } },
+      });
+      res.json(mapping);
+    } catch (err) {
+      // The child already holds a DIFFERENT mapping row for the target stop, and
+      // (studentId, routeStopId) is unique. Same situation as a conflict, so it must not
+      // surface as a 500 — but the conflict search above cannot see it, because the two
+      // rows name different legs and so do not collide on the rule.
+      if (err.code === 'P2002') {
+        return res.status(409).json({
+          error: 'Student already has a mapping for that stop',
+          code: 'MAPPING_EXISTS',
+        });
+      }
+      req.log.error({ err }, 'move mapping failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
 app.post('/api/student-route-mappings',
   authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
   validate({ body: S.mapping }),
   async (req, res) => {
     try {
       const { studentId, routeStopId } = req.body;
-      const [student, stop] = await Promise.all([
-        prisma.student.findUnique({ where: { id: studentId }, select: { schoolId: true } }),
-        prisma.routeStop.findUnique({
-          where: { id: routeStopId },
-          select: { routeId: true, route: { select: { schoolId: true } } },
-        }),
-      ]);
+      const stop = await loadMappingTargets(req, res, studentId, routeStopId);
+      if (!stop) return;
 
-      // Tenant check: the student and route stop must belong to caller's school
-      if (req.user.role === 'SCHOOL_ADMIN') {
-        if (!student || student.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
-        // 403 and not 404 on a missing stop: a school admin must not be able to probe
-        // which stop ids exist outside their own school.
-        if (!stop || stop.route.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
-      } else {
-        if (!student) return res.status(404).json({ error: 'Student not found' });
-        if (!stop) return res.status(404).json({ error: 'Route stop not found' });
-        if (student.schoolId !== stop.route.schoolId) {
-          return res.status(400).json({ error: 'Student and route stop must belong to the same school' });
-        }
-      }
-
-      // One stop per student per route PER LEG. The @@unique is (studentId,
-      // routeStopId), which only makes re-assigning the SAME stop idempotent — a second
-      // stop on the same route slips past it and the student then appears twice on the
-      // driver roster.
-      //
-      // A null direction means "both legs", so it collides with everything on the route
-      // and everything collides with it: that is the old one-stop-per-route rule, kept
-      // exactly as it was for anyone not using directions. Two stops are allowed only
-      // when both name a leg and the legs differ — morning outside the house, afternoon
-      // at a grandparent's. No unique index can express this, because it needs NULL to
-      // conflict rather than be distinct.
       const direction = req.body.direction ?? null;
-      const conflictsWith = direction
-        ? { OR: [{ direction: null }, { direction }] }
-        : {}; // a both-legs mapping conflicts with any existing mapping on the route
-      const elsewhere = await prisma.studentRouteMapping.findFirst({
-        where: {
-          studentId,
-          routeStopId: { not: routeStopId },
-          routeStop: { routeId: stop.routeId },
-          ...conflictsWith,
-        },
-        select: { direction: true, routeStop: { select: { id: true, name: true } } },
+      const elsewhere = await conflictingMapping({
+        studentId, routeId: stop.routeId, direction, exceptStopId: routeStopId,
       });
-      if (elsewhere) {
-        return res.status(409).json({
-          error: elsewhere.direction
-            ? `Student already has a ${elsewhere.direction === 'TO_SCHOOL' ? 'pickup' : 'drop-off'} stop on this route`
-            : 'Student is already assigned to another stop on this route',
-          stopId: elsewhere.routeStop.id,
-          stopName: elsewhere.routeStop.name,
-          // So the UI can offer "make that one morning-only" instead of a dead end.
-          conflictingDirection: elsewhere.direction,
-        });
-      }
+      if (elsewhere) return mappingConflict(res, elsewhere);
+
       const mapping = await prisma.studentRouteMapping.upsert({
         where: { studentId_routeStopId: { studentId, routeStopId } },
         // Re-posting the same stop with a direction is how an existing both-legs

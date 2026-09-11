@@ -239,6 +239,18 @@ exports.qrLookup = z.object({
   qrHash: z.string().regex(/^[0-9a-f]{64}$/, 'expected a sha256 hex digest'),
 });
 
+// Moving an existing assignment (PUT /api/student-route-mappings/:id). studentId is
+// not accepted: a mapping belongs to the student it was created for, and letting the
+// body name a different one would move one child's stop onto another child.
+//
+// Omitting `direction` KEEPS the leg the mapping already serves — it does not widen it
+// back to both. Send `direction: null` explicitly to do that. Same convention as
+// PUT /api/trips/:tripId.
+exports.moveMapping = z.object({
+  routeStopId: uuid,
+  direction: z.enum(RUN_DIRECTION).optional().nullable(),
+});
+
 exports.mapping = z.object({
   studentId: uuid,
   routeStopId: uuid,
