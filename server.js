@@ -1122,7 +1122,18 @@ app.get('/api/schools/:schoolId/students', requireTenant('schoolId'), schoolAdmi
           // Oldest first: a child can hold a pickup and a drop-off mapping now, and the
           // office list renders one stop. Unordered, that label changes per refresh.
           orderBy: { createdAt: 'asc' },
-          include: { routeStop: { select: { name: true, route: { select: { name: true } } } } },
+          // Ids and coordinates, not just names. Without the mapping id the dashboard
+          // cannot move or remove an assignment at all — it had to go to the parents
+          // endpoint for it, which is the wrong screen's payload. Still a narrow select:
+          // `route: true` would drag the OSRM polyline in for every student.
+          include: {
+            routeStop: {
+              select: {
+                id: true, name: true, lat: true, lng: true, routeId: true,
+                route: { select: { name: true } },
+              },
+            },
+          },
         },
       },
     });
@@ -1152,6 +1163,19 @@ app.get('/api/schools/:schoolId/students', requireTenant('schoolId'), schoolAdmi
           parentPhone: s.parent?.phone || null,
           assignedRoute: m?.routeStop?.route?.name || 'Unassigned',
           routeStopName: m?.routeStop?.name || 'Unassigned',
+          // Every assignment this child holds — a pickup and a drop-off stop are two.
+          // The two fields above stay as they are, showing the first, so nothing reading
+          // them breaks; anything that needs to ACT on an assignment reads this instead.
+          mappings: (s.routeMappings || []).map((rm) => ({
+            id: rm.id,
+            routeStopId: rm.routeStopId,
+            direction: rm.direction, // null = serves both legs
+            stopName: rm.routeStop?.name ?? null,
+            lat: rm.routeStop?.lat ?? null,
+            lng: rm.routeStop?.lng ?? null,
+            routeId: rm.routeStop?.routeId ?? null,
+            routeName: rm.routeStop?.route?.name ?? null,
+          })),
           // BOARDED | ALIGHTED | null. null means no scan today — genuinely unknown,
           // which is not the same as absent and must not render as it.
           boardingStatus: a?.type || null,

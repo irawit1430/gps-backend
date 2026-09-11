@@ -42,6 +42,9 @@ describe('GET /api/schools/:schoolId/students', () => {
         guardianPhone: null, parentName: null, parentPhone: null, qrCodeImported: false,
         assignedRoute: 'Unassigned', routeStopName: 'Unassigned',
         boardingStatus: null, lastCheckIn: null,
+        // A child with no assignment has no mappings to act on, but the key is always
+        // present so the dashboard never has to guard for undefined.
+        mappings: [],
       },
     ]);
   });
