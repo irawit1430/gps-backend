@@ -1,0 +1,13 @@
+# First Sunday of the month, 04:00 IST. Monthly rather than nightly because a
+# drill restores the whole database and competes for the same disk.
+[Unit]
+Description=Monthly Voltava Fleet restore drill
+
+[Timer]
+OnCalendar=Sun *-*-01..07 04:00:00
+RandomizedDelaySec=1800
+Persistent=true
+Unit=voltava-restore-drill.service
+
+[Install]
+WantedBy=timers.target

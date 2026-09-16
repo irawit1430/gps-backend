@@ -1,0 +1,21 @@
+# Monthly proof that the backups restore. See restore-drill.sh.
+[Unit]
+Description=Voltava Fleet restore drill (restores the newest backup into a scratch DB)
+Documentation=file:///home/voltava/app/docs/OPERATIONS_FIXES.md
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=voltava
+Group=voltava
+EnvironmentFile=/etc/voltava/backup.env
+ExecStart=/usr/local/bin/restore-drill.sh
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=7200
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/tmp/voltava-drill

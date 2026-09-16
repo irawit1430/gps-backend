@@ -1,0 +1,38 @@
+# Nightly logical backup. Installed alongside voltava-backup.timer.
+#   sudo cp voltava-backup.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now voltava-backup.timer
+[Unit]
+Description=Voltava Fleet nightly pg_dump to Cloud Storage
+Documentation=file:///home/voltava/app/docs/OPERATIONS_FIXES.md
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=voltava
+Group=voltava
+EnvironmentFile=/etc/voltava/backup.env
+ExecStart=/usr/local/bin/voltava-backup.sh
+
+# Never let the backup starve the API or Postgres. The school run is the product;
+# a backup that finishes twenty minutes later costs nothing, a backup that makes
+# the morning map stutter costs a customer.
+Nice=10
+IOSchedulingClass=idle
+CPUWeight=20
+
+# A backup that hangs must not still be holding the lock at tomorrow's run.
+TimeoutStartSec=3600
+
+# Filesystem containment: it reads the database over a socket and writes two paths.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/backups/voltava /var/lock /var/tmp/voltava-drill
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

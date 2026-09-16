@@ -1,0 +1,16 @@
+# 02:15 IST nightly — after the evening run has finished writing and well before
+# the morning run starts reading. RandomizedDelaySec keeps it off the exact
+# minute so it does not land on top of every other cron on the box.
+[Unit]
+Description=Nightly Voltava Fleet database backup
+Documentation=file:///home/voltava/app/docs/OPERATIONS_FIXES.md
+
+[Timer]
+OnCalendar=*-*-* 02:15:00
+RandomizedDelaySec=600
+# If the VM was off at 02:15, run as soon as it is back rather than skipping a night.
+Persistent=true
+Unit=voltava-backup.service
+
+[Install]
+WantedBy=timers.target

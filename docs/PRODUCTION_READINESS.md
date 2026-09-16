@@ -8,8 +8,9 @@
 
 ## Part 0 — The one-line answer
 
-**The backend is good code that is not yet running on a production-grade setup, and
-the product is only half-built.**
+**This is good code that is not yet running on a production-grade setup.** The
+applications are built; the operational half of production — backups, alerting,
+redundancy, deploys — has not been started.
 
 | Question | Answer |
 |---|---|
@@ -17,9 +18,18 @@ the product is only half-built.**
 | Can it go live tomorrow for 1–3 schools with someone watching it? | Yes, with the fixes in Part 8 §A. |
 | Can it go live for the 10–50 schools / 500 buses the deploy plan targets? | **No.** See Part 7. |
 | What is the single biggest problem? | **There is no database backup.** If the one server dies, every record is gone. |
-| What is the second biggest? | **Two of the four apps do not exist** — parents and drivers have nothing to use. |
+| What is the second biggest? | **The hardware port authenticates nothing** — a known IMEI is the whole credential. |
 
-**Overall readiness: roughly 60%.** Detailed scoring in Part 6.
+**Overall readiness: roughly 65%.** Detailed scoring in Part 6.
+**How to fix everything in this report:** `docs/OPERATIONS_FIXES.md`.
+
+> **Correction, 16 Sep 2026.** An earlier version of this report listed "two of the
+> four apps do not exist" as the second-biggest problem, because
+> `docs/frontend/OVERVIEW.md` lists the Super Admin, Parent and Driver repos as
+> **TBD**. The owner has confirmed those apps are built — they live outside the two
+> repositories this audit could read. That finding is withdrawn, and the product
+> completeness score is revised accordingly. `docs/frontend/OVERVIEW.md` should be
+> updated with the real repo names so the table stops saying otherwise.
 
 ---
 
@@ -35,22 +45,21 @@ Voltava Fleet is a **school bus tracking system for India**. A school buys it so
 It is **multi-tenant**: one server holds many schools, and one school must never be
 able to see another school's children, buses or drivers.
 
-### The four apps it was designed to have
+### The four apps
 
-| App | Who uses it | Screens planned | Does it exist? |
+| App | Who uses it | Screens | Status |
 |---|---|---|---|
-| **School Admin** (web) | School transport office | 12 | ✅ **Yes** — the `school-` repo |
-| **Super Admin** (web) | Voltava staff | 11 | ❌ **No repo exists** |
-| **Parent** (mobile) | Parents | 7 | ❌ **No repo exists** |
-| **Driver** (mobile) | Bus drivers | 7 | ❌ **No repo exists** |
+| **School Admin** (web) | School transport office | 12 | ✅ Built — the `school-` repo, audited here |
+| **Super Admin** (web) | Voltava staff | 11 | ✅ Built — repo outside this audit's scope |
+| **Parent** (mobile) | Parents | 7 | ✅ Built — repo outside this audit's scope |
+| **Driver** (mobile) | Bus drivers | 7 | ✅ Built — repo outside this audit's scope |
 
-*(Source: `docs/frontend/OVERVIEW.md` — the Super Admin, Parent and Driver repos are all
-listed as "TBD".)*
+Only the two repositories in this audit's scope — `gps-backend` and `school-` — were
+read and run. The other three apps are reported as built by the owner and were not
+inspected, so nothing in this report speaks to their quality.
 
-**This is the most important fact in the whole report.** The server has finished,
-tested endpoints for parents and drivers. Nobody can call them, because no parent app
-and no driver app has been written. Without a driver app, nobody scans children onto
-the bus, so attendance stays empty; without a parent app, parents get nothing.
+⚠️ `docs/frontend/OVERVIEW.md` still lists those three repos as **TBD**. That table is
+stale, and it is how this audit reached the wrong conclusion on its first pass. Fix it.
 
 ---
 
@@ -365,10 +374,10 @@ read. Standard for this kind of dashboard, worth knowing.
 | **Deployment & infrastructure** | 3 / 10 | One VM, one process, database on the same box, **no backups** |
 | **Monitoring & alerting** | 3 / 10 | Good structured logs and health endpoints; no alerts, no error tracking |
 | **Documentation** | 8 / 10 | `DEPLOY.md`, `REVIEW_LOG.md` and 1,825 lines of frontend API docs — genuinely strong |
-| **Product completeness** | 5 / 10 | 2 of 4 apps missing; ~14 of 37 screens exist |
+| **Product completeness** | 8 / 10 | All four apps built; only two audited here |
 | **Operational maturity** | 3 / 10 | Manual deploys, no rollback plan, no restore drill |
 
-### **Overall: ~60% production-ready.**
+### **Overall: ~65% production-ready.**
 
 Read that as: *the hard part is done and done well, the surrounding engineering is not.*
 
@@ -473,9 +482,9 @@ real measurement before that many buses are connected.
 17. **Split the TCP listener into its own process**, so a hardware flood cannot take the
     dashboard down with it.
 18. **Run two instances behind a load balancer.**
-19. **Build the Parent and Driver apps.** Until these exist, the product cannot actually
-    be sold — attendance and parent notifications, the two features schools pay for,
-    have no user interface.
+19. **Audit the other three apps** to the same standard as this one. Whatever is true
+    of the school dashboard's dead test suite and missing CI is worth checking in the
+    Parent, Driver and Super Admin repos before they carry real families.
 20. **Load-test** at target scale: 500 buses × one packet per 8 seconds is about
     **62 packets per second, continuous**, plus every parent's phone holding a socket
     open during the morning and evening runs. Nobody has measured this yet.

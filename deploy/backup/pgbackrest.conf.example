@@ -1,0 +1,124 @@
+; Voltava Fleet — pgBackRest, tier 2 of the backup strategy.
+;
+; Copy to /etc/pgbackrest/pgbackrest.conf, owned by postgres:postgres, mode 640.
+;
+; Tier 1 (voltava-backup.sh) answers "the VM is gone, rebuild it".
+; Tier 2 (this) answers "someone deleted a school at 14:12, put it back to 14:11".
+; A nightly dump alone means the recovery point is up to 24 hours of attendance,
+; trips and GPS history — a whole school day. WAL archiving takes that to minutes.
+;
+; Set this up second, not first: it needs a Postgres restart (archive_mode is not
+; reloadable) and therefore a maintenance window, while tier 1 needs neither.
+;
+; IMPORTANT: option names have shifted between pgBackRest majors. Check every
+; option below against the version you actually installed before trusting it:
+;   pgbackrest version
+;   pgbackrest help backup repo1-retention-full
+; As of the 2.5x line these are current.
+
+[global]
+; ─── Repository: Google Cloud Storage ───────────────────────────────────────
+; GCS support landed in pgBackRest 2.33. Keep everything under a prefix rather
+; than the bucket root so logs and other generated content can share the bucket.
+repo1-type=gcs
+repo1-path=/pgbackrest
+repo1-gcs-bucket=voltava-fleet-backups
+
+; Two ways to authenticate:
+;   key-type=auto    — use the Compute Engine instance service account. Nothing
+;                      on disk to leak or rotate. Preferred: the VM is already
+;                      created with --scopes=cloud-platform.
+;   key-type=service — a downloaded JSON key at repo1-gcs-key. Only if the
+;                      instance identity cannot be given the bucket role.
+repo1-gcs-key-type=auto
+; repo1-gcs-key=/etc/pgbackrest/gcs-key.json
+
+; ─── Encryption ─────────────────────────────────────────────────────────────
+; GCS encrypts at rest with Google's keys, which protects against a stolen disk
+; in a datacentre and not against anyone who can read the bucket. This is a
+; database of children's home locations; encrypt it client-side too.
+;
+; Generate once:  openssl rand -base64 48
+; Store the passphrase in Secret Manager as well. Losing it loses every backup —
+; there is no recovery path, by design.
+repo1-cipher-type=aes-256-cbc
+repo1-cipher-pass=REPLACE_WITH_openssl_rand_base64_48
+
+; ─── Retention ──────────────────────────────────────────────────────────────
+; Four full backups kept. With the weekly full below that is roughly a month of
+; recoverable history, matching the GpsLog retention window — keeping WAL that
+; restores to a point whose GPS rows were pruned anyway buys nothing.
+;
+; repo1-retention-archive-type=full with retention-archive=4 keeps the WAL needed
+; to reach any point inside those four fulls. Leave archive retention unset and
+; WAL accumulates forever, which is the usual way a backup bucket's bill explodes.
+repo1-retention-full=4
+repo1-retention-diff=6
+repo1-retention-archive=4
+repo1-retention-archive-type=full
+
+; ─── Performance ────────────────────────────────────────────────────────────
+; This box is a 2-vCPU e2-medium also running the API and Postgres. Two processes,
+; and zstd rather than gzip — meaningfully faster at a similar ratio.
+process-max=2
+compress-type=zst
+compress-level=3
+
+; start-fast issues an immediate checkpoint instead of waiting for the next
+; scheduled one, so a backup starts now rather than in up to five minutes.
+start-fast=y
+
+; Asynchronous archiving: PostgreSQL hands the WAL segment off and carries on,
+; and a background process uploads it. Without this, every WAL switch during the
+; morning run waits on a round trip to GCS while telemetry is landing.
+archive-async=y
+spool-path=/var/spool/pgbackrest
+
+; Checksum every page as it is backed up, so corruption is found on the way out
+; rather than on the way back in.
+repo1-bundle=y
+repo1-block=y
+
+log-level-console=info
+log-level-file=detail
+log-path=/var/log/pgbackrest
+
+[voltava]
+; The stanza — one per database cluster. The name goes in every command and in
+; archive_command, so changing it later means editing postgresql.conf too.
+pg1-path=/var/lib/postgresql/15/main
+pg1-port=5432
+pg1-user=postgres
+
+; ─── postgresql.conf, on the database side ──────────────────────────────────
+; Add these, then RESTART Postgres (archive_mode cannot be reloaded):
+;
+;   wal_level = replica
+;   archive_mode = on
+;   archive_command = 'pgbackrest --stanza=voltava archive-push %p'
+;   archive_timeout = 300          # force a WAL switch every 5 min so a quiet
+;                                  # night still has a recent recovery point
+;   max_wal_senders = 3
+;
+; ─── Bring-up ───────────────────────────────────────────────────────────────
+;   sudo -u postgres pgbackrest --stanza=voltava stanza-create
+;   sudo -u postgres pgbackrest --stanza=voltava check          # verifies archiving works
+;   sudo -u postgres pgbackrest --stanza=voltava --type=full backup
+;
+; ─── Schedule (systemd timers, same pattern as voltava-backup.timer) ────────
+;   weekly full         Sun 01:00   pgbackrest --stanza=voltava --type=full backup
+;   daily incremental   Mon–Sat 01:00  pgbackrest --stanza=voltava --type=incr backup
+;
+; ─── Point-in-time restore, for the runbook ─────────────────────────────────
+;   sudo systemctl stop postgresql
+;   sudo -u postgres pgbackrest --stanza=voltava --delta \
+;        --type=time --target="2026-09-16 14:11:00+05:30" \
+;        --target-action=promote restore
+;   sudo systemctl start postgresql
+;
+; Note the +05:30. Every "today" boundary in this service is Asia/Kolkata; a
+; restore target typed in UTC lands five and a half hours off, which on a school
+; day is the difference between before and after the morning run.
+;
+; ─── Verify the repository itself, monthly ──────────────────────────────────
+;   sudo -u postgres pgbackrest --stanza=voltava verify
