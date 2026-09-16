@@ -24,7 +24,7 @@ That leaves the real list, in the order they will hurt you:
 | 1 | No database backup | 🔴 Critical | 1 day |
 | 2 | Hardware port 5000 authenticates nothing | 🔴 Critical | 2 days |
 | 3 | Nobody would know if it broke | 🔴 Critical | 1 day |
-| 4 | Shared parent password | 🟠 High | 2 days |
+| 4 | Shared parent password — apps force the reset, the server does not | 🟠 High | 2 days |
 | 5 | Signed telemetry can be replayed | 🟠 High | 1 day |
 | 6 | Cannot run a second server | 🟡 Medium | 1 week |
 | 7 | Database shares the app's VM | 🟡 Medium | 1 day + window |
@@ -410,10 +410,29 @@ confirm the Fourth Schedule applies to your exact arrangement with each school.)
 password, returned once in `parentCredentials[]` on the import response. This
 already works; the school just has to distribute 300 slips.
 
-**Option B — enforce the reset (recommended: keeps the onboarding story, closes the
-hole).** Keep the shared password, but make `mustResetPassword` mean something.
-Right now it is advisory: the login response carries it, the token is valid anyway,
-and no middleware enforces it, so a family that never changes it stays open forever.
+**Option B — enforce the reset *server-side too* (recommended: keeps the onboarding
+story, closes the hole).**
+
+To be accurate about what already exists: **the apps enforce this today.**
+`app/login/page.tsx:30` will not route to the dashboard until the password is changed,
+and `POST /api/auth/change-password` clears the flag, revokes every prior token and
+issues a replacement. The owner confirms the Parent and Driver apps behave the same.
+That is real mitigation — it is what moves families off the shared password.
+
+What is missing is the server half. `server.js:195` signs the token before the flag is
+ever considered; `mustResetPassword` travels in the login *response body*, not as a JWT
+claim, so nothing downstream can act on it — not `middleware/auth.js`, not
+`middleware/socketAuth.js`. The reset screen is therefore a gate inside an app that an
+attacker never has to open:
+
+```bash
+curl -s https://api.voltava.in/api/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"parent@school.in","password":"<shared>"}'
+# → 24h token, valid on every parent endpoint and on the Socket.IO handshake
+```
+
+Client-side enforcement is the right UX. It is not the control, because the control has
+to survive someone not using the client. Move the flag into the token and check it:
 
 ```js
 // middleware/auth.js — after verifyAccessToken succeeds
@@ -433,10 +452,18 @@ function enforcePasswordReset(req, res, next) {
 }
 ```
 
-Include `mustResetPassword` in the JWT claims at login, and clear it on a successful
-password change (which already revokes existing tokens, so the next token is clean).
-Add a socket-side check too, or a parent could skip the REST API and still receive
-live positions over Socket.IO.
+Include `mustResetPassword` in the JWT claims at `server.js:195`, and clear it on a
+successful password change — which already revokes every existing token and mints a
+replacement, so the next token is clean with no extra work. Add the same check in
+`middleware/socketAuth.js`, or a caller can skip REST entirely and still receive live
+positions over the socket.
+
+**Roll it out in that order**, because this is a behaviour change across four apps:
+add the claim first (harmless on its own — nothing reads it), confirm every app already
+routes to its reset screen, then turn on the 403. Any account still mid-session on an
+un-reset password gets a 403 at that moment, so do it outside school hours. The
+allowlist above is what lets those users still reach the change-password endpoint
+rather than being locked out entirely.
 
 Then add an expiry the shared password cannot outlive: refuse it more than N days
 after the account was created, so an un-rotated string cannot accumulate open

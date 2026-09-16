@@ -333,13 +333,35 @@ packet can be replayed for 300 seconds. This is already written down as open ite
 school can onboard 300 families with one line on a notice. The config file is admirably
 honest about the consequences:
 - one leaked notice opens every account created since the last rotation;
-- `mustResetPassword` is **advisory only** — no middleware enforces it, so a parent who
-  never changes it stays open forever;
 - every one of those accounts shows **a child's live location**.
 
-This is a deliberate, documented business decision, not an accident. It is still the
-most serious privacy exposure in the product, and in India it sits under the DPDP Act's
-rules on children's data.
+**The apps do enforce the reset** (correction, 16 Sep 2026). `app/login/page.tsx:30`
+switches into reset mode and refuses to route to the dashboard until the password is
+changed, and `POST /api/auth/change-password` clears the flag, revokes every existing
+token and hands back a fresh one. That flow works, and the owner confirms the Parent
+and Driver apps do the same.
+
+The gap is narrower than "nobody enforces it", and it is this: **the server issues a
+fully valid 24-hour token before the reset screen is ever reached.** `mustResetPassword`
+is returned in the login response body only — it is not a JWT claim (`server.js:195`),
+no middleware reads it, and `middleware/socketAuth.js` does not either. So the gate
+lives in an app an attacker does not have to open:
+
+```bash
+curl -s https://api.voltava.in/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"parent@school.in","password":"<the shared password>"}'
+# → a working 24h token for every parent endpoint, live position included
+```
+
+That only matters because the *same* password opens many accounts. With per-parent
+generated passwords the same gap is unremarkable — knowing one password gets you one
+account you already had the password for. It is the sharing that turns a UI-level gate
+into the only thing standing between a leaked notice and every family's child.
+
+This is a deliberate, documented business decision, not an accident — and the client
+enforcement is real mitigation, because it moves families off the shared password over
+time. It is still the largest privacy exposure in the product.
 
 **4. Token revocation is in-memory only.**
 `middleware/auth.js` keeps the revocation list in a JavaScript `Set`. Restart the
