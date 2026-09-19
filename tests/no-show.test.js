@@ -40,7 +40,7 @@ describe('POST /api/attendance — no-show and source', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     prisma.trip.findUnique.mockResolvedValue({
-      id: TRIP, status: 'ON_SCHEDULE', driverId: 'driver-1', route: { schoolId: 'school-1' },
+      id: TRIP, status: 'ON_SCHEDULE', direction: 'TO_SCHOOL', driverId: 'driver-1', route: { schoolId: 'school-1' },
     });
     prisma.student.findUnique.mockResolvedValue({
       id: STUDENT, schoolId: 'school-1', name: 'Asha', parentId: 'p1',
@@ -71,6 +71,10 @@ describe('POST /api/attendance — no-show and source', () => {
 
     expect(res.status).toBe(409);
     expect(res.body.onLeave).toBe(true);
+    expect(prisma.leaveApplication.findFirst.mock.calls[0][0].where.OR).toEqual([
+      { scope: 'SCHOOL' },
+      { scope: 'TRANSPORT', OR: [{ direction: null }, { direction: 'TO_SCHOOL' }] },
+    ]);
     expect(prisma.attendanceLog.create).not.toHaveBeenCalled();
     expect(prisma.notification.create).not.toHaveBeenCalled();
   });
@@ -78,6 +82,24 @@ describe('POST /api/attendance — no-show and source', () => {
   it('does not consult leave for an ordinary boarding', async () => {
     await mark(driver, { type: 'BOARDED' });
     expect(prisma.leaveApplication.findFirst).not.toHaveBeenCalled();
+  });
+
+  it("checks no-show leave against the school's local calendar day", async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-09-20T02:00:00.000Z'));
+    prisma.trip.findUnique.mockResolvedValue({
+      id: TRIP, status: 'ON_SCHEDULE', direction: 'TO_SCHOOL', driverId: 'driver-1',
+      route: { schoolId: 'school-1', school: { timezone: 'America/New_York' } },
+    });
+
+    try {
+      const res = await mark(driver, { type: 'NO_SHOW' });
+      expect(res.status).toBe(200);
+      const where = prisma.leaveApplication.findFirst.mock.calls[0][0].where;
+      expect(where.startDate.lt).toEqual(new Date('2026-09-20T04:00:00.000Z'));
+      expect(where.endDate.gte).toEqual(new Date('2026-09-19T04:00:00.000Z'));
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   // An office correction asserts the same fact a scan does, but the parent stopped

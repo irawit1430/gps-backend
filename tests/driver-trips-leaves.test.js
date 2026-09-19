@@ -61,7 +61,7 @@ describe('GET /api/drivers/:driverId/trips — leaveApplications', () => {
     const where = prisma.leaveApplication.findMany.mock.calls[0][0].where;
     expect(where.studentId.in.sort()).toEqual(['s1', 's2', 's3']);
     expect(where.status).toBe('APPROVED');
-    expect(where.startDate.lte.getTime()).toBeGreaterThanOrEqual(where.endDate.gte.getTime());
+    expect(where.startDate.lt.getTime()).toBeGreaterThan(where.endDate.gte.getTime());
   });
 
   it('skips the leave query entirely when no trip has students', async () => {
@@ -74,6 +74,32 @@ describe('GET /api/drivers/:driverId/trips — leaveApplications', () => {
     expect(res.status).toBe(200);
     expect(res.body[0].leaveApplications).toEqual([]);
     expect(prisma.leaveApplication.findMany).not.toHaveBeenCalled();
+  });
+
+  it("uses the school's calendar day for leaves and today's attendance", async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-09-20T02:00:00.000Z'));
+    const trip = tripWith('trip-A', ['s1']);
+    trip.route.school = { timezone: 'America/New_York' };
+    trip.attendanceLogs = [
+      { id: 'old', studentId: 's1', type: 'BOARDED', timestamp: new Date('2026-09-19T03:59:59.000Z') },
+      { id: 'today', studentId: 's1', type: 'ALIGHTED', timestamp: new Date('2026-09-19T04:00:00.000Z') },
+    ];
+    prisma.trip.findMany.mockResolvedValue([trip]);
+    prisma.leaveApplication.findMany.mockResolvedValue([]);
+
+    try {
+      const res = await request(app)
+        .get('/api/drivers/driver-1/trips')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body[0].attendanceLogs.map((row) => row.id)).toEqual(['today']);
+      const leaveWhere = prisma.leaveApplication.findMany.mock.calls[0][0].where;
+      expect(leaveWhere.startDate.lt).toEqual(new Date('2026-09-20T04:00:00.000Z'));
+      expect(leaveWhere.endDate.gte).toEqual(new Date('2026-09-19T04:00:00.000Z'));
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
 

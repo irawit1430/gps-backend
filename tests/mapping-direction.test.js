@@ -189,7 +189,10 @@ describe('parent trip labels the stop for the running leg', () => {
   it('looks for an active trip across every route the child is mapped to', async () => {
     await tripFor('TO_SCHOOL');
     expect(prisma.trip.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ routeId: { in: ['r1'] } }) })
+      expect.objectContaining({ where: expect.objectContaining({ OR: [
+        { routeId: 'r1', direction: 'TO_SCHOOL' },
+        { routeId: 'r1', direction: 'FROM_SCHOOL' },
+      ] }) })
     );
   });
 });

@@ -20,6 +20,7 @@
 // else is, with its 07:15 shifted to 09:00, and nothing about the weekly pattern is
 // edited to achieve it.
 
+const { calendarDate, wallTime, DEFAULT_ZONE } = require('./schoolTime');
 const WEEKDAY_FIELD = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 
 const STATUS = {
@@ -37,12 +38,11 @@ const STATUS = {
 // Only these produce a trip. Everything else is a reason there isn't one.
 const OPERATES = new Set([STATUS.RUNNING, STATUS.SHIFTED, STATUS.ADDED_EXCEPTION]);
 
-// Date-only comparison. Everything here is a calendar day in the school's timezone,
-// which is the server's — TZ is pinned in ecosystem.config.js precisely so this is
-// the local day and not a UTC one starting at 05:30 IST.
-function ymd(date) {
-  const d = new Date(date);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+// Date-only comparison in the school's configured timezone. A YYYY-MM-DD input is
+// already a calendar fact and is never shifted through UTC.
+function ymd(date, zone = DEFAULT_ZONE) {
+  if (typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date)) return date;
+  return calendarDate(date, zone);
 }
 
 // run:        a Run row
@@ -54,12 +54,13 @@ function ymd(date) {
 // because "Thursday is missing" and "Thursday is missing because Diwali" are
 // different screens and the client must not have to re-derive which.
 function resolveRunOnDate(run, date, exception, closure) {
-  const day = ymd(date);
+  const zone = run.route?.school?.timezone || run.timezone || DEFAULT_ZONE;
+  const day = ymd(date, zone);
 
   if (!run.active) {
     return verdict(STATUS.INACTIVE, 'Run is not active', null);
   }
-  if (day < ymd(run.startDate) || day > ymd(run.endDate)) {
+  if (day < ymd(run.startDate, zone) || day > ymd(run.endDate, zone)) {
     return verdict(STATUS.OUT_OF_WINDOW, 'Outside this run’s dates', null);
   }
 
@@ -86,7 +87,7 @@ function resolveRunOnDate(run, date, exception, closure) {
   }
 
   // 3. The weekly pattern.
-  if (!run[WEEKDAY_FIELD[new Date(date).getDay()]]) {
+  if (!run[WEEKDAY_FIELD[new Date(`${day}T00:00:00Z`).getUTCDay()]]) {
     return verdict(STATUS.OFF_PATTERN, 'Does not run on this weekday', null);
   }
 
@@ -97,15 +98,12 @@ function verdict(status, reason, departure) {
   return { operates: OPERATES.has(status), status, reason, departure };
 }
 
-// "07:15" on a given date, in the server's timezone. Kept together with the resolver
+// "07:15" on a given date, in the school's timezone. Kept together with the resolver
 // because the string format and its interpretation are one decision: parsing it
 // somewhere else is how a departure ends up 5.5 hours out.
-function departureAt(date, hhmm) {
-  const [h, m] = String(hhmm).split(':').map(Number);
-  if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
-  const d = new Date(date);
-  d.setHours(h, m, 0, 0);
-  return d;
+function departureAt(date, hhmm, zone = DEFAULT_ZONE) {
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(String(hhmm))) return null;
+  return wallTime(ymd(date, zone), hhmm, zone);
 }
 
 module.exports = { resolveRunOnDate, departureAt, ymd, STATUS, OPERATES };

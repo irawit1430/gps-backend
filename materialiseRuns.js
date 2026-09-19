@@ -40,7 +40,7 @@ async function materialiseRuns(prisma, { days = 3, now = new Date(), logger } = 
 
   const runs = await prisma.run.findMany({
     where: { active: true, startDate: { lte: to }, endDate: { gte: from } },
-    include: { route: { select: { schoolId: true } } },
+    include: { route: { select: { schoolId: true, school: { select: { timezone: true } } } } },
   });
   if (runs.length === 0) return { created: 0, skipped: 0, crewless: 0 };
 
@@ -73,9 +73,10 @@ async function materialiseRuns(prisma, { days = 3, now = new Date(), logger } = 
   for (const date of dates) {
     const day = ymd(date);
     for (const run of runs) {
+      const zone = run.route?.school?.timezone || 'Asia/Kolkata';
       const verdict = resolveRunOnDate(
         run,
-        date,
+        day,
         exceptionFor.get(`${run.id}::${day}`) || null,
         closureOn(run.route?.schoolId, day)
       );
@@ -103,7 +104,7 @@ async function materialiseRuns(prisma, { days = 3, now = new Date(), logger } = 
         driverId: run.driverId,
         direction: run.direction,
         status: 'PLANNED',
-        scheduledStart: departureAt(date, verdict.departure),
+        scheduledStart: departureAt(day, verdict.departure, zone),
       });
     }
   }

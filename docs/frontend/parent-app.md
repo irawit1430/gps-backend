@@ -7,6 +7,9 @@ This is the single source of truth for wiring the Parent app to the Voltava Flee
 backend. Every endpoint / payload below matches the live server. Read
 [`README.md`](./README.md) once for the shared auth / socket / error rules.
 
+The September 2026 trust-contract additions, migration order, and mobile integration
+checklist are documented in [`../PARENT_APP_BACKEND_FIXES.md`](../PARENT_APP_BACKEND_FIXES.md).
+
 ---
 
 ## 0. Connection basics

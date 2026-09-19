@@ -34,7 +34,7 @@ revocation cutoff vs second-resolution JWT `iat`), so use the one you were hande
 ## 2. My Trips
 ```
 GET /api/drivers/:driverId/trips
-→ [{ id, status, scheduledStart, startTime, delayMinutes,
+→ [{ id, status, direction, scheduledStart, startTime, delayMinutes,
      route:{ name, stops:[{ name, lat, lng, orderIdx,
         studentMappings:[{ student:{ id,name,rfidTag,grade,photoUrl,guardianPhone } }] }] },
      bus:{...},
@@ -45,6 +45,11 @@ GET /api/drivers/:driverId/trips
 roster row. `scheduledStart` is the planned departure (null when unscheduled), and
 `delayMinutes` is filled in at departure by comparing it to the real start.
 Only `PLANNED / ON_SCHEDULE / DELAYED` trips are returned.
+
+The stop sequence and student mappings already match `direction`. `TO_SCHOOL` uses
+pickup order; `FROM_SCHOOL` reverses the stop sequence. Do not reverse it again in
+the client. The server also evaluates "today" in the school's IANA timezone, not in
+the phone or API-host timezone.
 
 `leaveApplications` is every **APPROVED** leave covering **today** for the students on
 that trip — mark those kids "On Leave" so the driver does not hold a stop for them.
@@ -57,20 +62,51 @@ appear. Empty array when nobody on the trip is away.
 Render `route.stops` (ordered by `orderIdx`); each stop has its
 `studentMappings[].student` list for the pickup roster.
 
+When the bus reaches, leaves or skips a stop, record the fact explicitly:
+```
+POST /api/trips/:tripId/stops/:stopId/events
+Idempotency-Key: <stable UUID for this queued event>
+{ "type": "ARRIVED" | "DEPARTED" | "SKIPPED",
+  "occurredAt"?: "ISO-8601", "lat"?: 28.61, "lng"?: 77.20 }
+```
+The key is required. Coordinates must be supplied together. Queue these events
+offline exactly like attendance. Parent progress is based on this evidence; never
+advance a stop merely because its scheduled time passed.
+
 ## 4. Trip control
 ```
 PATCH /api/trips/:tripId/status  { status: 'ON_SCHEDULE' | 'DELAYED' | 'COMPLETED' }
 ```
-- `ON_SCHEDULE` → server stamps `startTime`
-- `COMPLETED` → server stamps `endTime`
+- `ON_SCHEDULE` or `DELAYED` starts a planned trip and stamps `startTime`
+- `COMPLETED` stamps `endTime`, but only for a running trip
 - Driver may only update own trip (403 otherwise)
+- A completed/cancelled trip cannot be restarted by a driver
+- Completion returns `409` with `studentIds` if the latest attendance state still
+  shows any child aboard. Record their `ALIGHTED` events first. School admins retain
+  override capability for genuine reconciliation and abandoned-trip recovery.
 
 ## 5. Attendance
 ```
-POST /api/attendance  { studentId, tripId, type: 'BOARDED' | 'ALIGHTED' }
+POST /api/attendance
+{
+  "studentId": "uuid",
+  "tripId": "uuid",
+  "type": "BOARDED" | "ALIGHTED" | "NO_SHOW",
+  "occurredAt"?: "ISO-8601",
+  "stopId"?: "uuid",
+  "lat"?: 28.61,
+  "lng"?: 77.20,
+  "handoverConfirmed"?: true
+}
 ```
 RFID scan or manual tap → one row per event. Server checks the trip is yours
 AND the student belongs to that trip's route/school.
+
+Send `stopId` whenever the active stop is known. The server verifies that it is the
+child's assigned stop for the trip direction and records distance evidence when
+coordinates are present. `lat` and `lng` must be supplied together.
+`handoverConfirmed` is accepted only for `ALIGHTED`. `NO_SHOW` is rejected for a
+child whose approved leave covers that trip direction.
 
 **Offline queue / replay safety.** Send an `Idempotency-Key` header when flushing a
 queued scan:
@@ -79,15 +115,16 @@ POST /api/attendance
   headers: Idempotency-Key: <any stable id for this scan, e.g. a uuid>
   body:    { studentId, tripId, type }
 ```
-With the header present, a scan that repeats an existing one for the same
-`studentId` + `tripId` + `type` within **10 minutes** returns **200** with the
-original row plus `duplicate: true` — no second row, no second parent
-notification. Never a 409. Without the header the request is always a fresh insert,
-so send it for anything that came off the queue.
+An exact key replay returns **200** with the original row plus `duplicate: true` —
+no second row and no second parent notification. Reusing that key for a different
+student, trip or event type returns **409**. During migration, a new key whose same
+`studentId` + `tripId` + `type` already exists inside **10 minutes** is also treated
+as a duplicate. Without a key the request is a fresh insert, so every locally queued
+operation must receive its key when it is created, not when it is flushed.
 
-Caveat worth knowing: the server matches on the scan's natural key, not on the key
-value you send. Two genuinely separate scans of the same student on the same trip
-with the same type inside 10 minutes collapse into one.
+Migration caveat: after checking the exact key, the server still applies the
+10-minute natural-key fallback. Two genuinely separate scans of the same student on
+the same trip with the same type inside that window can therefore collapse into one.
 
 `attendanceLogs[].timestamp` is always present (server-stamped, never null) and is
 the server's receipt time, not the phone's. In `GET /api/drivers/:id/trips` the list
@@ -98,16 +135,15 @@ is scoped to **today** — it answers "who is already aboard", not trip history.
 | Field | Status |
 |-------|--------|
 | `status` | real: `PLANNED` / `ON_SCHEDULE` / `DELAYED` / `COMPLETED` / `CANCELLED` |
-| `startTime` | real: stamped server-side the moment status becomes `ON_SCHEDULE`. `null` while `PLANNED` |
+| `startTime` | real: stamped when a planned trip becomes `ON_SCHEDULE` or `DELAYED` |
 | `endTime` | real: stamped when status becomes `COMPLETED` |
-| `progressPercent` | ⚠️ **dead column — always `0`.** Nothing writes it. Do not render it |
-| `delayMinutes` | ⚠️ **dead column — always `0`** |
-| `currentEtaMessage` | ⚠️ **dead column — always `null`** |
+| `progressPercent` | legacy column; do not render it as proof of route progress |
+| `delayMinutes` | real: computed from `scheduledStart` when the trip starts |
+| `currentEtaMessage` | real when `scheduledStart` exists; otherwise unavailable |
 
-You were right to not guess: `progressPercent` is neither stop-based nor
-distance-based, it is simply never computed. If you want progress today, derive it
-client-side from `attendanceLogs` against `route.stops` (stops covered ÷ total), or
-ask backend to compute it server-side.
+Do not derive progress from elapsed time or student attendance. Track acknowledged
+stop events locally and refetch the authoritative trip when `journey_changed` or
+`trip_status_change` arrives.
 
 **ETA today** comes from `RouteStop.expectedArrivalMinutes` (an offset in minutes
 from trip start), not from an absolute timestamp:
@@ -125,9 +161,13 @@ POST /api/driver/emergency   { message?, tripId? }
 GET /api/alerts/:alertId
 → { alertId, status, acknowledged, ... }
 ```
-`acknowledged` is `true` once an admin resolves the alert
-(`POST /api/notifications/:id/resolve` sets `status: 'RESOLVED'`). Readable by the
-driver who raised it, any admin of that school, and SUPER_ADMIN.
+The driver may explicitly acknowledge an incident without resolving it:
+```
+POST /api/alerts/:alertId/acknowledge
+```
+`acknowledged` and `resolved` are separate. An administrator resolves the incident;
+the app must keep an active incident visible after acknowledgement. Alert detail is
+readable by the driver who raised it, an admin of that school, and SUPER_ADMIN.
 
 ## 6. SOS (emergency) 🔴 payload changed
 ```
@@ -140,6 +180,29 @@ ignores it. If your app currently sends them, the request still succeeds but
 those body fields are dropped.
 
 Admins receive the alert instantly via socket `emergency_alert`.
+
+## 6.1 Push registration and readiness
+
+Register each installation after notification permission is granted:
+```
+POST /api/users/me/push-devices
+{ "deviceId": "stable-installation-id", "platform": "ANDROID" | "IOS",
+  "provider": "FCM", "token": "fcm-token" }
+
+GET /api/users/me/notification-readiness
+DELETE /api/users/me/push-devices/:deviceId
+```
+FCM is the supported provider for both Android and iOS. A successful registration
+does not prove delivery; render the readiness response and treat
+`deliveryConfirmed` separately. Delete the device registration on logout.
+
+## 6.2 Realtime invalidation
+
+Listen for `trip_status_change`, `journey_changed`, `emergency_alert`, and
+`notification`. Treat socket payloads as invalidation/deep-link hints and refetch
+the authoritative trip or alert. On foreground and socket reconnect, refetch the
+active trip, unresolved alert and notification readiness instead of trusting cached
+state.
 
 ## 7. Location broadcasting (only if driver phone is the GPS source)
 

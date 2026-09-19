@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken');
 jest.mock('@prisma/client', () => {
   const mockPrisma = {
     trip: { findUnique: jest.fn() },
+    routeStop: { findFirst: jest.fn() },
     student: { findUnique: jest.fn() },
     attendanceLog: { findFirst: jest.fn(), create: jest.fn() },
     notification: { create: jest.fn() },
@@ -29,7 +30,31 @@ const post = (who) =>
     .send({ studentId: STUDENT, tripId: TRIP, type: 'BOARDED' });
 
 const tripInState = (status) => ({
-  id: TRIP, status, driverId: 'driver-1', route: { schoolId: 'school-1' },
+  id: TRIP, routeId: 'route-1', direction: 'FROM_SCHOOL', status, driverId: 'driver-1', route: { schoolId: 'school-1' },
+});
+
+describe('POST /api/attendance — destination evidence', () => {
+  it('records the measured drop-off facts without converting them into a safety claim', async () => {
+    prisma.trip.findUnique.mockResolvedValue({
+      ...tripInState('ON_SCHEDULE'), startTime: new Date(Date.now() - 60000), endTime: null,
+    });
+    prisma.student.findUnique.mockResolvedValue({
+      id: STUDENT, schoolId: 'school-1', name: 'Asha', parentId: null, parent: null,
+    });
+    prisma.routeStop.findFirst.mockResolvedValue({ id: '33333333-3333-4333-8333-333333333333', name: 'Home stop' });
+    prisma.attendanceLog.create.mockImplementation(({ data }) => Promise.resolve({ id: 'log-evidence', ...data }));
+
+    const res = await request(app).post('/api/attendance')
+      .set('Authorization', `Bearer ${driver}`)
+      .send({ studentId: STUDENT, tripId: TRIP, type: 'ALIGHTED',
+        stopId: '33333333-3333-4333-8333-333333333333', lat: 12.9716, lng: 77.5946, handoverConfirmed: true });
+
+    expect(res.status).toBe(200);
+    expect(prisma.attendanceLog.create).toHaveBeenCalledWith({ data: expect.objectContaining({
+      stopId: '33333333-3333-4333-8333-333333333333', stopName: 'Home stop',
+      lat: 12.9716, lng: 77.5946, handoverConfirmed: true, recordedBy: 'driver-1',
+    }) });
+  });
 });
 
 describe('POST /api/attendance — the trip has to be happening', () => {

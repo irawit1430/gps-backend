@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken');
 jest.mock('@prisma/client', () => {
   const mockPrisma = {
     trip: { findUnique: jest.fn(), findFirst: jest.fn(), update: jest.fn(), create: jest.fn() },
+    attendanceLog: { findMany: jest.fn() },
   };
   return { PrismaClient: jest.fn(() => mockPrisma) };
 });
@@ -14,6 +15,7 @@ const HOUR = 3600 * 1000;
 
 // SUPER_ADMIN so ownsTrip short-circuits and we exercise only the conflict logic.
 const token = () => jwt.sign({ id: '1', role: 'SUPER_ADMIN' }, SECRET);
+const driverToken = () => jwt.sign({ id: 'd1', role: 'DRIVER' }, SECRET);
 
 const start = () =>
   request(app)
@@ -24,12 +26,89 @@ const start = () =>
 describe('PATCH /api/trips/:tripId/status — stale trip lockout', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    prisma.attendanceLog.findMany.mockResolvedValue([]);
     prisma.trip.findUnique.mockResolvedValue({
       id: 'trip-new', busId: 'bus-1', driverId: 'd1', scheduledStart: null,
     });
     prisma.trip.update.mockResolvedValue({
       id: 'trip-new', status: 'ON_SCHEDULE', route: { schoolId: 's1', name: 'R' },
     });
+  });
+
+  it('refuses driver completion while the latest record still shows a child aboard', async () => {
+    prisma.trip.findUnique.mockResolvedValue({
+      id: 'trip-new', busId: 'bus-1', driverId: 'd1', status: 'ON_SCHEDULE',
+      route: { schoolId: 's1' },
+    });
+    prisma.attendanceLog.findMany.mockResolvedValue([
+      { studentId: 'student-1', type: 'BOARDED' },
+      { studentId: 'student-2', type: 'ALIGHTED' },
+    ]);
+
+    const res = await request(app)
+      .patch('/api/trips/trip-new/status')
+      .set('Authorization', `Bearer ${driverToken()}`)
+      .send({ status: 'COMPLETED' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/still aboard/i);
+    expect(res.body.studentIds).toEqual(['student-1']);
+    expect(prisma.trip.update).not.toHaveBeenCalled();
+  });
+
+  it('allows driver completion after every boarded child has a later alighting record', async () => {
+    prisma.trip.findUnique.mockResolvedValue({
+      id: 'trip-new', busId: 'bus-1', driverId: 'd1', status: 'ON_SCHEDULE',
+      route: { schoolId: 's1' },
+    });
+    prisma.attendanceLog.findMany.mockResolvedValue([
+      { studentId: 'student-1', type: 'ALIGHTED' },
+      { studentId: 'student-1', type: 'BOARDED' },
+    ]);
+    prisma.trip.update.mockResolvedValue({
+      id: 'trip-new', status: 'COMPLETED', route: { schoolId: 's1', name: 'R' },
+    });
+
+    const res = await request(app)
+      .patch('/api/trips/trip-new/status')
+      .set('Authorization', `Bearer ${driverToken()}`)
+      .send({ status: 'COMPLETED' });
+
+    expect(res.status).toBe(200);
+    expect(prisma.trip.update.mock.calls[0][0].data.endTime).toBeInstanceOf(Date);
+  });
+
+  it('does not let a driver complete a trip that was never started', async () => {
+    prisma.trip.findUnique.mockResolvedValue({
+      id: 'trip-new', busId: 'bus-1', driverId: 'd1', status: 'PLANNED',
+      route: { schoolId: 's1' },
+    });
+
+    const res = await request(app)
+      .patch('/api/trips/trip-new/status')
+      .set('Authorization', `Bearer ${driverToken()}`)
+      .send({ status: 'COMPLETED' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/running trip/i);
+    expect(prisma.trip.update).not.toHaveBeenCalled();
+  });
+
+  it('stamps startTime when a driver starts the trip as delayed', async () => {
+    prisma.trip.findUnique.mockResolvedValue({
+      id: 'trip-new', busId: 'bus-1', driverId: 'd1', status: 'PLANNED',
+      scheduledStart: new Date(Date.now() - 15 * 60_000), route: { schoolId: 's1' },
+    });
+    prisma.trip.findFirst.mockResolvedValue(null);
+
+    const res = await request(app)
+      .patch('/api/trips/trip-new/status')
+      .set('Authorization', `Bearer ${driverToken()}`)
+      .send({ status: 'DELAYED' });
+
+    expect(res.status).toBe(200);
+    expect(prisma.trip.update.mock.calls[0][0].data.startTime).toBeInstanceOf(Date);
+    expect(prisma.trip.update.mock.calls[0][0].data.delayMinutes).toBeGreaterThanOrEqual(14);
   });
 
   it('still blocks when the conflicting trip is genuinely running', async () => {

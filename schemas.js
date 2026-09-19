@@ -2,7 +2,7 @@ const { z } = require('zod');
 
 const ROLES = ['SUPER_ADMIN', 'SCHOOL_ADMIN', 'DRIVER', 'PARENT'];
 const TRIP_STATUS = ['PLANNED', 'ON_SCHEDULE', 'DELAYED', 'COMPLETED', 'CANCELLED'];
-const LEAVE_STATUS = ['PENDING', 'APPROVED', 'REJECTED'];
+const LEAVE_STATUS = ['PENDING', 'APPROVED', 'REJECTED', 'CANCELLED'];
 // Must track the AttendanceType enum in schema.prisma. These are two copies of one
 // fact in two languages, which is the shape that produced six DELAYED bugs across
 // four codebases — a value added to the database and not here is accepted by Postgres
@@ -15,6 +15,8 @@ const RUN_DIRECTION = ['TO_SCHOOL', 'FROM_SCHOOL'];
 const uuid = z.string().uuid();
 const lat = z.number().min(-90).max(90);
 const lng = z.number().min(-180).max(180);
+const { validZone, dateValue } = require('./schoolTime');
+const schoolDate = z.string().refine(v => Boolean(dateValue(v)), 'Expected a valid calendar date or timezone-qualified timestamp');
 
 exports.login = z.object({
   email: z.string().email(),
@@ -31,6 +33,10 @@ exports.telemetry = z.object({
 
 exports.createSchool = z.object({
   name: z.string().min(1).max(200),
+  timezone: z.string().refine(validZone, 'Invalid IANA timezone').optional(),
+  supportHours: z.string().max(300).optional().nullable(),
+  leaveCutoffMinutes: z.number().int().min(0).max(10080).optional().nullable(),
+  leaveResponseHours: z.number().int().min(1).max(720).optional().nullable(),
   address: z.string().max(500).optional().nullable(),
   contactPerson: z.string().max(200).optional().nullable(),
   city: z.string().max(100).optional().nullable(),
@@ -157,18 +163,25 @@ exports.attendance = z.object({
   // Only honoured for an admin — a driver's scan is always a SCAN. MANUAL suppresses
   // the parent notification, so a driver must not be able to record silently.
   source: z.enum(['SCAN', 'MANUAL']).optional(),
+  stopId: uuid.optional(),
+  lat: lat.optional(),
+  lng: lng.optional(),
+  handoverConfirmed: z.boolean().optional(),
 });
 
 exports.leaveApp = z.object({
   studentId: uuid,
-  startDate: z.string().datetime().or(z.string().min(1)),
-  endDate: z.string().datetime().or(z.string().min(1)),
+  startDate: schoolDate,
+  endDate: schoolDate,
+  scope: z.enum(['SCHOOL', 'TRANSPORT']).optional(),
+  direction: z.enum(RUN_DIRECTION).optional().nullable(),
   reason: z.string().min(1).max(500),
   notes: z.string().max(2000).optional().nullable(),
 });
 
 exports.leaveStatus = z.object({
-  status: z.enum(LEAVE_STATUS),
+  status: z.enum(['APPROVED', 'REJECTED']),
+  reason: z.string().max(1000).optional(),
 });
 
 const stopInput = z.object({

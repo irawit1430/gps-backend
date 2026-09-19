@@ -57,6 +57,13 @@ describe('materialiseRuns', () => {
     expect(start.getMinutes()).toBe(15);
   });
 
+  it('uses the route school timezone instead of the server timezone', async () => {
+    const p = mockPrisma([run({ route: { schoolId: 'school-1', school: { timezone: 'America/New_York' } } })]);
+    await materialiseRuns(p, { days: 1, now: MONDAY });
+    expect(p.trip.createMany.mock.calls[0][0].data[0].scheduledStart.toISOString())
+      .toBe('2026-11-16T12:15:00.000Z');
+  });
+
   it('skips days the weekday pattern excludes', async () => {
     // Friday, so the 3-day window covers Fri, Sat, Sun — only Friday operates.
     const p = mockPrisma([run()]);

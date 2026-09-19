@@ -28,6 +28,7 @@ enum LeaveStatus {
   PENDING
   APPROVED
   REJECTED
+  CANCELLED
 }
 
 enum AttendanceType {
@@ -91,6 +92,9 @@ model User {
   parentStudents Student[]      @relation("ParentStudents")
   driverTrips    Trip[]         @relation("DriverTrips")
   notifications  Notification[]
+  pushDevices PushDevice[]
+  incidentAcknowledgements IncidentAcknowledgement[]
+  accountRequests AccountRequest[]
   passwordResetRequests PasswordResetRequest[]
 
   @@index([schoolId])
@@ -100,6 +104,10 @@ model User {
 model School {
   id            String   @id @default(uuid())
   name          String
+  timezone      String   @default("Asia/Kolkata")
+  supportHours  String?
+  leaveCutoffMinutes Int?
+  leaveResponseHours Int?
   address       String?
   contactPerson String?
   city          String?
@@ -121,6 +129,7 @@ model School {
   routes       Route[]
   students     Student[]
   calendarDays CalendarDay[]
+  accountRequests AccountRequest[]
 }
 
 model Bus {
@@ -388,6 +397,7 @@ model Trip {
 
   gpsLogs        GpsLog[]
   attendanceLogs AttendanceLog[]
+  stopEvents StopEvent[]
 
   @@index([driverId, status])
   @@index([busId, status])
@@ -424,6 +434,16 @@ model AttendanceLog {
   type      AttendanceType
   source    AttendanceSource @default(SCAN)
   timestamp DateTime       @default(now())
+  stopId    String?
+  stopName  String?
+  lat       Float?
+  lng       Float?
+  recordedBy String?
+  handoverConfirmed Boolean @default(false)
+  evidenceAt DateTime?
+  distanceFromStopMeters Float?
+  evidenceStatus String?
+  requestKey String? @unique
 
   @@index([studentId, timestamp])
   @@index([tripId, timestamp])
@@ -446,6 +466,18 @@ model LeaveApplication {
   status    LeaveStatus @default(PENDING)
   createdAt DateTime    @default(now())
   updatedAt DateTime    @updatedAt
+  scope     String @default("SCHOOL")
+  direction RunDirection?
+  startDay  String?
+  endDay    String?
+  timezone  String?
+  requestKey String? @unique
+  requestHash String?
+  decisionReason String?
+  decidedBy String?
+  decidedAt DateTime?
+  cancellationRequestedAt DateTime?
+  history Json?
 
   @@index([studentId, status])
   @@index([status, createdAt(sort: Desc)])
@@ -479,6 +511,11 @@ model EmergencyAlert {
   status    EmergencyStatus @default(ACTIVE)
   createdAt DateTime        @default(now())
   updatedAt DateTime        @updatedAt
+  resolvedBy String?
+  resolvedAt DateTime?
+  resolutionNote String?
+  audience String @default("ALL")
+  acknowledgements IncidentAcknowledgement[]
 
   @@index([schoolId, status])
   @@index([createdAt(sort: Desc)])
@@ -493,9 +530,68 @@ model Notification {
   type      NotificationType @default(SYSTEM)
   isRead    Boolean          @default(false)
   createdAt DateTime         @default(now())
+  context   Json?
+  eventKey  String? @unique
 
   @@index([userId, createdAt(sort: Desc)])
   @@index([userId, isRead])
+}
+
+model PushDevice {
+  id String @id @default(uuid())
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceId String
+  platform String
+  provider String @default("FCM")
+  token String @unique
+  enabled Boolean @default(true)
+  lastAcceptedAt DateTime?
+  lastFailure String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([userId, deviceId])
+  @@index([userId, enabled])
+}
+
+model IncidentAcknowledgement {
+  id String @id @default(uuid())
+  alertId String
+  alert EmergencyAlert @relation(fields: [alertId], references: [id], onDelete: Cascade)
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  acknowledgedAt DateTime @default(now())
+  alertUpdatedAt DateTime
+  @@unique([alertId, userId])
+}
+
+model StopEvent {
+  id String @id @default(uuid())
+  tripId String
+  trip Trip @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  stopId String
+  type String
+  occurredAt DateTime
+  recordedBy String
+  lat Float?
+  lng Float?
+  requestKey String @unique
+  @@index([tripId, occurredAt])
+}
+
+model AccountRequest {
+  id String @id @default(uuid())
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  schoolId String?
+  school School? @relation(fields: [schoolId], references: [id], onDelete: SetNull)
+  type String
+  message String
+  status String @default("PENDING")
+  decisionReason String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([schoolId, status])
 }
 
 model GlobalSettings {

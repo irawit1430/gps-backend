@@ -68,9 +68,18 @@ function duplicateStudentFieldError(err) {
   return 'RFID Tag is already assigned to another student.';
 }
 
+function distanceMeters(aLat, aLng, bLat, bLng) {
+  const rad = n => n * Math.PI / 180;
+  const dLat = rad(bLat - aLat), dLng = rad(bLng - aLng);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(aLat)) * Math.cos(rad(bLat)) * Math.sin(dLng / 2) ** 2;
+  return Math.round(6371000 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h)));
+}
+
 const config = require('./config');
 const logger = require('./logger');
 const S = require('./schemas');
+const { selectJourney, selectNextJourney, stopEta, journeyState } = require('./journey');
+const { calendarDate, dayBounds, DEFAULT_ZONE } = require('./schoolTime');
 const { validate } = require('./middleware/validate');
 const { authenticate, authorizeRoles, requireTenant, requireSelfOrRoles, logoutToken, invalidateUser } = require('./middleware/auth');
 const { telemetryHmac } = require('./middleware/telemetryHmac');
@@ -147,11 +156,8 @@ app.use(globalLimiter);
 // ─── Public routes (health, login, telemetry) ──────────────
 app.get('/', (_req, res) => res.send('Fleet API is running perfectly!'));
 
-// Reports the running process's own clock, not the machine's and not what any
-// config file claims. Every "today" boundary in this service is server-local, so a
-// timezone that was set in .env — where dotenv assigns process.env.TZ long after Node
-// has already fixed its timezone — reads as configured and does nothing. This makes
-// that difference visible without shell access.
+// Reports the running process's clock. School-calendar operations use each school's
+// configured IANA timezone, while this remains useful for diagnosing host clock drift.
 app.get('/healthz', (_req, res) =>
   res.status(200).json({
     status: 'ok',
@@ -172,6 +178,22 @@ app.get('/readyz', async (_req, res) => {
     return res.status(503).json({ status: 'degraded', checks, error: err.message });
   }
   res.status(200).json({ status: 'ok', checks });
+});
+
+// Parents need a working contact before sign-in and before a child is linked. Keep
+// this deliberately narrow: operational contact details only, no account roster.
+app.get('/api/public/schools/:schoolId/support', async (req, res) => {
+  try {
+    const school = await prisma.school.findFirst({
+      where: { id: req.params.schoolId, status: 'ACTIVE' },
+      select: { id: true, name: true, contactPerson: true, contactPhone: true, phone: true, contactEmail: true, email: true, supportHours: true, timezone: true, leaveCutoffMinutes: true, leaveResponseHours: true },
+    });
+    if (!school) return res.status(404).json({ error: 'School support details not found' });
+    res.json({ ...school, phone: school.contactPhone || school.phone || null, email: school.contactEmail || school.email || null });
+  } catch (err) {
+    req.log.error({ err }, 'public support lookup failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // Login (rate-limited, unauthenticated)
@@ -448,6 +470,7 @@ app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => 
 
 // ─── Authenticated routes below ────────────────────────────
 app.use(authenticate);
+require('./auditRoutes').registerAuditRoutes(app, { prisma, io, emitToUser, emitToSchool, isPushConfigured, pushToUsers, parentIdsOnTrip, mailer });
 
 // Broad RBAC prefixes
 app.use('/api/admin', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'));
@@ -1304,6 +1327,7 @@ app.post('/api/schools/:schoolId/broadcast', requireTenant('schoolId'), authoriz
         type: 'ADMIN_BROADCAST',
         message: req.body.message,
         tripId: req.body.tripId || null,
+        audience,
       }
     });
 
@@ -1357,7 +1381,8 @@ app.post('/api/schools/:schoolId/broadcast', requireTenant('schoolId'), authoriz
           userId,
           title: notifTitle,
           message: req.body.message,
-          type: notifType
+          type: notifType,
+          context: { type: notifType, incidentId: alert.id, tripId: alert.tripId }
         }))
       });
 
@@ -1722,7 +1747,7 @@ async function runsDependingOn(where) {
 async function loadRunForCaller(req, res) {
   const run = await prisma.run.findUnique({
     where: { id: req.params.runId },
-    include: { route: { select: { schoolId: true } } },
+    include: { route: { select: { schoolId: true, school: { select: { timezone: true } } } } },
   });
   if (!run) { res.status(404).json({ error: 'Run not found' }); return null; }
   if (req.user.role !== 'SUPER_ADMIN' && run.route.schoolId !== req.user.schoolId) {
@@ -1786,7 +1811,7 @@ async function applyExceptionToExistingTrip(run, date, exception, log) {
   if (exception.departure) {
     await prisma.trip.update({
       where: { id: trip.id },
-      data: { scheduledStart: departureAt(date, exception.departure) },
+      data: { scheduledStart: departureAt(date, exception.departure, run.route?.school?.timezone || DEFAULT_ZONE) },
     });
     log?.info({ tripId: trip.id, runId: run.id }, 'Exception shifted an existing trip');
     return true;
@@ -2369,24 +2394,6 @@ app.patch('/api/parents/:id/preferences',
   }
 );
 
-// Arrival time for one stop: RouteStop.expectedArrivalMinutes anchored to the trip's
-// actual startTime, or to its scheduledStart while the trip is still PLANNED.
-function stopEta(trip, stop) {
-  const offset = stop?.expectedArrivalMinutes;
-  // Once the trip is moving its real startTime is the truth; before that, the planned
-  // departure carries the schedule, which is what makes an ETA visible pre-departure.
-  const anchor = trip?.startTime || trip?.scheduledStart;
-  if (!anchor || offset === null || offset === undefined) {
-    return { stopEtaAt: null, stopEtaMinutes: null, etaBasis: null };
-  }
-  const at = new Date(new Date(anchor).getTime() + offset * 60_000);
-  return {
-    stopEtaAt: at.toISOString(),
-    stopEtaMinutes: Math.round((at.getTime() - Date.now()) / 60_000),
-    etaBasis: trip.startTime ? 'ACTUAL_START' : 'SCHEDULED_START',
-  };
-}
-
 // Parents of the children riding a given trip. Used to scope emergency alerts to the
 // families actually affected instead of the whole school.
 async function parentIdsOnTrip(tripId) {
@@ -2459,7 +2466,7 @@ app.get('/api/parents/:parentId/students',
       const students = await prisma.student.findMany({
         where: { parentId: req.params.parentId },
         include: {
-          school: { select: { phone: true, contactPhone: true } },
+          school: { select: { phone: true, contactPhone: true, timezone: true, leaveCutoffMinutes: true, leaveResponseHours: true } },
           routeMappings: {
             // Oldest first, so the fallbacks below are stable across refreshes.
             orderBy: { createdAt: 'asc' },
@@ -2469,7 +2476,7 @@ app.get('/api/parents/:parentId/students',
                   route: {
                     include: {
                       trips: {
-                        where: { status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
+                        where: { status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED', 'COMPLETED', 'CANCELLED'] }, OR: [{ serviceDate: { gte: new Date(Date.now() - 2 * 86400000) } }, { serviceDate: null }] },
                         // The parent screen shows ONE trip, so the order decides which.
                         // Unordered, a school day with a morning and an afternoon leg on the
                         // same route handed out whichever Postgres returned first — and an
@@ -2497,10 +2504,9 @@ app.get('/api/parents/:parentId/students',
       // parent's children. The home screen said "On board" off a bus telemetry packet
       // because it had nothing else to read — a child at home sick showed as on board
       // while the bus ran its route. These are what it should have been reading.
-      const startOfToday = new Date();
-      startOfToday.setHours(0, 0, 0, 0);
-      const endOfToday = new Date(startOfToday);
-      endOfToday.setHours(23, 59, 59, 999);
+      const bounds = students.map(s => dayBounds(calendarDate(new Date(), s.school?.timezone || DEFAULT_ZONE), s.school?.timezone || DEFAULT_ZONE));
+      const startOfToday = new Date(Math.min(...bounds.map(b => +b.start), Date.now()));
+      const endOfToday = new Date(Math.max(...bounds.map(b => +b.end), Date.now()));
       const childIds = students.map((s) => s.id);
 
       const [todaysLogs, todaysLeave] = await Promise.all([
@@ -2508,7 +2514,7 @@ app.get('/api/parents/:parentId/students',
           ? prisma.attendanceLog.findMany({
               where: { studentId: { in: childIds }, timestamp: { gte: startOfToday } },
               orderBy: { timestamp: 'desc' },
-              select: { studentId: true, type: true, timestamp: true, tripId: true, source: true },
+              select: { studentId: true, type: true, timestamp: true, tripId: true, source: true, stopId: true, stopName: true, lat: true, lng: true, recordedBy: true, handoverConfirmed: true, evidenceAt: true },
             })
           : [],
         childIds.length
@@ -2519,14 +2525,10 @@ app.get('/api/parents/:parentId/students',
                 startDate: { lte: endOfToday },
                 endDate: { gte: startOfToday },
               },
-              select: { studentId: true },
+              select: { studentId: true, direction: true, startDay: true, endDay: true, timezone: true },
             })
           : [],
       ]);
-
-      const latestScan = new Map();
-      for (const l of todaysLogs) if (!latestScan.has(l.studentId)) latestScan.set(l.studentId, l);
-      const onLeaveToday = new Set(todaysLeave.map((l) => l.studentId));
 
       const formatted = students.map((s) => {
         // A child can hold a pickup mapping and a drop-off mapping, each on its own
@@ -2535,18 +2537,13 @@ app.get('/api/parents/:parentId/students',
         // leg whose trip direction matches the mapping, then a trip that has actually
         // started, then any trip at all. One symmetric mapping resolves to itself,
         // exactly as before.
-        const candidates = (s.routeMappings || [])
-          .filter((m) => m.routeStop)
-          .map((m) => ({ stop: m.routeStop, direction: m.direction, trip: m.routeStop.route?.trips[0] || null }));
-        const best =
-          candidates.find((c) => c.trip?.direction && c.trip.direction === c.direction) ||
-          candidates.find((c) => c.trip?.startTime) ||
-          candidates.find((c) => c.trip) ||
-          candidates[0] ||
-          null;
+        const zone = s.school?.timezone || DEFAULT_ZONE;
+        const best = selectJourney(s.routeMappings, new Date(), zone);
+        const next = selectNextJourney(s.routeMappings, new Date());
         const stop = best?.stop || null;
         const t = best?.trip || null;
-        const scan = latestScan.get(s.id) || null;
+        const localDay = calendarDate(new Date(), zone);
+        const scan = t ? todaysLogs.find(l => l.studentId === s.id && l.tripId === t.id && calendarDate(l.timestamp, zone) === localDay) || null : null;
         let tripStatus = 'NOT_STARTED';
         if (t) {
           if (t.status === 'ON_SCHEDULE') tripStatus = 'IN_TRANSIT';
@@ -2561,6 +2558,27 @@ app.get('/api/parents/:parentId/students',
           driverName: t?.driver?.name || 'Unassigned',
           licensePlate: t?.bus?.licensePlate || 'Unassigned',
           tripStatus,
+          journeyState: journeyState(t, scan),
+          schoolDate: localDay,
+          timezone: zone,
+          syncedAt: new Date().toISOString(),
+          readiness: {
+            childLinked: true,
+            stopAssigned: Boolean(stop),
+            journeyScheduled: Boolean(t || next),
+            contactsAvailable: Boolean(s.guardianPhone || t?.driver?.phone || s.school?.phone || s.school?.contactPhone),
+          },
+          leavePolicy: {
+            cutoffMinutes: s.school?.leaveCutoffMinutes ?? null,
+            expectedResponseHours: s.school?.leaveResponseHours ?? null,
+          },
+          nextJourney: next ? {
+            tripId: next.trip.id,
+            direction: next.trip.direction || null,
+            scheduledStart: next.trip.scheduledStart,
+            stopId: next.stop?.id || null,
+            stopName: next.stop?.name || null,
+          } : null,
           // Where the CHILD is, as opposed to where the bus is. null status means no
           // scan today — genuinely unknown, and not the same as absent. The app must
           // render unknown as unknown; that distinction is the whole point.
@@ -2569,10 +2587,17 @@ app.get('/api/parents/:parentId/students',
             at: scan?.timestamp?.toISOString() || null,
             tripId: scan?.tripId || null,
             source: scan?.source || null,
+            stopId: scan?.stopId || null,
+            stopName: scan?.stopName || null,
+            lat: scan?.lat ?? null,
+            lng: scan?.lng ?? null,
+            recordedBy: scan?.recordedBy || null,
+            handoverConfirmed: scan?.handoverConfirmed || false,
+            evidenceAt: scan?.evidenceAt || null,
           },
           // Approved leave covering today. A child on leave who never boards is not a
           // no-show, and must not read as one on any screen.
-          onLeave: onLeaveToday.has(s.id),
+          onLeave: todaysLeave.some(l => l.studentId === s.id && (!l.direction || l.direction === t?.direction) && (!l.startDay || (l.startDay <= localDay && l.endDay >= localDay))),
           busId: t?.busId || null,
           tripId: t?.id || null,
           // The child's own stop — needed to draw the pin and to measure an ETA against.
@@ -2634,9 +2659,14 @@ app.get('/api/parents/:parentId/students/:studentId/trip',
       });
       if (mappings.length === 0) return res.status(404).json({ error: 'Student is not mapped to a route stop' });
 
+      const rideClauses = mappings.map((m) => ({
+        routeId: m.routeStop.routeId,
+        ...(m.direction ? { direction: m.direction } : {}),
+      }));
+
       const trip = await prisma.trip.findFirst({
         where: {
-          routeId: { in: [...new Set(mappings.map((m) => m.routeStop.routeId))] },
+          OR: rideClauses,
           status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] },
         },
         include: {
@@ -2671,10 +2701,15 @@ app.get('/api/parents/:parentId/students/:studentId/trip',
         mappings.find(onThisRoute) ||
         mappings[0];
 
-      const logs = await prisma.attendanceLog.findMany({
-        where: { tripId: trip.id },
-        select: { studentId: true, type: true, timestamp: true },
-      });
+      const [logs, routeEvents] = await Promise.all([
+        prisma.attendanceLog.findMany({
+          where: { tripId: trip.id },
+          select: { studentId: true, type: true, timestamp: true, stopId: true },
+        }),
+        prisma.stopEvent?.findMany
+          ? prisma.stopEvent.findMany({ where: { tripId: trip.id }, orderBy: { occurredAt: 'asc' } })
+          : [],
+      ]);
 
       const ridesThisLeg = (m) => !trip.direction || !m.direction || m.direction === trip.direction;
       const stops = trip.route.stops.map((stop) => {
@@ -2682,9 +2717,14 @@ app.get('/api/parents/:parentId/students/:studentId/trip',
           stop.studentMappings.filter(ridesThisLeg).map((m) => m.studentId)
         );
         const boardings = logs.filter((l) => l.type === 'BOARDED' && stopStudentIds.has(l.studentId));
-        // No per-stop passage is recorded anywhere, so the first boarding at a stop is
-        // the closest honest proxy for "the bus was here".
-        const firstBoarding = boardings.reduce(
+        // Only a record captured at this exact stop advances progress. A scheduled
+        // time passing, or a child assigned to this stop scanning somewhere else,
+        // is not evidence that the bus reached it.
+        const stopEvents = [
+          ...logs.filter((l) => l.stopId === stop.id),
+          ...routeEvents.filter((e) => e.stopId === stop.id && e.type === 'ARRIVED').map((e) => ({ timestamp: e.occurredAt })),
+        ];
+        const firstPassage = stopEvents.reduce(
           (earliest, l) => (!earliest || l.timestamp < earliest ? l.timestamp : earliest),
           null
         );
@@ -2698,7 +2738,7 @@ app.get('/api/parents/:parentId/students/:studentId/trip',
           ...stopEta(trip, stop),
           isMyStop: stop.id === mapping.routeStop.id,
           boardedCount: boardings.length,
-          passedAt: firstBoarding ? new Date(firstBoarding).toISOString() : null,
+          passedAt: firstPassage ? new Date(firstPassage).toISOString() : null,
         };
       });
 
@@ -2903,6 +2943,7 @@ async function sosHandler(req, res) {
         message: message || 'Driver triggered SOS',
         tripId: tripId || null,
         status: 'ACTIVE',
+        audience: 'PARENTS',
       },
     });
     syncEmergencyAlertToFirebase(alert);
@@ -3103,14 +3144,18 @@ app.get('/api/drivers/:driverId/trips',
       // This is the driver app's polling endpoint — by far the most requested one,
       // so every column it drags along is paid for on every poll. Keep the payload
       // to what docs/frontend/driver-app.md §2 actually documents.
-      const startOfToday = new Date();
-      startOfToday.setHours(0, 0, 0, 0);
+      // The route include below reveals the school's timezone. Pull a deliberately
+      // narrow two-day scan window first, then trim it to the exact school-local day
+      // after the trips arrive. This avoids using the Render host timezone while
+      // keeping a long-running trip's lifetime attendance out of the hot response.
+      const attendanceLookback = new Date(Date.now() - 48 * 60 * 60 * 1000);
 
       const trips = await prisma.trip.findMany({
         where: { driverId: req.params.driverId, status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
         include: {
           route: {
             include: {
+              school: { select: { timezone: true } },
               stops: {
                 orderBy: { orderIdx: 'asc' },
                 include: {
@@ -3128,12 +3173,21 @@ app.get('/api/drivers/:driverId/trips',
           // Unbounded, this grows for the life of the trip; the app only needs
           // today's scans to know who is already aboard.
           attendanceLogs: {
-            where: { timestamp: { gte: startOfToday } },
+            where: { timestamp: { gte: attendanceLookback } },
             select: { id: true, studentId: true, type: true, timestamp: true },
           },
         },
         orderBy: { createdAt: 'asc' },
       });
+
+      const schoolZone = trips.find((t) => t.route?.school?.timezone)?.route.school.timezone || DEFAULT_ZONE;
+      const schoolDay = dayBounds(calendarDate(new Date(), schoolZone), schoolZone);
+      for (const trip of trips) {
+        trip.attendanceLogs = (trip.attendanceLogs || []).filter((row) =>
+          new Date(row.timestamp) >= schoolDay.start && new Date(row.timestamp) < schoolDay.end
+        );
+        if (trip.route) delete trip.route.school;
+      }
 
       // Shape each trip to the leg it is actually driving, before anything downstream
       // counts students or fans out leaves.
@@ -3163,8 +3217,8 @@ app.get('/api/drivers/:driverId/trips',
       // above. One extra bounded query covers every student on every returned trip,
       // then fans out — the driver app reads `trip.leaveApplications` to grey out
       // kids who are not coming, so a stop is not held for them.
-      const endOfToday = new Date(startOfToday);
-      endOfToday.setHours(23, 59, 59, 999);
+      const startOfToday = schoolDay.start;
+      const endOfToday = schoolDay.end;
 
       const studentIdsByTrip = trips.map((t) => [
         ...new Set((t.route?.stops || []).flatMap((s) => s.studentMappings.map((m) => m.student.id))),
@@ -3178,20 +3232,20 @@ app.get('/api/drivers/:driverId/trips',
             where: {
               studentId: { in: allStudentIds },
               status: 'APPROVED',
-              startDate: { lte: endOfToday },
+              startDate: { lt: endOfToday },
               endDate: { gte: startOfToday },
             },
-            select: { id: true, studentId: true, status: true, startDate: true, endDate: true },
+            select: { id: true, studentId: true, status: true, startDate: true, endDate: true, scope: true, direction: true },
           })
         : [];
 
       // One entry per student, not one per leave row. A student can hold two APPROVED
       // leaves whose ranges both cover today, and a second entry for the same child is
       // meaningless to render — it only collides keys in the client.
-      const leaveByStudent = new Map();
-      for (const l of leaves) if (!leaveByStudent.has(l.studentId)) leaveByStudent.set(l.studentId, l);
       trips.forEach((t, i) => {
-        t.leaveApplications = studentIdsByTrip[i].map((id) => leaveByStudent.get(id)).filter(Boolean);
+        t.leaveApplications = studentIdsByTrip[i].map((id) => leaves.find((l) =>
+          l.studentId === id && (l.scope === 'SCHOOL' || !l.direction || !t.direction || l.direction === t.direction)
+        )).filter(Boolean);
       });
 
       // Swap every token for its hash before this leaves the server. The scanner
@@ -3240,6 +3294,9 @@ function emitTripChange(trip, reason) {
   };
   emitToSchool(io, trip.route?.schoolId, 'trip_status_change', payload);
   if (trip.driverId) emitToUser(io, trip.driverId, 'trip_status_change', payload);
+  parentIdsOnTrip(trip.id)
+    .then((ids) => ids.forEach((id) => emitToUser(io, id, 'journey_changed', payload)))
+    .catch((err) => logger.warn({ err: err.message, tripId: trip.id }, 'parent journey event failed'));
 }
 
 async function ownsTrip(req, res, next) {
@@ -3256,16 +3313,24 @@ async function ownsTrip(req, res, next) {
 
 app.patch('/api/trips/:tripId/status', ownsTrip, validate({ body: S.tripStatus }), async (req, res) => {
   try {
+    if (req.user.role === 'DRIVER' && !['ON_SCHEDULE', 'DELAYED', 'COMPLETED'].includes(req.body.status)) {
+      return res.status(403).json({ error: 'Drivers may only start, delay, or complete their own trip' });
+    }
+
+    let currentTrip = null;
     // Creation only blocks a *running* conflict, so two PLANNED trips may share a bus
     // or driver. The conflict has to be re-checked here, or both can be started and
     // the bus ends up on two live trips at once.
     if (req.body.status === 'ON_SCHEDULE' || req.body.status === 'DELAYED') {
-      const trip = await prisma.trip.findUnique({ where: { id: req.params.tripId } });
-      if (!trip) return res.status(404).json({ error: 'Trip not found' });
+      currentTrip = await prisma.trip.findUnique({ where: { id: req.params.tripId } });
+      if (!currentTrip) return res.status(404).json({ error: 'Trip not found' });
+      if (req.user.role === 'DRIVER' && ['COMPLETED', 'CANCELLED'].includes(currentTrip.status)) {
+        return res.status(409).json({ error: 'A completed or cancelled trip cannot be restarted' });
+      }
       const conflict = await prisma.trip.findFirst({
         where: {
           id: { not: req.params.tripId },
-          OR: [{ busId: trip.busId }, { driverId: trip.driverId }],
+          OR: [{ busId: currentTrip.busId }, { driverId: currentTrip.driverId }],
           status: { in: ['ON_SCHEDULE', 'DELAYED'] },
         },
       });
@@ -3274,17 +3339,46 @@ app.patch('/api/trips/:tripId/status', ownsTrip, validate({ body: S.tripStatus }
       }
     }
 
+    if (req.body.status === 'COMPLETED' && req.user.role === 'DRIVER') {
+      currentTrip = currentTrip || await prisma.trip.findUnique({ where: { id: req.params.tripId } });
+      if (!currentTrip) return res.status(404).json({ error: 'Trip not found' });
+      if (!['ON_SCHEDULE', 'DELAYED'].includes(currentTrip.status)) {
+        return res.status(409).json({ error: 'Only a running trip can be completed' });
+      }
+
+      // Newest-first means the first row per student is their current onboard state.
+      // Do not let a driver close the journey while the system still tells a family
+      // their child is on the bus. School admins retain override access for genuine
+      // record corrections and abandoned-trip recovery.
+      const attendance = await prisma.attendanceLog.findMany({
+        where: { tripId: req.params.tripId, type: { in: ['BOARDED', 'ALIGHTED'] } },
+        select: { studentId: true, type: true },
+        orderBy: { timestamp: 'desc' },
+      });
+      const latest = new Map();
+      for (const row of attendance) {
+        if (!latest.has(row.studentId)) latest.set(row.studentId, row.type);
+      }
+      const studentIds = [...latest.entries()]
+        .filter(([, type]) => type === 'BOARDED')
+        .map(([studentId]) => studentId);
+      if (studentIds.length) {
+        return res.status(409).json({
+          error: 'Cannot complete trip while children are still aboard',
+          studentIds,
+          action: 'Record each child as ALIGHTED or ask the school office to reconcile the trip.',
+        });
+      }
+    }
+
     const data = { status: req.body.status };
-    if (req.body.status === 'ON_SCHEDULE') {
-      data.startTime = new Date();
+    if (req.body.status === 'ON_SCHEDULE' || req.body.status === 'DELAYED') {
+      const actualStart = currentTrip?.startTime || new Date();
+      if (!currentTrip?.startTime) data.startTime = actualStart;
       // delayMinutes and currentEtaMessage were columns nothing ever wrote. With a
       // scheduledStart to compare against they finally mean something.
-      const planned = await prisma.trip.findUnique({
-        where: { id: req.params.tripId },
-        select: { scheduledStart: true },
-      });
-      if (planned?.scheduledStart) {
-        const late = Math.round((data.startTime - new Date(planned.scheduledStart)) / 60_000);
+      if (currentTrip?.scheduledStart) {
+        const late = Math.round((actualStart - new Date(currentTrip.scheduledStart)) / 60_000);
         data.delayMinutes = Math.max(0, late);
         data.currentEtaMessage = late > 0 ? `Running ${late} min late` : 'On time';
       }
@@ -3350,17 +3444,38 @@ async function pushToUsers(userIds, payload) {
     const ids = [...new Set((userIds || []).filter(Boolean))];
     if (ids.length === 0) return;
     const users = await prisma.user.findMany({
-      where: { id: { in: ids }, fcmToken: { not: null } },
-      select: { id: true, fcmToken: true },
+      where: { id: { in: ids } },
+      select: { id: true, fcmToken: true, notificationSettings: true },
     });
-    if (users.length === 0) return;
+    const enabledUsers = users.filter((u) => wantsNotification(u.notificationSettings, 'pushNotifications'));
+    const enabledIds = enabledUsers.map((u) => u.id);
+    const devices = prisma.pushDevice?.findMany
+      ? await prisma.pushDevice.findMany({
+          where: { userId: { in: enabledIds }, enabled: true, provider: 'FCM' },
+          select: { token: true },
+        })
+      : [];
+    const tokens = [...new Set([...enabledUsers.map((u) => u.fcmToken), ...devices.map((d) => d.token)].filter(Boolean))];
+    if (tokens.length === 0) return;
 
-    const { invalidTokens } = await sendPush(users.map((u) => u.fcmToken), payload);
+    const { invalidTokens } = await sendPush(tokens, payload);
     if (invalidTokens?.length) {
       // Uninstalled app / re-registered device: drop the token so it is not retried.
       await prisma.user.updateMany({
         where: { fcmToken: { in: invalidTokens } },
         data: { fcmToken: null },
+      });
+      if (prisma.pushDevice?.updateMany) {
+        await prisma.pushDevice.updateMany({
+          where: { token: { in: invalidTokens } },
+          data: { enabled: false, lastFailure: 'INVALID_TOKEN' },
+        });
+      }
+    }
+    if (prisma.pushDevice?.updateMany) {
+      const accepted = tokens.filter((token) => !invalidTokens?.includes(token));
+      if (accepted.length) await prisma.pushDevice.updateMany({
+        where: { token: { in: accepted } }, data: { lastAcceptedAt: new Date(), lastFailure: null },
       });
     }
   } catch (err) {
@@ -3375,7 +3490,7 @@ app.post('/api/attendance', validate({ body: S.attendance }), async (req, res) =
   try {
     const trip = await prisma.trip.findUnique({
       where: { id: req.body.tripId },
-      include: { route: true },
+      include: { route: { include: { school: { select: { timezone: true } } } } },
     });
     if (!trip) return res.status(404).json({ error: 'Trip not found' });
     if (req.user.role === 'DRIVER' && trip.driverId !== req.user.id) return res.status(403).json({ error: 'Forbidden: not your trip' });
@@ -3432,17 +3547,22 @@ app.post('/api/attendance', validate({ body: S.attendance }), async (req, res) =
     // noise inside a week and stops being read at all. That would destroy the only
     // notification in this product with a window in which a parent can still act.
     if (req.body.type === 'NO_SHOW') {
-      const startOfDay = new Date(occurredAt);
-      startOfDay.setHours(0, 0, 0, 0);
-      const endOfDay = new Date(startOfDay);
-      endOfDay.setHours(23, 59, 59, 999);
+      const zone = trip.route?.school?.timezone || DEFAULT_ZONE;
+      const { start: startOfDay, end: endOfDay } = dayBounds(calendarDate(occurredAt, zone), zone);
 
       const onLeave = await prisma.leaveApplication.findFirst({
         where: {
           studentId: req.body.studentId,
           status: 'APPROVED',
-          startDate: { lte: endOfDay },
+          startDate: { lt: endOfDay },
           endDate: { gte: startOfDay },
+          OR: [
+            { scope: 'SCHOOL' },
+            {
+              scope: 'TRANSPORT',
+              ...(trip.direction ? { OR: [{ direction: null }, { direction: trip.direction }] } : {}),
+            },
+          ],
         },
         select: { id: true },
       });
@@ -3459,11 +3579,19 @@ app.post('/api/attendance', validate({ body: S.attendance }), async (req, res) =
     // opt in with an Idempotency-Key header; the same scan (student + trip + type)
     // inside the window is treated as that replay and answered with the original row.
     //
-    // NOTE: this matches on the natural key, not on the key value itself — storing
-    // keys needs a column, and prisma/schema.prisma is off-limits without the owner's
-    // go-ahead. Two *genuinely* different scans of the same student, same trip, same
-    // type inside 10 minutes therefore collapse into one.
-    if (req.headers['idempotency-key']) {
+    // The hashed key provides exact replay identity. The short natural-key fallback
+    // keeps older offline clients safe until they start sending the header.
+    const requestKey = req.headers['idempotency-key']
+      ? crypto.createHash('sha256').update(`${req.user.id}:${req.headers['idempotency-key']}`).digest('hex')
+      : null;
+    if (requestKey) {
+      const keyed = await prisma.attendanceLog.findFirst({ where: { requestKey } });
+      if (keyed) {
+        if (keyed.studentId !== req.body.studentId || keyed.tripId !== req.body.tripId || keyed.type !== req.body.type) {
+          return res.status(409).json({ error: 'Idempotency-Key was already used for a different attendance record' });
+        }
+        return res.status(200).json({ ...keyed, duplicate: true });
+      }
       const replayWindow = new Date(Date.now() - IDEMPOTENCY_WINDOW_MS);
       const existing = await prisma.attendanceLog.findFirst({
         where: {
@@ -3483,6 +3611,37 @@ app.post('/api/attendance', validate({ body: S.attendance }), async (req, res) =
     // the alarm this product exists to prevent.
     const source = isAdmin && req.body.source === 'MANUAL' ? 'MANUAL' : 'SCAN';
 
+    if ((req.body.lat == null) !== (req.body.lng == null)) {
+      return res.status(400).json({ error: 'lat and lng must be supplied together' });
+    }
+    if (req.body.handoverConfirmed && req.body.type !== 'ALIGHTED') {
+      return res.status(400).json({ error: 'Handover can only be confirmed for a drop-off record' });
+    }
+    let evidence = {};
+    if (req.body.stopId) {
+      const stop = await prisma.routeStop.findFirst({
+        where: {
+          id: req.body.stopId,
+          routeId: trip.routeId,
+          studentMappings: { some: { studentId: req.body.studentId, OR: [{ direction: null }, { direction: trip.direction }] } },
+        },
+        select: { id: true, name: true, lat: true, lng: true },
+      });
+      if (!stop) return res.status(400).json({ error: 'Stop is not assigned to this child for this trip' });
+      const distance = req.body.lat == null ? null : distanceMeters(stop.lat, stop.lng, req.body.lat, req.body.lng);
+      evidence = {
+        stopId: stop.id,
+        stopName: stop.name,
+        lat: req.body.lat ?? null,
+        lng: req.body.lng ?? null,
+        recordedBy: req.user.id,
+        handoverConfirmed: Boolean(req.body.handoverConfirmed),
+        evidenceAt: occurredAt,
+        distanceFromStopMeters: distance,
+        evidenceStatus: distance == null ? 'STOP_RECORDED' : distance <= 200 ? 'EXPECTED_STOP' : 'OUTSIDE_STOP_RADIUS',
+      };
+    }
+
     const log = await prisma.attendanceLog.create({
       data: {
         studentId: req.body.studentId,
@@ -3490,7 +3649,14 @@ app.post('/api/attendance', validate({ body: S.attendance }), async (req, res) =
         type: req.body.type,
         timestamp: occurredAt,
         source,
+        requestKey,
+        ...evidence,
       },
+    });
+
+    if (student.parentId) emitToUser(io, student.parentId, 'journey_changed', {
+      studentId: student.id, tripId: req.body.tripId, attendanceId: log.id,
+      type: req.body.type, occurredAt: occurredAt.toISOString(),
     });
 
     if (student.parentId && source === 'SCAN') {
@@ -3532,7 +3698,8 @@ app.post('/api/attendance', validate({ body: S.attendance }), async (req, res) =
       // routine boarding update and is not silenced by that toggle.
       if (req.body.type === 'NO_SHOW' || wantsNotification(student.parent?.notificationSettings, 'boarding')) {
         const notif = await prisma.notification.create({
-          data: { userId: student.parentId, title, message, type: typeEnum }
+          data: { userId: student.parentId, title, message, type: typeEnum,
+            context: { type: typeEnum, studentId: student.id, tripId: req.body.tripId, attendanceId: log.id } }
         });
 
         emitToUser(io, student.parentId, 'notification', notif);
@@ -4111,7 +4278,7 @@ function parentOpeningPassword() {
 // password instead.
 //
 // Declared below its callers but hoisted, so it is reachable from all of them.
-const TEMP_PASSWORD_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+const TEMP_PASSWORD_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
 function generateTempPassword(length = 12) {
   const bytes = crypto.randomBytes(length);
   let out = '';

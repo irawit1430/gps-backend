@@ -4,7 +4,10 @@ const jwt = require('jsonwebtoken');
 // Mock prisma before importing app
 jest.mock('@prisma/client', () => {
   const mockPrisma = {
+    $queryRaw: jest.fn(),
+    $transaction: jest.fn(async (callback) => callback(mockPrisma)),
     user: {
+      findUnique: jest.fn(),
       update: jest.fn(),
     },
   };
@@ -30,6 +33,7 @@ describe('PATCH /api/parents/:id/preferences', () => {
       id: 'parent-123',
       notificationSettings: JSON.stringify(mockPreferences)
     };
+    prisma.user.findUnique.mockResolvedValue(mockUser);
     prisma.user.update.mockResolvedValue(mockUser);
 
     const res = await request(app)
@@ -42,7 +46,7 @@ describe('PATCH /api/parents/:id/preferences', () => {
     expect(prisma.user.update).toHaveBeenCalledTimes(1);
     expect(prisma.user.update).toHaveBeenCalledWith({
       where: { id: 'parent-123' },
-      data: { notificationSettings: JSON.stringify(mockPreferences) }
+      data: { notificationSettings: mockPreferences }
     });
   });
 
