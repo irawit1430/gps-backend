@@ -34,8 +34,10 @@ ALTER TABLE "LeaveApplication"
 
 UPDATE "LeaveApplication" l
 SET "timezone" = COALESCE(s."timezone", 'Asia/Kolkata'),
-    "startDay" = TO_CHAR(l."startDate" AT TIME ZONE COALESCE(s."timezone", 'Asia/Kolkata'), 'YYYY-MM-DD'),
-    "endDay" = TO_CHAR(l."endDate" AT TIME ZONE COALESCE(s."timezone", 'Asia/Kolkata'), 'YYYY-MM-DD'),
+    -- Prisma stored these UTC instants in TIMESTAMP WITHOUT TIME ZONE columns.
+    -- Attach UTC first, then render the instant in the school's timezone.
+    "startDay" = TO_CHAR((l."startDate" AT TIME ZONE 'UTC') AT TIME ZONE COALESCE(s."timezone", 'Asia/Kolkata'), 'YYYY-MM-DD'),
+    "endDay" = TO_CHAR((l."endDate" AT TIME ZONE 'UTC') AT TIME ZONE COALESCE(s."timezone", 'Asia/Kolkata'), 'YYYY-MM-DD'),
     "history" = jsonb_build_array(jsonb_build_object('action', 'MIGRATED', 'at', CURRENT_TIMESTAMP))
 FROM "Student" st
 JOIN "School" s ON s."id" = st."schoolId"

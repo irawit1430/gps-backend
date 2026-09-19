@@ -185,7 +185,7 @@ Parents now receive `journey_changed`, `leave_changed`, `emergency_alert`, and `
 
 ## Database migration
 
-Migration: `prisma/migrations/10_parent_trust_contracts/migration.sql`
+Migration: `prisma/migrations/z_parent_trust_contracts/migration.sql`
 
 It adds:
 
@@ -230,7 +230,7 @@ The parent app must still make its UI and lifecycle changes in its own repositor
 - Prisma schema validation: passed.
 - Prisma Client generation: passed.
 - JavaScript syntax checks: passed.
-- Jest: **274 tests passed across 36 suites**.
+- Jest: **277 tests passed across 37 suites**.
 - Dependency audit: **0 vulnerabilities** after lockfile updates.
 - Regression coverage includes trip-scoped attendance, journey direction, ETA confidence, timezone/DST behavior, leave idempotency and transitions, cutoff policy, stop/drop evidence, roster direction, tenant authorization and legacy compatibility.
 
