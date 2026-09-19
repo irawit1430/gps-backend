@@ -53,8 +53,7 @@ describe('materialiseRuns', () => {
     await materialiseRuns(p, { days: 1, now: MONDAY });
 
     const start = p.trip.createMany.mock.calls[0][0].data[0].scheduledStart;
-    expect(start.getHours()).toBe(7);
-    expect(start.getMinutes()).toBe(15);
+    expect(start.toISOString()).toBe('2026-11-16T01:45:00.000Z');
   });
 
   it('uses the route school timezone instead of the server timezone', async () => {
@@ -99,7 +98,7 @@ describe('materialiseRuns', () => {
     await materialiseRuns(p, { days: 1, now: MONDAY });
 
     const start = p.trip.createMany.mock.calls[0][0].data[0].scheduledStart;
-    expect(start.getHours()).toBe(9);
+    expect(start.toISOString()).toBe('2026-11-16T03:30:00.000Z');
   });
 
   // Silently generating nothing is how a school finds out at 07:00 that a route has

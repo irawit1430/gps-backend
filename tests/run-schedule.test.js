@@ -98,9 +98,7 @@ describe('resolveRunOnDate — three layers, most specific first', () => {
 describe('departureAt', () => {
   it('builds the departure in local time, not UTC', () => {
     const d = departureAt(MON, '07:15');
-    expect(d.getHours()).toBe(7);
-    expect(d.getMinutes()).toBe(15);
-    expect(d.getDate()).toBe(16);
+    expect(d.toISOString()).toBe('2026-11-16T01:45:00.000Z');
   });
 
   it('returns null for a malformed time rather than an Invalid Date', () => {
