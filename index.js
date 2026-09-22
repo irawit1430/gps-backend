@@ -26,9 +26,27 @@ const { emitToSchool } = require('./middleware/socketAuth');
 const busPresence = require('./busPresence');
 const { materialiseRuns } = require('./materialiseRuns');
 const { sweepUnstartedTrips } = require('./staleTrips');
+const { loadRevocations } = require('./sessionRevocations');
 
-const httpServer = server.listen(config.PORT, () => {
-  logger.info({ port: config.PORT }, 'HTTP + Socket.IO server listening');
+// Put back the sign-out-everywhere cutoffs saved before this restart, before accepting
+// a single request: until they are back, tokens revoked by a password change or
+// reset would work again. If the database cannot answer, start anyway (as before
+// this existed) and keep trying in the background.
+const restoreSessionRevocations = async () => {
+  try {
+    const users = await loadRevocations(prisma);
+    logger.info({ users }, 'Restored session revocations');
+  } catch (err) {
+    logger.error({ err }, 'Could not restore session revocations; retrying in 60s');
+    setTimeout(restoreSessionRevocations, 60 * 1000).unref();
+  }
+};
+
+let httpServer = null;
+restoreSessionRevocations().finally(() => {
+  httpServer = server.listen(config.PORT, () => {
+    logger.info({ port: config.PORT }, 'HTTP + Socket.IO server listening');
+  });
 });
 
 let tcpServer = null;
@@ -177,10 +195,9 @@ async function shutdown(signal) {
   shuttingDown = true;
   logger.info({ signal }, 'Shutting down');
 
-  const closers = [
-    new Promise((resolve) => httpServer.close(resolve)),
-    new Promise((resolve) => io.close(resolve)),
-  ];
+  const closers = [];
+  if (httpServer) closers.push(new Promise((resolve) => httpServer.close(resolve)));
+  closers.push(new Promise((resolve) => io.close(resolve)));
   if (tcpServer) closers.push(new Promise((resolve) => tcpServer.close(resolve)));
 
   const timeout = new Promise((resolve) => setTimeout(resolve, 15000));

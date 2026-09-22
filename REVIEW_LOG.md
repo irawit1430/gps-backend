@@ -66,9 +66,12 @@
    only from the driver-only `GET /api/driver/telemetry-credentials` endpoint.
 2. ~~**P2002 on email updates.**~~ ✅ RESOLVED in `c55f6e5` — parents/drivers/users
    PUT now return 400 "Email already in use" on a duplicate-email collision.
-3. **JWT revocation is in-memory** (`middleware/auth.js`) — per-instance, resets on
-   restart. Fine for single-VM; needs Redis or a `tokenVersion` column for
-   multi-instance / restart-safe revocation.
+3. **JWT revocation is in-memory** (`middleware/auth.js`) — per-instance. ✅ Restart-safe
+   since 2026-09-22 for sign-out-everywhere (password change/reset, role or school change):
+   the cutoff is saved to `User.tokensValidAfter` and restored at boot
+   (`sessionRevocations.js`, migration `za_user_tokens_valid_after`). Still open: a single
+   logout and a deleted user's cutoff reset on restart, and nothing is shared between
+   instances (needs Redis before running more than one).
 4. ~~**OS push (FCM) not implemented.**~~ ✅ RESOLVED (2026-08-25) —
    `User.fcmToken` + `POST /api/users/me/fcm-token`; `sendPush` in `firebase.js`
    fires alongside the socket event for attendance, broadcasts and emergency alerts.

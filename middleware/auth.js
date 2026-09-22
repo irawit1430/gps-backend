@@ -1,18 +1,24 @@
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 
-// In-memory revocation state (lost on PM2 restart, but sufficient for 24h JWTs).
-// NOTE: for multi-instance / restart-safe revocation, back these with Redis or a
-// `tokenVersion` column on the user row.
+// Revocation state, checked on every request and socket connection.
 //
-//  - tokenDenylist: exact tokens revoked on explicit logout (self only).
+//  - tokenDenylist: exact tokens revoked on explicit logout (self only). In memory
+//    only, so a restart forgets it; the app deletes its copy of the token on logout.
 //  - userInvalidatedAt: userId → unix-seconds cutoff. Any token for that user whose
 //    `iat` (issued-at) is at or before the cutoff is rejected. Used to revoke a user's
 //    *existing* tokens when they are deleted or their role/school/password changes —
-//    cases where we do not hold the actual token string.
+//    cases where we do not hold the actual token string. Each cutoff is also handed to
+//    onUserRevoked listeners, which save it (User.tokensValidAfter, see
+//    sessionRevocations.js) so the next process can restoreRevocations() at boot.
+//    Without that, a restart revived every such token until it expired.
+//
+// One process only: a second instance would not see the first one's revocations until
+// it restarted.
 const tokenDenylist = new Set();
 const userInvalidatedAt = new Map();
 const invalidationListeners = new Set();
+const revocationListeners = new Set();
 
 function notifyInvalidation(userId) {
   if (!userId) return;
@@ -30,11 +36,29 @@ function logoutToken(token) {
   notifyInvalidation(jwt.decode(token)?.id);
 }
 
+// Called with (userId, cutoffSeconds) each time invalidateUser ends all of a user's
+// sessions. Not called for a single logout, which ends only the one token.
+function onUserRevoked(listener) {
+  revocationListeners.add(listener);
+  return () => revocationListeners.delete(listener);
+}
+
 // Revoke every token issued to a user up to now (delete / role / school / password change).
 function invalidateUser(userId) {
   if (!userId) return;
-  userInvalidatedAt.set(userId, Math.floor(Date.now() / 1000));
+  const cutoff = Math.floor(Date.now() / 1000);
+  userInvalidatedAt.set(userId, cutoff);
+  for (const listener of revocationListeners) listener(userId, cutoff);
   notifyInvalidation(userId);
+}
+
+// Put back cutoffs saved by an earlier process: [userId, unixSeconds] pairs. A cutoff
+// only ever moves later, so restoring can never revive a token revoked since boot.
+function restoreRevocations(entries) {
+  for (const [userId, cutoff] of entries) {
+    if (!userId || !Number.isFinite(cutoff)) continue;
+    if (cutoff > (userInvalidatedAt.get(userId) || 0)) userInvalidatedAt.set(userId, cutoff);
+  }
 }
 
 function verifyAccessToken(token) {
@@ -143,4 +167,6 @@ module.exports = {
   invalidateUser,
   verifyAccessToken,
   onUserInvalidated,
+  onUserRevoked,
+  restoreRevocations,
 };

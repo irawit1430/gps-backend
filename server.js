@@ -84,6 +84,7 @@ const { validate } = require('./middleware/validate');
 const { authenticate, authorizeRoles, requireTenant, requireSelfOrRoles, logoutToken, invalidateUser, requireCurrentPassword } = require('./middleware/auth');
 const { telemetryHmac } = require('./middleware/telemetryHmac');
 const { attachSocketAuth, emitToSchool, emitToUser, emitToUsers } = require('./middleware/socketAuth');
+const { persistRevocations } = require('./sessionRevocations');
 const positionAudience = require('./positionAudience');
 const { getSimulatedAlerts, getMockNotifications } = require('./mock-data');
 const {
@@ -103,6 +104,8 @@ const io = new Server(server, {
 const prisma = new PrismaClient({ log: ['error', 'warn'] });
 
 attachSocketAuth(io);
+// Save every sign-out-everywhere so a restart does not revive the tokens it ended.
+persistRevocations(prisma, logger);
 
 // ─── Global middleware ─────────────────────────────────────
 app.set('trust proxy', 1); // behind nginx

@@ -83,6 +83,10 @@ model User {
   fcmToken             String?  // FCM push token — never returned by the API
   notificationSettings Json?
   mustResetPassword    Boolean  @default(false)
+  // Tokens issued at or before this moment are refused: set when every session must end
+  // (password change or reset, role or school change) so it outlives a restart. See
+  // sessionRevocations.js.
+  tokensValidAfter     DateTime?
   schoolId             String?
   school               School?  @relation(fields: [schoolId], references: [id])
   lastLoginAt   DateTime?
