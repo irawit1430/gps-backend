@@ -106,7 +106,35 @@ function requireSelfOrRoles(paramName, ...allowedRoles) {
   };
 }
 
+// A parent still on the password they were provisioned with.
+//
+// That password can be one shared by a whole school (PARENT_DEFAULT_PASSWORD), so an
+// account nobody has claimed yet opens for anyone who has the notice and can guess an
+// email — and every parent account can see a child's live position. mustResetPassword
+// used to be advisory: login reported it, nothing enforced it, and an unchanged account
+// stayed fully usable. Login now carries it in the token for parents, and until the
+// password changes that token can do nothing but change it (or log out).
+//
+// Parents only: they are the accounts a shared password opens, and the parent app
+// already routes a forced reset. Drivers and admins get individual passwords, and the
+// super-admin dashboard has no reset flow to route them to.
+function passwordResetPending(user) {
+  return user?.role === 'PARENT' && user?.mustResetPassword === true;
+}
+
+function requireCurrentPassword(req, res, next) {
+  if (passwordResetPending(req.user)) {
+    return res.status(403).json({
+      error: 'Change your password to continue',
+      code: 'PASSWORD_RESET_REQUIRED',
+    });
+  }
+  next();
+}
+
 module.exports = {
+  passwordResetPending,
+  requireCurrentPassword,
   authenticate,
   authorizeRoles,
   requireTenant,

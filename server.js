@@ -81,7 +81,7 @@ const S = require('./schemas');
 const { selectJourney, selectNextJourney, stopEta, journeyState } = require('./journey');
 const { calendarDate, dayBounds, DEFAULT_ZONE } = require('./schoolTime');
 const { validate } = require('./middleware/validate');
-const { authenticate, authorizeRoles, requireTenant, requireSelfOrRoles, logoutToken, invalidateUser } = require('./middleware/auth');
+const { authenticate, authorizeRoles, requireTenant, requireSelfOrRoles, logoutToken, invalidateUser, requireCurrentPassword } = require('./middleware/auth');
 const { telemetryHmac } = require('./middleware/telemetryHmac');
 const { attachSocketAuth, emitToSchool, emitToUser, emitToUsers } = require('./middleware/socketAuth');
 const positionAudience = require('./positionAudience');
@@ -215,7 +215,11 @@ app.post('/api/auth/login', loginLimiter, validate({ body: S.login }), async (re
 
     await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
     const token = jwt.sign(
-      { id: user.id, role: user.role, schoolId: user.schoolId },
+      {
+        id: user.id, role: user.role, schoolId: user.schoolId,
+        // Enforced by requireCurrentPassword. change-password's replacement token omits it.
+        ...(user.role === 'PARENT' && user.mustResetPassword ? { mustResetPassword: true } : {}),
+      },
       config.JWT_SECRET,
       { expiresIn: config.JWT_EXPIRES_IN || '24h' }
     );
@@ -470,6 +474,9 @@ app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => 
 
 // ─── Authenticated routes below ────────────────────────────
 app.use(authenticate);
+// A parent on their provisioning password can only change it (see middleware/auth.js).
+// Before the audit routes so leave requests are covered too.
+app.use(requireCurrentPassword);
 require('./auditRoutes').registerAuditRoutes(app, { prisma, io, emitToUser, emitToSchool, isPushConfigured, pushToUsers, parentIdsOnTrip, mailer });
 
 // Broad RBAC prefixes

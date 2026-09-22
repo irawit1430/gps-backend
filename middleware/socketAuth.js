@@ -1,5 +1,5 @@
 const logger = require('../logger');
-const { verifyAccessToken, onUserInvalidated } = require('./auth');
+const { verifyAccessToken, onUserInvalidated, passwordResetPending } = require('./auth');
 
 // Socket.IO authentication middleware.
 // Clients pass their JWT in handshake auth: io({ auth: { token: '...' } }). Query
@@ -16,6 +16,11 @@ function attachSocketAuth(io) {
     if (!token) return next(new Error('Unauthorized: missing token'));
     try {
       const user = verifyAccessToken(token);
+      // The live feed is what a shared provisioning password would expose, so it waits
+      // for the password change like everything else. Worded without "Unauthorized":
+      // the parent app signs out on that word, which would throw a parent out of the
+      // reset screen they are on.
+      if (passwordResetPending(user)) return next(new Error('Password change required'));
       socket.data.user = user;
       socket.join(`user:${user.id}`);
       if (user.role === 'SCHOOL_ADMIN' && user.schoolId) {
