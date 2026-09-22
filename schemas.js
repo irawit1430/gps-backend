@@ -150,6 +150,19 @@ exports.tripStatus = z.object({
   status: z.enum(TRIP_STATUS),
 });
 
+// The driver app's walk-around before a trip: all six checks, each once, each stamped
+// with when the driver ticked it.
+const PRE_TRIP_ITEMS = ['tyres', 'brakes', 'lights', 'mirrors', 'firstaid', 'doors'];
+exports.preTripCheck = z.object({
+  items: z
+    .array(z.object({ id: z.enum(PRE_TRIP_ITEMS), ok: z.boolean(), checkedAt: z.string().datetime() }))
+    .length(PRE_TRIP_ITEMS.length)
+    .refine((items) => new Set(items.map((i) => i.id)).size === items.length, {
+      message: 'Each check must appear exactly once',
+    }),
+  note: z.string().trim().max(1000).optional(),
+});
+
 exports.attendance = z.object({
   studentId: uuid,
   tripId: uuid,

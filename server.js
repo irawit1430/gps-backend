@@ -3429,6 +3429,59 @@ app.patch('/api/trips/:tripId/status', ownsTrip, validate({ body: S.tripStatus }
   }
 });
 
+// The walk-around the driver app files just before it starts a trip. Until this route
+// existed every one was a 404 the app swallowed, so no inspection was ever kept.
+// A record, not a gate: a trip can still start without one, as it always could.
+app.post('/api/trips/:tripId/pre-trip-check', ownsTrip, validate({ body: S.preTripCheck }), async (req, res) => {
+  try {
+    // ownsTrip lets the school in too, but this is the driver's own account of the bus.
+    if (req.user.role !== 'DRIVER') {
+      return res.status(403).json({ error: "Only the trip's driver can file its pre-trip check" });
+    }
+    const trip = await prisma.trip.findUnique({
+      where: { id: req.params.tripId },
+      select: { status: true, preTripCheck: { select: { id: true } } },
+    });
+    if (!trip) return res.status(404).json({ error: 'Trip not found' });
+    if (trip.status === 'COMPLETED' || trip.status === 'CANCELLED') {
+      return res.status(409).json({ error: 'This trip has ended' });
+    }
+    // Before departure the latest walk-around wins: a driver may redo it. Once the bus
+    // is moving, the one filed before it left is the record and is not replaced.
+    if (trip.status !== 'PLANNED' && trip.preTripCheck) {
+      return res.status(409).json({ error: 'A pre-trip check is already recorded for this trip' });
+    }
+
+    const data = {
+      driverId: req.user.id,
+      items: req.body.items,
+      note: req.body.note || null,
+      submittedAt: new Date(),
+    };
+    const check = await prisma.preTripCheck.upsert({
+      where: { tripId: req.params.tripId },
+      create: { tripId: req.params.tripId, ...data },
+      update: data,
+    });
+    res.json(check);
+  } catch (err) {
+    req.log.error({ err }, 'pre-trip check failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// The school (or the driver) reads it back. Parents are kept out by ownsTrip.
+app.get('/api/trips/:tripId/pre-trip-check', ownsTrip, async (req, res) => {
+  try {
+    const check = await prisma.preTripCheck.findUnique({ where: { tripId: req.params.tripId } });
+    if (!check) return res.status(404).json({ error: 'No pre-trip check recorded for this trip' });
+    res.json(check);
+  } catch (err) {
+    req.log.error({ err }, 'read pre-trip check failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Notification preferences (PATCH /api/parents/:id/preferences) are free-form JSON.
 // These are the keys the parent app ships; anything absent counts as enabled, so a
 // parent who has never opened the settings screen keeps getting everything.

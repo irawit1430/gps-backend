@@ -402,6 +402,7 @@ model Trip {
   gpsLogs        GpsLog[]
   attendanceLogs AttendanceLog[]
   stopEvents StopEvent[]
+  preTripCheck PreTripCheck?
 
   @@index([driverId, status])
   @@index([busId, status])
@@ -581,6 +582,20 @@ model StopEvent {
   lng Float?
   requestKey String @unique
   @@index([tripId, occurredAt])
+}
+
+// The walk-around a driver does before starting a trip, as the driver app files it:
+// one per trip, each item stamped with when it was ticked. A record, not a gate: a trip
+// can start without one (see POST /api/trips/:tripId/pre-trip-check).
+model PreTripCheck {
+  id          String   @id @default(uuid())
+  tripId      String   @unique
+  trip        Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  // Who filed it. Not a relation, so the record outlives the driver's account.
+  driverId    String
+  items       Json     // [{ id, ok, checkedAt }] for tyres, brakes, lights, mirrors, firstaid, doors
+  note        String?
+  submittedAt DateTime @default(now())
 }
 
 model AccountRequest {

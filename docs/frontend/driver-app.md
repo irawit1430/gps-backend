@@ -74,6 +74,20 @@ offline exactly like attendance. Parent progress is based on this evidence; neve
 advance a stop merely because its scheduled time passed.
 
 ## 4. Trip control
+Before starting, file the walk-around:
+```
+POST /api/trips/:tripId/pre-trip-check
+{ "items": [{ "id": "tyres", "ok": true, "checkedAt": "ISO-8601" }, ...],
+  "note"?: "free text, up to 1000 characters" }
+```
+- All six checks, each once: `tyres`, `brakes`, `lights`, `mirrors`, `firstaid`, `doors`
+- Driver of the trip only (403 otherwise); `409` once the trip has ended
+- While the trip is `PLANNED` a new submission replaces the last. Once it is running,
+  the one filed before departure stays (`409`); if none was filed, a late one is kept
+  and its `submittedAt` shows it came after the start
+- Not a gate: `ON_SCHEDULE` is accepted without one
+- The school reads it with `GET /api/trips/:tripId/pre-trip-check` (`404` if none)
+
 ```
 PATCH /api/trips/:tripId/status  { status: 'ON_SCHEDULE' | 'DELAYED' | 'COMPLETED' }
 ```
