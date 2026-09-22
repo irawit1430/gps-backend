@@ -25,6 +25,7 @@ const { flushFirestore } = require('./firebase.js');
 const { emitToSchool } = require('./middleware/socketAuth');
 const busPresence = require('./busPresence');
 const { materialiseRuns } = require('./materialiseRuns');
+const { cancelUnstartedTrips } = require('./staleTrips');
 
 const httpServer = server.listen(config.PORT, () => {
   logger.info({ port: config.PORT }, 'HTTP + Socket.IO server listening');
@@ -68,6 +69,33 @@ setInterval(async () => {
     logger.error({err}, 'Stale bus sweep failed');
   }
 }, 5 * 60 * 1000);
+
+// Unstarted trip sweep (hourly). See staleTrips.js for why these must not stay PLANNED,
+// and why only the school hears about it: the driver app stops GPS on any CANCELLED
+// event, whichever trip it names.
+const sweepUnstartedTrips = async () => {
+  const cancelled = await cancelUnstartedTrips(prisma, { staleHours: config.TRIP_STALE_HOURS });
+  for (const trip of cancelled) {
+    emitToSchool(io, trip.route?.schoolId, 'trip_status_change', {
+      tripId: trip.id,
+      status: trip.status,
+      busId: trip.busId,
+      driverId: trip.driverId,
+      routeId: trip.routeId,
+      routeName: trip.route?.name || null,
+      startTime: null,
+      endTime: null,
+      reason: 'status',
+    });
+  }
+  if (cancelled.length > 0) {
+    logger.info({ count: cancelled.length, tripIds: cancelled.map((t) => t.id) }, 'Cancelled unstarted past trips');
+  }
+};
+sweepUnstartedTrips().catch((err) => logger.error({ err }, 'Unstarted trip sweep failed at boot'));
+setInterval(() => {
+  sweepUnstartedTrips().catch((err) => logger.error({ err }, 'Unstarted trip sweep failed'));
+}, 60 * 60 * 1000);
 
 // Materialise runs into trips.
 //
