@@ -2991,6 +2991,25 @@ app.get('/api/alerts/:id', async (req, res) => {
 app.post('/api/alerts/sos', authorizeRoles('DRIVER', 'SUPER_ADMIN'), validate({ body: S.sos }), sosHandler);
 app.post('/api/driver/emergency', authorizeRoles('DRIVER', 'SUPER_ADMIN'), validate({ body: S.sos }), sosHandler); // doc-parity alias
 
+// Which of a driver's trips the phone should sign GPS for.
+//
+// This used to be the oldest-created trip across PLANNED and running, so a trip that was
+// materialised but never started (a skipped morning run, say) outranked the one the driver
+// had actually started. The phone then signed every fix as the old trip's bus: that bus
+// moved on every map while the bus really on the road was invisible to its school and its
+// parents. The trip being driven wins; failing that, the one due soonest.
+function telemetryTripFor(trips) {
+  const running = trips
+    .filter((t) => t.status === 'ON_SCHEDULE' || t.status === 'DELAYED')
+    // Only one should be running; if two are, the one started last is the one on the road.
+    .sort((a, b) => (+new Date(b.startTime || 0)) - (+new Date(a.startTime || 0)));
+  if (running.length) return running[0];
+  const due = (t) => (t.scheduledStart ? +new Date(t.scheduledStart) : Infinity);
+  return trips
+    .filter((t) => t.status === 'PLANNED')
+    .sort((a, b) => due(a) - due(b) || (+new Date(a.createdAt)) - (+new Date(b.createdAt)))[0] || null;
+}
+
 // Phone-GPS telemetry credentials for the authenticated driver's assigned bus.
 // Preferred over the (deprecated) login-response deviceSecret: fetch this only when
 // starting phone-based tracking, so the HMAC secret is not shipped on every login.
@@ -2998,11 +3017,14 @@ app.post('/api/driver/emergency', authorizeRoles('DRIVER', 'SUPER_ADMIN'), valid
 app.get('/api/driver/telemetry-credentials', async (req, res) => {
   try {
     if (req.user.role !== 'DRIVER') return res.status(403).json({ error: 'Forbidden: drivers only' });
-    const activeTrip = await prisma.trip.findFirst({
+    const trips = await prisma.trip.findMany({
       where: { driverId: req.user.id, status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
-      include: { bus: { select: { deviceId: true, deviceSecret: true } } },
-      orderBy: { createdAt: 'asc' },
+      select: {
+        id: true, status: true, startTime: true, scheduledStart: true, createdAt: true,
+        bus: { select: { deviceId: true, deviceSecret: true } },
+      },
     });
+    const activeTrip = telemetryTripFor(trips);
     if (!activeTrip || !activeTrip.bus) {
       return res.status(404).json({ error: 'No active trip with an assigned device' });
     }
