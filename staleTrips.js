@@ -18,10 +18,20 @@
 
 const MAX_PER_PASS = 500;
 
+const staleWhere = (staleHours, now) => ({
+  status: 'PLANNED',
+  scheduledStart: { lt: new Date(now.getTime() - staleHours * 3_600_000) },
+});
+
+// What a pass would cancel, without cancelling it. Run while STALE_TRIP_SWEEP is off, so
+// the number can be checked before the sweep is allowed to change anything.
+async function countUnstartedTrips(prisma, { staleHours, now = new Date() }) {
+  return prisma.trip.count({ where: staleWhere(staleHours, now) });
+}
+
 async function cancelUnstartedTrips(prisma, { staleHours, now = new Date() }) {
-  const cutoff = new Date(now.getTime() - staleHours * 3_600_000);
   const stale = await prisma.trip.findMany({
-    where: { status: 'PLANNED', scheduledStart: { lt: cutoff } },
+    where: staleWhere(staleHours, now),
     select: { id: true },
     take: MAX_PER_PASS,
   });
@@ -44,4 +54,12 @@ async function cancelUnstartedTrips(prisma, { staleHours, now = new Date() }) {
   });
 }
 
-module.exports = { cancelUnstartedTrips, MAX_PER_PASS };
+// One hourly pass. Off (the default), it changes nothing and reports what it would cancel.
+async function sweepUnstartedTrips(prisma, { enabled, staleHours, now = new Date() }) {
+  if (!enabled) {
+    return { cancelled: [], wouldCancel: await countUnstartedTrips(prisma, { staleHours, now }) };
+  }
+  return { cancelled: await cancelUnstartedTrips(prisma, { staleHours, now }), wouldCancel: 0 };
+}
+
+module.exports = { sweepUnstartedTrips, cancelUnstartedTrips, countUnstartedTrips, MAX_PER_PASS };

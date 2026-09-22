@@ -1,4 +1,5 @@
-const { cancelUnstartedTrips, MAX_PER_PASS } = require('../staleTrips');
+const { sweepUnstartedTrips, cancelUnstartedTrips, MAX_PER_PASS } = require('../staleTrips');
+const config = require('../config');
 
 const NOW = new Date('2026-09-22T12:00:00Z');
 
@@ -6,6 +7,7 @@ const mockPrisma = () => ({
   trip: {
     findMany: jest.fn(),
     updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+    count: jest.fn().mockResolvedValue(0),
   },
 });
 
@@ -64,5 +66,38 @@ describe('cancelUnstartedTrips', () => {
     expect(where.scheduledStart).toEqual({ lt: new Date('2026-09-22T00:00:00Z') });
     expect(prisma.trip.updateMany).not.toHaveBeenCalled();
     expect(result).toEqual([]);
+  });
+});
+
+describe('sweepUnstartedTrips', () => {
+  it('is off unless STALE_TRIP_SWEEP is set', () => {
+    // The sweep changes data one way and its first pass covers every leftover trip since
+    // go-live, so deploying it must not start it.
+    expect(config.STALE_TRIP_SWEEP).toBe(false);
+  });
+
+  it('when off, changes nothing and reports what it would cancel', async () => {
+    const prisma = mockPrisma();
+    prisma.trip.count.mockResolvedValue(37);
+
+    const result = await sweepUnstartedTrips(prisma, { enabled: false, staleHours: 12, now: NOW });
+
+    expect(result).toEqual({ cancelled: [], wouldCancel: 37 });
+    expect(prisma.trip.count).toHaveBeenCalledWith({
+      where: { status: 'PLANNED', scheduledStart: { lt: new Date('2026-09-22T00:00:00Z') } },
+    });
+    expect(prisma.trip.updateMany).not.toHaveBeenCalled();
+    expect(prisma.trip.findMany).not.toHaveBeenCalled();
+  });
+
+  it('when on, cancels', async () => {
+    const prisma = mockPrisma();
+    const cancelled = [{ id: 't1', status: 'CANCELLED' }];
+    prisma.trip.findMany.mockResolvedValueOnce([{ id: 't1' }]).mockResolvedValueOnce(cancelled);
+
+    const result = await sweepUnstartedTrips(prisma, { enabled: true, staleHours: 12, now: NOW });
+
+    expect(result).toEqual({ cancelled, wouldCancel: 0 });
+    expect(prisma.trip.updateMany).toHaveBeenCalled();
   });
 });

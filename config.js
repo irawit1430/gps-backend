@@ -77,6 +77,12 @@ const schema = z.object({
   // bus or driver treats it as abandoned and closes it. A school run is hours, not
   // half a day; tune if a route legitimately runs longer.
   TRIP_STALE_HOURS: z.coerce.number().int().positive().default(12),
+
+  // Cancel PLANNED trips whose departure is more than TRIP_STALE_HOURS gone (staleTrips.js).
+  // Off by default because it changes data one way: nothing records which trips it
+  // cancelled, and its first pass works through every leftover trip since go-live. Off,
+  // it only logs how many it would cancel — read that number, then turn it on.
+  STALE_TRIP_SWEEP: boolish.default('0'),
 });
 
 const parsed = schema.safeParse(process.env);
