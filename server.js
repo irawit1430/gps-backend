@@ -3480,7 +3480,7 @@ async function pushToUsers(userIds, payload) {
     const tokens = [...new Set([...enabledUsers.map((u) => u.fcmToken), ...devices.map((d) => d.token)].filter(Boolean))];
     if (tokens.length === 0) return;
 
-    const { invalidTokens } = await sendPush(tokens, payload);
+    const { invalidTokens, accepted = [], failed = [] } = await sendPush(tokens, payload);
     if (invalidTokens?.length) {
       // Uninstalled app / re-registered device: drop the token so it is not retried.
       await prisma.user.updateMany({
@@ -3495,10 +3495,23 @@ async function pushToUsers(userIds, payload) {
       }
     }
     if (prisma.pushDevice?.updateMany) {
-      const accepted = tokens.filter((token) => !invalidTokens?.includes(token));
+      // Only tokens FCM actually accepted count as delivered. Everything that was not
+      // counted used to be stamped accepted, so a revoked key or wrong Firebase project
+      // read as a healthy device. A failure leaves lastAcceptedAt alone: it stays the
+      // time of the last push that really went through.
       if (accepted.length) await prisma.pushDevice.updateMany({
         where: { token: { in: accepted } }, data: { lastAcceptedAt: new Date(), lastFailure: null },
       });
+      const byCode = new Map();
+      for (const { token, code } of failed) {
+        if (!byCode.has(code)) byCode.set(code, []);
+        byCode.get(code).push(token);
+      }
+      for (const [code, failedTokens] of byCode) {
+        await prisma.pushDevice.updateMany({
+          where: { token: { in: failedTokens } }, data: { lastFailure: code },
+        });
+      }
     }
   } catch (err) {
     logger.error({ err: err.message }, 'push dispatch failed');
@@ -4598,4 +4611,5 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-module.exports = { app, server, io, prisma };
+// pushToUsers is exported for its tests; nothing outside server.js calls it.
+module.exports = { app, server, io, prisma, pushToUsers };

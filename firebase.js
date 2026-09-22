@@ -179,9 +179,23 @@ async function flushFirestore() {
 // Fire-and-forget delivery to device tokens. Returns the tokens FCM rejected as
 // permanently invalid so the caller can clear them — a stale token otherwise sticks
 // on the row forever and every future send wastes a round trip on it.
+// Returns what happened to each token, not just a count:
+//   accepted       FCM took the message for this token
+//   invalidTokens  FCM says the token is dead (uninstalled / re-registered)
+//   failed         anything else, with FCM's code — a wrong-project credential
+//                  ('messaging/mismatched-credential'), quota, an outage
+// Callers record delivery from `accepted` alone. This used to return only the dead
+// tokens, and the caller counted every other token as delivered, so a revoked key or a
+// wrong Firebase project was stamped as a successful push on every device.
 async function sendPush(tokens, { title, body, data } = {}) {
   const list = [...new Set((Array.isArray(tokens) ? tokens : [tokens]).filter(Boolean))];
-  if (!messaging || list.length === 0) return { sent: 0, invalidTokens: [] };
+  if (list.length === 0) return { sent: 0, invalidTokens: [], accepted: [], failed: [] };
+  if (!messaging) {
+    return {
+      sent: 0, invalidTokens: [], accepted: [],
+      failed: list.map((token) => ({ token, code: 'push-not-configured' })),
+    };
+  }
 
   // FCM data values must be strings.
   const stringData = Object.fromEntries(
@@ -195,19 +209,32 @@ async function sendPush(tokens, { title, body, data } = {}) {
       data: stringData,
     });
     const invalidTokens = [];
+    const accepted = [];
+    const failed = [];
     res.responses.forEach((r, i) => {
-      const code = r.error?.code;
+      if (r.success) {
+        accepted.push(list[i]);
+        return;
+      }
+      const code = r.error?.code || 'unknown';
       if (code === 'messaging/registration-token-not-registered' || code === 'messaging/invalid-argument') {
         invalidTokens.push(list[i]);
+      } else {
+        failed.push({ token: list[i], code });
       }
     });
     if (res.failureCount > 0) {
-      logger.warn({ failureCount: res.failureCount, invalid: invalidTokens.length }, 'FCM: some sends failed');
+      logger.warn(
+        { failureCount: res.failureCount, invalid: invalidTokens.length, codes: [...new Set(failed.map((f) => f.code))] },
+        'FCM: some sends failed'
+      );
     }
-    return { sent: res.successCount, invalidTokens };
+    return { sent: res.successCount, invalidTokens, accepted, failed };
   } catch (err) {
-    logger.error({ err: err.message }, 'FCM send failed');
-    return { sent: 0, invalidTokens: [] };
+    // The whole call failed (revoked key, network, outage): nothing was delivered.
+    const code = err.code || 'send-failed';
+    logger.error({ err: err.message, code }, 'FCM send failed');
+    return { sent: 0, invalidTokens: [], accepted: [], failed: list.map((token) => ({ token, code })) };
   }
 }
 
