@@ -539,35 +539,6 @@ app.get('/api/schools/:schoolId/leaves', requireTenant('schoolId'), schoolAdmins
   }
 });
 
-app.delete('/api/leaves/:id', authorizeRoles('PARENT', 'SUPER_ADMIN', 'SCHOOL_ADMIN'), async (req, res) => {
-  try {
-    const leave = await prisma.leaveApplication.findUnique({
-      where: { id: req.params.id },
-      include: { student: true }
-    });
-    if (!leave) return res.status(404).json({ error: 'Leave not found' });
-    
-    // Authorization check
-    if (req.user.role === 'PARENT' && leave.student.parentId !== req.user.id) {
-      return res.status(403).json({ error: 'Forbidden: not your student' });
-    }
-    if (req.user.role === 'SCHOOL_ADMIN' && leave.student.schoolId !== req.user.schoolId) {
-      return res.status(403).json({ error: 'Forbidden: cross-tenant access denied' });
-    }
-    
-    // Only pending leaves can be deleted
-    if (leave.status !== 'PENDING') {
-      return res.status(400).json({ error: 'Only PENDING leaves can be deleted' });
-    }
-    
-    await prisma.leaveApplication.delete({ where: { id: req.params.id } });
-    res.status(204).send();
-  } catch (err) {
-    req.log.error({ err }, 'delete leave failed');
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
 // Doc-parity alias: /api/schools/:schoolId/leaves/pending
 app.get('/api/schools/:schoolId/leaves/pending', requireTenant('schoolId'), schoolAdminsOnly, async (req, res) => {
   try {
@@ -583,6 +554,9 @@ app.get('/api/schools/:schoolId/leaves/pending', requireTenant('schoolId'), scho
   }
 });
 
+// Creating, changing, approving, rejecting, cancelling and deleting a leave all live in
+// auditRoutes.js (the leave workflow). It is mounted before this file's routes and
+// answers every request itself, so a handler for those paths here would never run.
 async function ownsLeave(req, res, next) {
   if (req.user.role === 'SUPER_ADMIN') return next();
   const leave = await prisma.leaveApplication.findUnique({
@@ -593,26 +567,6 @@ async function ownsLeave(req, res, next) {
   if (req.user.role === 'SCHOOL_ADMIN' && leave.student.schoolId === req.user.schoolId) return next();
   return res.status(403).json({ error: 'Forbidden' });
 }
-
-app.put('/api/leaves/:id/approve', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), ownsLeave, async (req, res) => {
-  try {
-    const leave = await prisma.leaveApplication.update({ where: { id: req.params.id }, data: { status: 'APPROVED' } });
-    res.json(leave);
-  } catch (err) {
-    req.log.error({ err }, 'approve leave failed');
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-app.put('/api/leaves/:id/reject', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), ownsLeave, async (req, res) => {
-  try {
-    const leave = await prisma.leaveApplication.update({ where: { id: req.params.id }, data: { status: 'REJECTED' } });
-    res.json(leave);
-  } catch (err) {
-    req.log.error({ err }, 'reject leave failed');
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
 
 // Doc-parity: PUT /api/parent/leaves/:id { status: APPROVED|REJECTED }
 app.put('/api/parent/leaves/:id',
@@ -2879,32 +2833,6 @@ app.get('/api/parents/:parentId/alerts',
     }
   }
 );
-
-app.post('/api/leaves', validate({ body: S.leaveApp }), async (req, res) => {
-  try {
-    // Parents can only create leaves for their own child; admins for any child in tenant
-    const student = await prisma.student.findUnique({ where: { id: req.body.studentId } });
-    if (!student) return res.status(404).json({ error: 'Student not found' });
-    if (req.user.role === 'PARENT' && student.parentId !== req.user.id) return res.status(403).json({ error: 'Forbidden' });
-    if (req.user.role === 'SCHOOL_ADMIN' && student.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
-    if (!['PARENT', 'SCHOOL_ADMIN', 'SUPER_ADMIN'].includes(req.user.role)) return res.status(403).json({ error: 'Forbidden' });
-
-    const leave = await prisma.leaveApplication.create({
-      data: {
-        studentId: req.body.studentId,
-        startDate: new Date(req.body.startDate),
-        endDate: new Date(req.body.endDate),
-        reason: req.body.reason,
-        notes: req.body.notes || null,
-        status: 'PENDING',
-      },
-    });
-    res.json(leave);
-  } catch (err) {
-    req.log.error({ err }, 'create leave failed');
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
 
 app.get('/api/parents/:parentId/leaves',
   requireParentAccess,
