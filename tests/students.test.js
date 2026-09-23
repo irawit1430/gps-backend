@@ -128,7 +128,8 @@ describe('GET /api/schools/:schoolId/students', () => {
 
     const include = prisma.student.findMany.mock.calls[0][0].include;
     expect(include.routeMappings.include.routeStop.select.route.select).toEqual({ name: true });
-    expect(include.parent.select).toEqual({ name: true, phone: true });
+    // Email is the parent's sign-in, which the office needs to help a locked-out parent.
+    expect(include.parent.select).toEqual({ name: true, phone: true, email: true });
   });
 
   it('should return 500 when database throws an error', async () => {

@@ -353,12 +353,14 @@ app.post('/api/auth/forgot-password', loginLimiter, validate({ body: S.forgotPas
     if (adminIds.length > 0) {
       const title = 'Password reset requested';
       const message = `${user.name} (${user.email}) cannot sign in and asked for a password reset.`;
+      // The context lets the dashboard open the request from the notification.
+      const context = { type: 'PASSWORD_RESET', requestId: request.id, userId: user.id };
       await prisma.notification.createMany({
-        data: adminIds.map((id) => ({ userId: id, title, message, type: 'SYSTEM' })),
+        data: adminIds.map((id) => ({ userId: id, title, message, type: 'SYSTEM', context })),
       });
       if (io) {
         adminIds.forEach((id) =>
-          emitToUser(io, id, 'notification', { title, message, type: 'SYSTEM', requestId: request.id })
+          emitToUser(io, id, 'notification', { title, message, type: 'SYSTEM', requestId: request.id, context })
         );
       }
       pushToUsers(adminIds, { title, body: message, data: { type: 'PASSWORD_RESET', requestId: request.id } });
@@ -958,6 +960,49 @@ app.post('/api/parents/:parentId/messages',
   }
 );
 
+// The office resets a parent's password directly: a parent phones in, locked out. The
+// server makes the temporary password, so nobody has to invent one, and it is shown
+// once. The parent must choose their own at next sign-in. Same effects as approving a
+// forgot-password request, and it closes any request the parent had waiting (otherwise
+// that request would sit pending and swallow the parent's next "forgot password").
+app.post('/api/parents/:parentId/reset-password',
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  async (req, res) => {
+    try {
+      const parent = await prisma.user.findUnique({
+        where: { id: req.params.parentId },
+        select: { id: true, role: true, schoolId: true, name: true, email: true },
+      });
+      if (!parent || parent.role !== 'PARENT') return res.status(404).json({ error: 'Parent not found' });
+      if (req.user.role === 'SCHOOL_ADMIN' && parent.schoolId !== req.user.schoolId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
+      const tempPassword = generateTempPassword();
+      const hashed = await bcrypt.hash(tempPassword, 10);
+      await prisma.$transaction([
+        prisma.user.update({ where: { id: parent.id }, data: { password: hashed, mustResetPassword: true } }),
+        prisma.passwordResetRequest.updateMany({
+          where: { userId: parent.id, status: 'PENDING' },
+          data: { status: 'APPROVED', resolvedBy: req.user.id, resolvedAt: new Date() },
+        }),
+      ]);
+      invalidateUser(parent.id);
+      await forgetPushDevices(parent.id, req.log);
+
+      req.log.info({ parentId: parent.id, by: req.user.id }, 'parent password reset by the office');
+      res.json({
+        user: { id: parent.id, name: parent.name, email: parent.email },
+        tempPassword,
+        note: 'Share this with the parent directly. It is shown once and they must change it at next sign-in.',
+      });
+    } catch (err) {
+      req.log.error({ err }, 'reset parent password failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
 app.get('/api/schools/:schoolId/drivers', requireTenant('schoolId'), schoolAdminsOnly, async (req, res) => {
   try {
     const drivers = await prisma.user.findMany({
@@ -1164,7 +1209,9 @@ app.get('/api/schools/:schoolId/students', requireTenant('schoolId'), schoolAdmi
         // The primary contact is the parent account; guardianPhone is the fallback
         // for families without one. Only shipping the fallback meant the office saw
         // an empty field and concluded there was no number on file.
-        parent: { select: { name: true, phone: true } },
+        // Email too: it is the parent's sign-in, which is what the office is asked for
+        // when a parent is locked out. The profile showed "Not provided" for everyone.
+        parent: { select: { name: true, phone: true, email: true } },
         // `route: true` dragged the whole row, including the OSRM polyline, for every
         // student — to read two names.
         routeMappings: {
