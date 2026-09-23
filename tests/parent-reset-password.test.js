@@ -87,13 +87,19 @@ describe('POST /api/parents/:parentId/reset-password', () => {
   });
 });
 
-it("sends the office the parent's email with the students list", async () => {
-  prisma.student.findMany.mockResolvedValue([]);
+it("sends the office each child's parent account: id and sign-in email", async () => {
+  // The list is built field by field, and it left both out: the dashboard's "Message
+  // parent" was disabled for every child and the profile said "Not provided".
+  prisma.student.findMany.mockResolvedValue([{
+    id: 'c1', name: 'Asha', rfidTag: 'R1', parentId: 'parent-1', routeMappings: [],
+    parent: { name: 'Priya', phone: '98', email: 'priya@example.com' },
+  }]);
   prisma.attendanceLog.findMany.mockResolvedValue([]);
 
-  await request(app).get('/api/schools/s1/students').set('Authorization', ADMIN);
+  const res = await request(app).get('/api/schools/s1/students').set('Authorization', ADMIN);
 
   expect(prisma.student.findMany.mock.calls[0][0].include.parent).toEqual({ select: { name: true, phone: true, email: true } });
+  expect(res.body[0]).toMatchObject({ parentId: 'parent-1', parentName: 'Priya', parentEmail: 'priya@example.com', parentPhone: '98' });
 });
 
 it('tags a forgot-password notification so the dashboard can open the request', async () => {

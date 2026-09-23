@@ -1255,7 +1255,13 @@ app.get('/api/schools/:schoolId/students', requireTenant('schoolId'), schoolAdmi
           grade: s.grade,
           photoUrl: s.photoUrl,
           guardianPhone: s.guardianPhone || null,
+          // The parent account. Without its id the dashboard could not message a parent
+          // (the button stayed disabled for every child) or reset their password; without
+          // the email, the one thing a locked-out parent needs to hear, the profile said
+          // "Not provided" for everyone.
+          parentId: s.parentId || null,
           parentName: s.parent?.name || null,
+          parentEmail: s.parent?.email || null,
           parentPhone: s.parent?.phone || null,
           assignedRoute: m?.routeStop?.route?.name || 'Unassigned',
           routeStopName: m?.routeStop?.name || 'Unassigned',
