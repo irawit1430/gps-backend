@@ -86,6 +86,10 @@ const { telemetryHmac } = require('./middleware/telemetryHmac');
 const { attachSocketAuth, emitToSchool, emitToUser, emitToUsers } = require('./middleware/socketAuth');
 const { persistRevocations } = require('./sessionRevocations');
 const positionAudience = require('./positionAudience');
+// Who may see a bus's live position is cached per trip for 5 minutes. Anything that
+// changes a trip's riders or crew drops that cache, so a parent taken off a route stops
+// receiving the bus on the next fix rather than for another five minutes.
+const rosterChanged = () => positionAudience.clear();
 const { getSimulatedAlerts, getMockNotifications } = require('./mock-data');
 const {
   syncGpsLogToFirebase,
@@ -765,6 +769,7 @@ app.delete('/api/routes/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), own
       });
     }
     await prisma.route.delete({ where: { id: req.params.id } });
+    rosterChanged();
     res.json({ success: true });
   } catch (err) {
     // A trip can be created after the counts above. Preserve the database constraint
@@ -880,6 +885,7 @@ app.delete('/api/routes/:routeId/stops/:id',
         return res.status(404).json({ error: 'Stop not found on this route' });
       }
       await prisma.routeStop.delete({ where: { id: req.params.id } });
+      rosterChanged();
       res.json({ success: true });
     } catch (err) {
       req.log.error({ err }, 'delete stop failed');
@@ -1124,6 +1130,8 @@ app.put('/api/trips/:tripId',
         },
         include: { route: { select: { schoolId: true, name: true } } },
       });
+      // A new driver or route means a different audience for this trip's position.
+      if (driverId || routeId) positionAudience.invalidate(tripId);
       emitTripChange(updated, 'assignment');
       // The outgoing driver loses this trip, so tell them too.
       if (driverId && driverId !== existingTrip.driverId) {
@@ -1557,6 +1565,7 @@ app.delete('/api/students/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), a
     if (req.user.role === 'SCHOOL_ADMIN' && student.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
     
     await prisma.student.delete({ where: { id: req.params.id } });
+    rosterChanged();
     res.status(204).send();
   } catch (err) {
     req.log.error({ err }, 'delete student failed');
@@ -1575,6 +1584,7 @@ app.delete('/api/student-route-mappings/:id', authorizeRoles('SUPER_ADMIN', 'SCH
     if (req.user.role === 'SCHOOL_ADMIN' && mapping.student.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
     
     await prisma.studentRouteMapping.delete({ where: { id: req.params.id } });
+    rosterChanged();
     res.status(204).send();
   } catch (err) {
     req.log.error({ err }, 'delete mapping failed');
@@ -1688,6 +1698,7 @@ app.put('/api/student-route-mappings/:id',
         data: { routeStopId: req.body.routeStopId, direction },
         include: { student: true, routeStop: { include: { route: true } } },
       });
+      rosterChanged();
       res.json(mapping);
     } catch (err) {
       // The child already holds a DIFFERENT mapping row for the target stop, and
@@ -1729,6 +1740,7 @@ app.post('/api/student-route-mappings',
         create: { studentId, routeStopId, direction },
         include: { student: true, routeStop: { include: { route: true } } },
       });
+      rosterChanged();
       res.json(mapping);
     } catch (err) {
       req.log.error({ err }, 'create mapping failed');
