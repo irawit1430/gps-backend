@@ -73,9 +73,14 @@ gcloud compute firewall-rules create voltava-ssh \
 gcloud compute firewall-rules create voltava-web \
   --allow=tcp:80,tcp:443 --source-ranges=0.0.0.0/0 --target-tags=voltava
 
-# TCP 5000: START restricted. Replace RANGES with your SIM operator's egress
-# ranges (Airtel/Jio/BSNL AIS-140 APN). 0.0.0.0/0 is a last resort ONLY because
-# telemetry is HMAC-authenticated — still prefer narrowing it.
+# TCP 5000: restricted, ALWAYS. Replace RANGES with your SIM operator's egress
+# ranges (Airtel/Jio/BSNL AIS-140 APN). Never 0.0.0.0/0: the TM-100 protocol has no
+# secret — tcp-server.js trusts a packet by its IMEI alone (HMAC covers only phone
+# GPS over HTTPS). Anyone who can reach this port and knows an IMEI (Bus.deviceId)
+# can move that bus on every map or raise a hardware SOS to every parent on it.
+# After changing the rule, check both ways: `pm2 logs` still shows "TCP client
+# connected" from the operator's IPs, and `nc -vz -w 5 <static-ip> 5000` from an
+# ordinary connection times out.
 gcloud compute firewall-rules create voltava-hardware \
   --allow=tcp:5000 --source-ranges=OPERATOR_RANGE_1,OPERATOR_RANGE_2 --target-tags=voltava
 ```

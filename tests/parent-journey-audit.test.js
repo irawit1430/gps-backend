@@ -13,7 +13,20 @@ const { app, prisma } = require('../server');
 const token = jwt.sign({ id: 'parent-audit', role: 'PARENT' }, process.env.JWT_SECRET);
 
 // Times relative to now make this suite independent of the date and machine timezone.
-const ago = (minutes) => new Date(Date.now() - minutes * 60_000);
+// "Now" itself is pinned to midday in the school's zone. Trips here start up to 40
+// minutes ago, and the server only considers trips from the school's current day, so
+// with the real clock the suite failed every night from 00:00 to 00:40 IST.
+const NOW = new Date('2026-09-22T06:30:00Z'); // 12:00 IST
+beforeAll(() => {
+  // Only the clock: supertest and the server still need real timers.
+  jest.useFakeTimers({
+    now: NOW,
+    doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout',
+      'setInterval', 'clearInterval', 'queueMicrotask', 'hrtime', 'performance'],
+  });
+});
+afterAll(() => jest.useRealTimers());
+const ago = (minutes) => new Date(NOW.getTime() - minutes * 60_000);
 const trip = (overrides = {}) => ({
   id: 'afternoon-trip', routeId: 'route-1', direction: 'FROM_SCHOOL',
   status: 'ON_SCHEDULE', startTime: ago(10), scheduledStart: ago(10),
