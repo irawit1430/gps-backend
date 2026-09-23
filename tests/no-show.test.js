@@ -9,6 +9,8 @@ jest.mock('@prisma/client', () => {
     leaveApplication: { findFirst: jest.fn() },
     notification: { create: jest.fn() },
     user: { findMany: jest.fn() },
+    // Drivers may only record children on the trip's roster.
+    studentRouteMapping: { findFirst: jest.fn().mockResolvedValue({ id: 'mapping-1' }) },
   };
   return { PrismaClient: jest.fn(() => mockPrisma) };
 });

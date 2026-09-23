@@ -3639,6 +3639,26 @@ app.post('/api/attendance', validate({ body: S.attendance }), async (req, res) =
     if (!student) return res.status(404).json({ error: 'Student not found' });
     if (student.schoolId !== trip.route.schoolId) return res.status(400).json({ error: 'Student not on this trip route' });
 
+    // The route mappings that ride this trip's leg: all of them on a trip with no
+    // direction, else the both-legs ones and this leg's. The same rule builds the
+    // driver's roster (GET /api/drivers/:driverId/trips).
+    const ridesThisLeg = trip.direction ? { OR: [{ direction: null }, { direction: trip.direction }] } : {};
+
+    // Same school is not enough for a driver: their token could otherwise tell any
+    // family in the school that their child had boarded a bus the child was never on.
+    // The driver app only ever offers children on the trip's roster, so this refuses
+    // nothing it sends. The office can still record an exception, such as a child who
+    // took another bus that day.
+    if (req.user.role === 'DRIVER') {
+      const onRoster = await prisma.studentRouteMapping.findFirst({
+        where: { studentId: student.id, routeStop: { routeId: trip.routeId }, ...ridesThisLeg },
+        select: { id: true },
+      });
+      if (!onRoster) {
+        return res.status(400).json({ error: "This child is not on this trip's route. Ask the school office to record it" });
+      }
+    }
+
     // A child on approved leave is not a no-show. Recording one would tell a family
     // their child failed to board on a day the school had already agreed they would
     // not — and because every planned absence would generate one, the alert becomes
@@ -3721,7 +3741,7 @@ app.post('/api/attendance', validate({ body: S.attendance }), async (req, res) =
         where: {
           id: req.body.stopId,
           routeId: trip.routeId,
-          studentMappings: { some: { studentId: req.body.studentId, OR: [{ direction: null }, { direction: trip.direction }] } },
+          studentMappings: { some: { studentId: req.body.studentId, ...ridesThisLeg } },
         },
         select: { id: true, name: true, lat: true, lng: true },
       });

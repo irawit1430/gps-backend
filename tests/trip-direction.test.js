@@ -13,6 +13,7 @@ jest.mock('@prisma/client', () => {
     student: { findUnique: jest.fn() },
     attendanceLog: { findFirst: jest.fn(), create: jest.fn() },
     notification: { create: jest.fn() },
+    studentRouteMapping: { findFirst: jest.fn() },
   };
   return { PrismaClient: jest.fn(() => mockPrisma) };
 });
@@ -26,7 +27,11 @@ const stop = (id, orderIdx, name) => ({
   studentMappings: [],
 });
 
-beforeEach(() => jest.resetAllMocks());
+beforeEach(() => {
+  jest.resetAllMocks();
+  // Drivers may only record children on the trip's roster.
+  prisma.studentRouteMapping.findFirst.mockResolvedValue({ id: 'mapping-1' });
+});
 
 // The driver app walks the stop list top-down. Pickup order is the stored order, so a
 // homebound trip handed that list sends the bus to the houses before the school.
