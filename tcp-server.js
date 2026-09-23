@@ -73,7 +73,12 @@ function startTcpServer(io, tcpPort = config.TCP_PORT) {
             where: { deviceId: parsed.imei },
             // DELAYED is running too — matching only ON_SCHEDULE filed every fix
             // from a late bus under tripId null, exactly when the track matters.
-            include: { trips: { where: { status: { in: ['ON_SCHEDULE', 'DELAYED'] } }, select: { id: true } } }
+            include: {
+              trips: {
+                where: { status: { in: ['ON_SCHEDULE', 'DELAYED'] } },
+                select: { id: true, route: { select: { schoolId: true } } },
+              },
+            }
           });
           if (!bus) {
             logger.warn({ ip: clientAddress, imei: parsed.imei }, 'TCP: unregistered IMEI');
@@ -170,9 +175,13 @@ function startTcpServer(io, tcpPort = config.TCP_PORT) {
             // Stamping the running trip lets parents of that trip be notified, and
             // lets GET /api/parents/:id/alerts find this alert on a cold start.
             const activeTripId = bus.trips?.[0]?.id || null;
+            // A tracker not yet assigned to a school still belongs to whichever school's
+            // trip it is running. Without this the alert was filed under 'unknown' and
+            // reached super-admins only, never the school whose children were aboard.
+            const schoolId = bus.schoolId || bus.trips?.[0]?.route?.schoolId || null;
             const alert = await prisma.emergencyAlert.create({
               data: {
-                schoolId: bus.schoolId || 'unknown',
+                schoolId: schoolId || 'unknown',
                 tripId: activeTripId,
                 type: 'HARDWARE_SOS',
                 message: `Emergency SOS from Blackbox TM-100 (IMEI ${parsed.imei}, Bus ${bus.licensePlate})`,
@@ -181,7 +190,7 @@ function startTcpServer(io, tcpPort = config.TCP_PORT) {
             });
             syncEmergencyAlertToFirebase(alert);
             if (io) {
-              emitToSchool(io, bus.schoolId, 'emergency_alert', alert);
+              emitToSchool(io, schoolId, 'emergency_alert', alert);
               if (activeTripId) {
                 const riders = await prisma.studentRouteMapping.findMany({
                   where: { routeStop: { route: { trips: { some: { id: activeTripId } } } } },
