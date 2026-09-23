@@ -8,7 +8,8 @@ const config = require('../config');
 // Secret:  Bus.deviceSecret (looked up by req.body.deviceId).
 //
 // Behavior:
-//   - If TELEMETRY_HMAC_ENFORCE=0 → middleware is a no-op (dev only).
+//   - If TELEMETRY_HMAC_ENFORCE is off → middleware is a no-op. Unset means on in
+//     production (see config.js).
 //   - If enforced and bus has no deviceSecret set → 403 (device must be provisioned).
 async function telemetryHmac(prisma) {
   return async function (req, res, next) {
@@ -39,8 +40,11 @@ async function telemetryHmac(prisma) {
         where: { deviceId },
         include: {
           trips: {
-            where: { status: 'ON_SCHEDULE' },
-            include: { driver: { select: { name: true } }, route: { select: { name: true } } },
+            // DELAYED is running too. Matching only ON_SCHEDULE filed a late bus's GPS
+            // under no trip, and its parents stopped seeing it move. The route needs
+            // only the id (same as its unsigned fallback lookup).
+            where: { status: { in: ['ON_SCHEDULE', 'DELAYED'] } },
+            select: { id: true },
           },
         },
       });

@@ -31,7 +31,11 @@ const schema = z.object({
   // Must be an address on a domain with SPF/DKIM published, or it lands in spam.
   EMAIL_FROM: z.string().optional(),
 
-  TELEMETRY_HMAC_ENFORCE: boolish.default('0'),
+  // Signature check on phone GPS (middleware/telemetryHmac.js). It is /api/telemetry's
+  // only guard: that route sits before authenticate. Unset means ON in production, so a
+  // forgotten line cannot open it, and off elsewhere. Set 0 or 1 to choose. Resolved
+  // below, once NODE_ENV is known.
+  TELEMETRY_HMAC_ENFORCE: z.string().optional(),
   TELEMETRY_MAX_SKEW_SECONDS: z.coerce.number().int().positive().default(300),
 
   // A parked bus reports every ~8s and nothing reads those rows. Persist a
@@ -62,8 +66,9 @@ const schema = z.object({
   // live position. Consequences, so they are on the record rather than discovered:
   //   - One leaked slip opens every account created since the last rotation, and any
   //     parent can reach another family's child by guessing an email.
-  //   - mustResetPassword is advisory — the login response carries it, but the token is
-  //     valid and no middleware enforces it, so an unchanged password stays usable.
+  //   - Until a parent changes it, the account can do nothing else (requireCurrentPassword
+  //     in middleware/auth.js). But whoever changes it first owns the account: a stranger
+  //     with the slip can still claim a family's account before the family does.
   //   - The risk compounds with time, because accounts accumulate and the string does
   //     not change on its own.
   // Rotate it on a schedule and after every import, which is the reason it is config
@@ -95,6 +100,11 @@ if (!parsed.success) {
 
 const config = parsed.data;
 
+config.TELEMETRY_HMAC_ENFORCE =
+  config.TELEMETRY_HMAC_ENFORCE === undefined || config.TELEMETRY_HMAC_ENFORCE.trim() === ''
+    ? config.NODE_ENV === 'production'
+    : boolish.parse(config.TELEMETRY_HMAC_ENFORCE.trim());
+
 // Cross-field checks
 if (config.ALLOW_SEED && (!config.SEED_ADMIN_EMAIL || !config.SEED_ADMIN_PASSWORD)) {
   console.error('FATAL: ALLOW_SEED=1 requires SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD');
@@ -109,6 +119,11 @@ if (config.NODE_ENV === 'production') {
   if (config.ENABLE_MOCK_DATA) {
     console.error('FATAL: ENABLE_MOCK_DATA must not be enabled in production');
     process.exit(1);
+  }
+  if (!config.TELEMETRY_HMAC_ENFORCE) {
+    console.warn(
+      'WARNING: TELEMETRY_HMAC_ENFORCE is off in production. Anyone who knows a bus IMEI can post GPS for it.'
+    );
   }
 }
 
