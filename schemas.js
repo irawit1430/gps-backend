@@ -320,6 +320,12 @@ exports.ATTENDANCE_TYPE = ATTENDANCE_TYPE;
 exports.EMERGENCY_TYPE = EMERGENCY_TYPE;
 
 
+// One message from the school office to one family (POST /api/parents/:parentId/messages).
+exports.parentMessage = z.object({
+  subject: z.string().trim().min(1).max(200),
+  message: z.string().trim().min(1).max(2000),
+});
+
 exports.broadcast = z.object({
   message: z.string().min(1).max(1000),
   // routeId intentionally omitted: EmergencyAlert has no routeId column.

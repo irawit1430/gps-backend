@@ -914,6 +914,47 @@ app.put('/api/parents/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), valid
   }
 });
 
+// A message from the school office to one family: the school dashboard's "Message
+// parent" on the students page. The dashboard has always called this, and the route
+// did not exist, so every message failed. It reaches the parent the way a broadcast
+// does: in their notifications, live on the socket, and as a push.
+app.post('/api/parents/:parentId/messages',
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  validate({ body: S.parentMessage }),
+  async (req, res) => {
+    try {
+      const parent = await prisma.user.findUnique({
+        where: { id: req.params.parentId },
+        select: { id: true, role: true, schoolId: true },
+      });
+      if (!parent || parent.role !== 'PARENT') return res.status(404).json({ error: 'Parent not found' });
+      if (req.user.role === 'SCHOOL_ADMIN' && parent.schoolId !== req.user.schoolId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
+      const notification = await prisma.notification.create({
+        data: {
+          userId: parent.id,
+          title: req.body.subject,
+          message: req.body.message,
+          type: 'SYSTEM',
+          context: { type: 'SCHOOL_MESSAGE', sentBy: req.user.id },
+        },
+      });
+      if (io) emitToUser(io, parent.id, 'notification', notification);
+      pushToUsers([parent.id], {
+        title: req.body.subject,
+        body: req.body.message,
+        data: { type: 'SCHOOL_MESSAGE', notificationId: notification.id },
+      });
+      res.status(201).json({ id: notification.id, sentAt: notification.createdAt });
+    } catch (err) {
+      req.log.error({ err }, 'message parent failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
 app.get('/api/schools/:schoolId/drivers', requireTenant('schoolId'), schoolAdminsOnly, async (req, res) => {
   try {
     const drivers = await prisma.user.findMany({
