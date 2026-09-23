@@ -270,6 +270,13 @@ Uptime check (from Cloud Console → Monitoring → Uptime checks):
   restore into a scratch instance quarterly.
 - **Rotating a device secret**: `POST /api/devices/:id/rotate-secret` (SUPER_ADMIN),
   then re-flash the returned secret to the device.
+- **Phones and the bus secret**: driver phones now get a per-trip key, never
+  `Bus.deviceSecret`. Phones that fetched the bus secret before that still hold it, so
+  it stays accepted while `TELEMETRY_ACCEPT_BUS_SECRET=1` (default), and each bus
+  using it is logged hourly ("Telemetry signed with the permanent bus secret"). A day
+  after deploying, check `pm2 logs`: if nothing logs it, set
+  `TELEMETRY_ACCEPT_BUS_SECRET=0` and every old copy stops working. If hardware shows
+  up there, rotate and re-flash it first.
 - **Deploys**: `git pull && npm ci && npm run build && npm run migrate:deploy && pm2 reload voltava-fleet`.
 - **Never skip `npm ci` on a deploy.** The GCP cheatsheet`s shorter sequence omits it,
   and the first deploy that added a dependency (nodemailer) crash-looped the API ~190

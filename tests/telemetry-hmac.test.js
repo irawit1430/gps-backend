@@ -98,7 +98,7 @@ describe('POST /api/telemetry with the signature check on', () => {
 
     expect(res.status).toBe(200);
     expect(prisma.bus.findUnique).toHaveBeenCalledWith(expect.objectContaining({
-      include: { trips: { where: { status: { in: ['ON_SCHEDULE', 'DELAYED'] } }, select: { id: true } } },
+      include: { trips: { where: { status: { in: ['ON_SCHEDULE', 'DELAYED'] } }, select: { id: true, driverId: true } } },
     }));
     expect(prisma.gpsLog.create).toHaveBeenCalledWith({
       data: expect.objectContaining({ busId: 'bus-1', tripId: 'late-trip' }),

@@ -85,6 +85,7 @@ const { authenticate, authorizeRoles, requireTenant, requireSelfOrRoles, logoutT
 const { telemetryHmac } = require('./middleware/telemetryHmac');
 const { attachSocketAuth, emitToSchool, emitToUser, emitToUsers } = require('./middleware/socketAuth');
 const { persistRevocations } = require('./sessionRevocations');
+const { tripTelemetryKey } = require('./telemetryKeys');
 const positionAudience = require('./positionAudience');
 // Who may see a bus's live position is cached per trip for 5 minutes. Anything that
 // changes a trip's riders or crew drops that cache, so a parent taken off a route stops
@@ -3034,9 +3035,10 @@ function telemetryTripFor(trips) {
 }
 
 // Phone-GPS telemetry credentials for the authenticated driver's assigned bus.
-// Preferred over the (deprecated) login-response deviceSecret: fetch this only when
-// starting phone-based tracking, so the HMAC secret is not shipped on every login.
-// Returns the secret only to the DRIVER, only for their own active-trip bus.
+// Fetch this only when starting phone-based tracking. Returns, to the DRIVER only, a
+// key for their own active trip (telemetryKeys.js) — never the bus's permanent secret.
+// The field keeps its old name, deviceSecret, so every app build signs with it as is.
+// The key verifies only while that trip is running with this driver on it.
 app.get('/api/driver/telemetry-credentials', async (req, res) => {
   try {
     if (req.user.role !== 'DRIVER') return res.status(403).json({ error: 'Forbidden: drivers only' });
@@ -3044,14 +3046,18 @@ app.get('/api/driver/telemetry-credentials', async (req, res) => {
       where: { driverId: req.user.id, status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
       select: {
         id: true, status: true, startTime: true, scheduledStart: true, createdAt: true,
-        bus: { select: { deviceId: true, deviceSecret: true } },
+        bus: { select: { id: true, deviceId: true } },
       },
     });
     const activeTrip = telemetryTripFor(trips);
     if (!activeTrip || !activeTrip.bus) {
       return res.status(404).json({ error: 'No active trip with an assigned device' });
     }
-    res.json({ deviceId: activeTrip.bus.deviceId, deviceSecret: activeTrip.bus.deviceSecret });
+    res.json({
+      deviceId: activeTrip.bus.deviceId,
+      deviceSecret: tripTelemetryKey(activeTrip.bus.id, activeTrip.id, req.user.id),
+      tripId: activeTrip.id,
+    });
   } catch (err) {
     req.log.error({ err }, 'telemetry credentials failed');
     res.status(500).json({ error: 'Internal server error' });

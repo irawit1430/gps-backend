@@ -65,8 +65,10 @@ DELETE /api/devices/:id
 POST   /api/devices/:id/rotate-secret  → { deviceId, deviceSecret }  🔑
 ```
 
-**🔑 `deviceSecret` is returned ONLY at create + rotate.** It's the HMAC key
-the TM-100 uses to sign telemetry. UX must:
+**🔑 `deviceSecret` is returned ONLY at create + rotate.** It's the bus's permanent
+HMAC key, for hardware that signs telemetry over HTTPS. Driver phones no longer get
+it (they get a per-trip key); the server accepts it while `TELEMETRY_ACCEPT_BUS_SECRET`
+is on. UX must:
 
 1. On successful create → open a modal:
    > "This is the device secret for **BB100-TEST-01**. Save it now — it will not be shown again."

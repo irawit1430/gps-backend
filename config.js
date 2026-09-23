@@ -37,6 +37,12 @@ const schema = z.object({
   // below, once NODE_ENV is known.
   TELEMETRY_HMAC_ENFORCE: z.string().optional(),
   TELEMETRY_MAX_SKEW_SECONDS: z.coerce.number().int().positive().default(300),
+  // Whether the signature check still accepts Bus.deviceSecret, the bus's permanent key.
+  // Driver phones now get a key per trip (telemetryKeys.js), but phones that fetched the
+  // permanent key before that still hold it, and any hardware posting over HTTPS is
+  // flashed with it. Each bus still using it is logged hourly. Once the log is quiet,
+  // or only shows hardware you then re-flash, set 0: every copy on a phone stops working.
+  TELEMETRY_ACCEPT_BUS_SECRET: boolish.default('1'),
 
   // A parked bus reports every ~8s and nothing reads those rows. Persist a
   // trip-less, stationary bus at most this often; 0 speed threshold would be

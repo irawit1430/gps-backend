@@ -9,6 +9,7 @@ jest.mock('@prisma/client', () => {
 });
 
 const { app, prisma } = require('../server');
+const { tripTelemetryKey } = require('../telemetryKeys');
 const SECRET = process.env.JWT_SECRET;
 
 describe('GET /api/driver/telemetry-credentials', () => {
@@ -37,17 +38,23 @@ describe('GET /api/driver/telemetry-credentials', () => {
     expect(res.status).toBe(404);
   });
 
-  it('should return deviceId + deviceSecret for the driver active-trip bus', async () => {
+  it("should return deviceId + a key for the driver's active trip, never the bus secret", async () => {
     prisma.trip.findMany.mockResolvedValue([{
       id: 't1',
       status: 'ON_SCHEDULE',
-      bus: { deviceId: 'IMEI-123', deviceSecret: 'sekret' },
+      bus: { id: 'bus-1', deviceId: 'IMEI-123' },
     }]);
     const res = await request(app)
       .get('/api/driver/telemetry-credentials')
       .set('Authorization', `Bearer ${driverToken()}`);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ deviceId: 'IMEI-123', deviceSecret: 'sekret' });
+    expect(res.body).toEqual({
+      deviceId: 'IMEI-123',
+      deviceSecret: tripTelemetryKey('bus-1', 't1', 'd1'),
+      tripId: 't1',
+    });
+    // The bus's permanent secret is not even read.
+    expect(prisma.trip.findMany.mock.calls[0][0].select.bus).toEqual({ select: { id: true, deviceId: true } });
     // Scoped to the calling driver and only active trips.
     expect(prisma.trip.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: { driverId: 'd1', status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
@@ -63,7 +70,7 @@ describe('GET /api/driver/telemetry-credentials', () => {
     return res.body.deviceId;
   };
   const trip = (id, status, bus, extra = {}) => ({
-    id, status, bus: { deviceId: bus, deviceSecret: `secret-${bus}` }, ...extra,
+    id, status, bus: { id: `id-${bus}`, deviceId: bus }, ...extra,
   });
 
   it('signs for the trip being driven, not an older one that was never started', async () => {

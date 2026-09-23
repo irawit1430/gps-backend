@@ -240,11 +240,14 @@ HMAC_SHA256( key = deviceSecret,
 **Getting the `deviceSecret`:** call the dedicated endpoint when phone-GPS starts:
 ```
 GET /api/driver/telemetry-credentials     (Authorization: Bearer <jwt>)
-→ { deviceId, deviceSecret }              // for the driver's active-trip bus
+→ { deviceId, deviceSecret, tripId }      // for the driver's active-trip bus
 404 → no active trip with an assigned device
 ```
-Fetch it only when you actually begin phone-based tracking, store in secure
-storage, and clear on logout.
+`deviceSecret` is a key for that one trip and driver, not the bus's permanent
+secret. The server accepts it only while that trip is running with this driver
+on it: it stops working when the trip ends or is reassigned (401). So fetch it
+again at the start of every trip, store it in secure storage, and clear it on
+logout.
 
 > ⚠️ The login response also returns `deviceId`/`deviceSecret` today, but that is
 > **deprecated** and will be removed — migrate to the endpoint above.
