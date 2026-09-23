@@ -22,11 +22,12 @@ if (config.RUN_MIGRATIONS) {
 const { server, io, prisma } = require('./server.js');
 const { startTcpServer } = require('./tcp-server.js');
 const { flushFirestore } = require('./firebase.js');
-const { emitToSchool } = require('./middleware/socketAuth');
+const { emitToSchool, emitToUser } = require('./middleware/socketAuth');
 const busPresence = require('./busPresence');
 const { materialiseRuns } = require('./materialiseRuns');
 const { sweepUnstartedTrips } = require('./staleTrips');
 const { loadRevocations } = require('./sessionRevocations');
+const { sweepDarkBuses } = require('./darkBuses');
 
 // Put back the sign-out-everywhere cutoffs saved before this restart, before accepting
 // a single request: until they are back, tokens revoked by a password change or
@@ -87,6 +88,24 @@ setInterval(async () => {
     logger.error({err}, 'Stale bus sweep failed');
   }
 }, 5 * 60 * 1000);
+
+// Dark bus sweep (every minute): a running trip's bus that stopped sending GPS. The
+// sweep above gets there too, after 15-30 minutes and without telling anyone. See
+// darkBuses.js for why a quiet phone on a parked bus is not counted.
+if (config.BUS_DARK_MINUTES > 0) {
+  setInterval(async () => {
+    try {
+      const flagged = await sweepDarkBuses(prisma, {
+        io, emitToSchool, emitToUser,
+        minutes: config.BUS_DARK_MINUTES,
+        movingKph: config.GPS_MOVING_SPEED_KPH,
+      });
+      if (flagged.length > 0) logger.warn({ flagged }, 'Buses on running trips stopped sending GPS');
+    } catch (err) {
+      logger.error({ err }, 'Dark bus sweep failed');
+    }
+  }, 60 * 1000);
+}
 
 // Unstarted trip sweep (hourly). See staleTrips.js for why these must not stay PLANNED,
 // and why only the school hears about it: the driver app stops GPS on any CANCELLED

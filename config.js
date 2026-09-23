@@ -88,6 +88,11 @@ const schema = z.object({
   // cancelled, and its first pass works through every leftover trip since go-live. Off,
   // it only logs how many it would cancel — read that number, then turn it on.
   STALE_TRIP_SWEEP: boolish.default('0'),
+
+  // Minutes of silence before a bus on a running trip counts as dark and the school's
+  // admins are told (darkBuses.js). A phone that stopped while standing still is not
+  // counted: it only sends after the bus moves. 0 turns the alert off.
+  BUS_DARK_MINUTES: z.coerce.number().int().nonnegative().default(5),
 });
 
 const parsed = schema.safeParse(process.env);

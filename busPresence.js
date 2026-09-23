@@ -16,6 +16,23 @@ const MAX_ENTRIES = 5000;
 
 const lastWriteAt = new Map(); // busId → epoch ms of last ONLINE status write
 
+// The last usable fix from each bus since this process started: when it arrived, how
+// fast the bus was going (km/h), and whether a hardware tracker or the driver's phone
+// sent it. The dark-bus sweep (darkBuses.js) reads it.
+const lastFix = new Map(); // busId → { at, speed, source: 'tracker' | 'phone' }
+
+function noteFix(busId, { speed, source }, at = Date.now()) {
+  if (!busId) return;
+  if (!lastFix.has(busId) && lastFix.size >= MAX_ENTRIES) {
+    lastFix.delete(lastFix.keys().next().value);
+  }
+  lastFix.set(busId, { at, speed: typeof speed === 'number' ? speed : 0, source });
+}
+
+function lastFixOf(busId) {
+  return lastFix.get(busId) || null;
+}
+
 // currentStatus is the Bus.status we just read (DB row or cached copy).
 // Returns { write, cameOnline }.
 function evaluate(busId, currentStatus) {
@@ -48,6 +65,7 @@ function markOffline(busId) {
 
 function clear() {
   lastWriteAt.clear();
+  lastFix.clear();
 }
 
-module.exports = { evaluate, markOffline, clear, STATUS_WRITE_INTERVAL_MS };
+module.exports = { evaluate, markOffline, noteFix, lastFixOf, clear, STATUS_WRITE_INTERVAL_MS };

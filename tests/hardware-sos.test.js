@@ -84,6 +84,8 @@ describe('hardware SOS school', () => {
     expect(prisma.emergencyAlert.create).toHaveBeenCalledWith({
       data: expect.objectContaining({ schoolId: 's1', tripId: 't1', type: 'HARDWARE_SOS' }),
     });
+    // The dark-bus sweep reads this: a tracker reports even when parked.
+    expect(require('../busPresence').lastFixOf('b1')).toMatchObject({ source: 'tracker' });
   });
 
   it("falls back to the running trip's school when the bus has none", async () => {

@@ -98,6 +98,7 @@ function startTcpServer(io, tcpPort = config.TCP_PORT) {
               });
             }
             
+            busPresence.noteFix(bus.id, { speed: fixSpeed, source: 'tracker' });
             const presence = busPresence.evaluate(bus.id, bus.status);
             if (presence.write) {
               await prisma.bus.update({

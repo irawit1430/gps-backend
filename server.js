@@ -414,6 +414,7 @@ app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => 
       // Throttle state lives in busPresence, not on `bus`: with HMAC enforced the row
       // is re-read per request, so a marker stored on the object was always missing
       // and every single packet wrote to the DB.
+      busPresence.noteFix(bus.id, { speed: fixSpeed, source: 'phone' });
       const presence = busPresence.evaluate(bus.id, bus.status);
       if (presence.write) {
         await prisma.bus.update({
