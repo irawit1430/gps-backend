@@ -901,7 +901,10 @@ app.put('/api/parents/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), valid
       data
     });
     // A password reset must revoke the parent's existing tokens.
-    if (req.body.password) invalidateUser(req.params.id);
+    if (req.body.password) {
+      invalidateUser(req.params.id);
+      await forgetPushDevices(req.params.id, req.log);
+    }
     delete updated.password;
     delete updated.fcmToken;
     res.json(updated);
@@ -3134,7 +3137,10 @@ app.put('/api/drivers/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), valid
       data
     });
     // A password reset must revoke the driver's existing tokens.
-    if (req.body.password) invalidateUser(req.params.id);
+    if (req.body.password) {
+      invalidateUser(req.params.id);
+      await forgetPushDevices(req.params.id, req.log);
+    }
     delete updated.password;
     delete updated.fcmToken;
     res.json(updated);
@@ -3525,6 +3531,19 @@ async function emailUsers(userIds, { subject, text, html }) {
     await mailer.sendMailTo(to, { subject, text, html });
   } catch (err) {
     logger.error({ err: err.message }, 'emailUsers failed');
+  }
+}
+
+// When somebody else resets a user's password it is usually a lost or handed-on phone.
+// Its push registration outlived the sign-out (the app can only unregister while it
+// still holds a valid token), so that phone kept receiving the child's boarding and
+// drop-off alerts. Forget every device; the next sign-in registers its own again.
+async function forgetPushDevices(userId, log) {
+  try {
+    await prisma.pushDevice.deleteMany({ where: { userId } });
+    await prisma.user.updateMany({ where: { id: userId }, data: { fcmToken: null } });
+  } catch (err) {
+    (log || logger).warn({ err: err.message, userId }, 'could not forget push devices after a password reset');
   }
 }
 
@@ -4064,6 +4083,9 @@ app.get('/api/devices/locations', async (req, res) => {
       const busIds = activeTrips.map((t) => t.busId);
       where.id = { in: busIds };
     } else if (req.user.role === 'PARENT') {
+      // Running trips only, the same rule as the live feed (positionAudience.js). With
+      // PLANNED trips (materialised days ahead) a parent could read where the bus sat at
+      // any hour, overnight included: often outside the driver's home.
       const children = await prisma.student.findMany({
         where: { parentId: req.user.id },
         include: {
@@ -4074,7 +4096,7 @@ app.get('/api/devices/locations', async (req, res) => {
                   route: {
                     include: {
                       trips: {
-                        where: { status: { in: ['PLANNED', 'ON_SCHEDULE', 'DELAYED'] } },
+                        where: { status: { in: ['ON_SCHEDULE', 'DELAYED'] } },
                         select: { busId: true },
                       },
                     },
@@ -4474,6 +4496,7 @@ app.post('/api/password-reset-requests/:id/approve',
       ]);
       // Whoever was signed in as this user is signed out: the password just changed.
       invalidateUser(request.userId);
+      await forgetPushDevices(request.userId, req.log);
 
       req.log.info({ requestId: request.id, by: req.user.id }, 'password reset approved');
       res.json({
