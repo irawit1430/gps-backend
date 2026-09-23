@@ -310,6 +310,14 @@ app.post('/api/auth/logout', authenticate, async (req, res) => {
   res.json({ message: 'Logged out' });
 });
 
+// Which accounts a school admin may reset. Anyone can file a forgot-password request
+// for any email, and approving one hands the approver a working password. A school
+// admin approving a request for another admin, or for a super admin who carries their
+// school's id, would sign in as that account: so administrators' requests are for
+// super admins only.
+const SCHOOL_RESETTABLE_ROLES = ['PARENT', 'DRIVER'];
+const schoolCanReset = (role) => SCHOOL_RESETTABLE_ROLES.includes(role);
+
 // Forgot password. There is no mail sender in this stack, so instead of emailing a
 // code this queues a request for the user's school admin, who resets the password and
 // hands it over directly. Always answers 200 with the same body: a different response
@@ -334,9 +342,9 @@ app.post('/api/auth/forgot-password', loginLimiter, validate({ body: S.forgotPas
     });
 
     // Tell the people who can act on it: that school's admins, or the super admins
-    // when the account belongs to no school.
+    // when the account belongs to no school or is an administrator's own.
     const admins = await prisma.user.findMany({
-      where: user.schoolId
+      where: user.schoolId && schoolCanReset(user.role)
         ? { schoolId: user.schoolId, role: { in: ['SCHOOL_ADMIN', 'SUPER_ADMIN'] } }
         : { role: 'SUPER_ADMIN' },
       select: { id: true },
@@ -4357,8 +4365,10 @@ app.get('/api/password-reset-requests',
     try {
       const status = req.query.status ? String(req.query.status).toUpperCase() : 'PENDING';
       const where = { status };
-      if (req.user.role === 'SCHOOL_ADMIN') where.schoolId = req.user.schoolId;
-      else if (req.query.schoolId) where.schoolId = req.query.schoolId;
+      if (req.user.role === 'SCHOOL_ADMIN') {
+        where.schoolId = req.user.schoolId;
+        where.user = { role: { in: SCHOOL_RESETTABLE_ROLES } };
+      } else if (req.query.schoolId) where.schoolId = req.query.schoolId;
 
       const requests = await prisma.passwordResetRequest.findMany({
         where,
@@ -4382,11 +4392,14 @@ app.post('/api/password-reset-requests/:id/approve',
     try {
       const request = await prisma.passwordResetRequest.findUnique({
         where: { id: req.params.id },
-        include: { user: { select: { id: true, name: true, email: true, schoolId: true } } },
+        include: { user: { select: { id: true, name: true, email: true, schoolId: true, role: true } } },
       });
       if (!request) return res.status(404).json({ error: 'Request not found' });
       if (req.user.role === 'SCHOOL_ADMIN' && request.schoolId !== req.user.schoolId) {
         return res.status(403).json({ error: 'Forbidden: cross-tenant' });
+      }
+      if (req.user.role === 'SCHOOL_ADMIN' && !schoolCanReset(request.user.role)) {
+        return res.status(403).json({ error: "Only a super admin can reset an administrator's password" });
       }
       if (request.status !== 'PENDING') {
         return res.status(400).json({ error: `Request is already ${request.status}` });
@@ -4425,10 +4438,16 @@ app.post('/api/password-reset-requests/:id/reject',
   authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
   async (req, res) => {
     try {
-      const request = await prisma.passwordResetRequest.findUnique({ where: { id: req.params.id } });
+      const request = await prisma.passwordResetRequest.findUnique({
+        where: { id: req.params.id },
+        include: { user: { select: { role: true } } },
+      });
       if (!request) return res.status(404).json({ error: 'Request not found' });
       if (req.user.role === 'SCHOOL_ADMIN' && request.schoolId !== req.user.schoolId) {
         return res.status(403).json({ error: 'Forbidden: cross-tenant' });
+      }
+      if (req.user.role === 'SCHOOL_ADMIN' && !schoolCanReset(request.user?.role)) {
+        return res.status(403).json({ error: "Only a super admin can reset an administrator's password" });
       }
       if (request.status !== 'PENDING') {
         return res.status(400).json({ error: `Request is already ${request.status}` });
