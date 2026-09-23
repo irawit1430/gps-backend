@@ -3047,8 +3047,16 @@ app.post('/api/users/me/fcm-token', validate({ body: S.fcmToken }), async (req, 
 
 app.put('/api/users/me', validate({ body: S.updateMe }), async (req, res) => {
   try {
-    const data = { ...req.body };
+    const { currentPassword, ...data } = req.body;
     if (data.password) {
+      // A token alone must not be enough to change the password, or a stolen or
+      // left-signed-in session becomes a permanent takeover: the new password locks
+      // the owner out. Same rule as change-password. 400, not 401: every client
+      // treats a 401 as a dead session and signs the user out.
+      const me = await prisma.user.findUnique({ where: { id: req.user.id }, select: { password: true } });
+      if (!me || !currentPassword || !(await bcrypt.compare(currentPassword, me.password))) {
+        return res.status(400).json({ error: 'Enter your current password to change it', code: 'CURRENT_PASSWORD_REQUIRED' });
+      }
       data.password = await bcrypt.hash(data.password, 10);
       data.mustResetPassword = false;
     }
@@ -4272,7 +4280,9 @@ app.post('/api/admins', validate({ body: S.createAdmin }), async (req, res) => {
     const { name, email, password, role, schoolId } = req.body;
     const hashed = await bcrypt.hash(password, 10);
     const admin = await prisma.user.create({
-      data: { name, email, password: hashed, role, schoolId },
+      // The super admin chose this password, so the new admin sets their own at first
+      // sign-in (the school dashboard asks).
+      data: { name, email, password: hashed, role, schoolId, mustResetPassword: true },
       select: { id: true, name: true, email: true, role: true, schoolId: true },
     });
     res.json(admin);
@@ -4298,7 +4308,11 @@ app.put('/api/admins/:id', validate({ body: S.updateAdmin }), async (req, res) =
       }
     }
     const data = { ...req.body };
-    if (data.password) data.password = await bcrypt.hash(data.password, 10);
+    if (data.password) {
+      data.password = await bcrypt.hash(data.password, 10);
+      // Someone else chose it: the admin replaces it at next sign-in.
+      if (req.params.id !== req.user.id) data.mustResetPassword = true;
+    }
     const admin = await prisma.user.update({
       where: { id: req.params.id },
       data,

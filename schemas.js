@@ -342,6 +342,8 @@ exports.updateMe = z.object({
   name: z.string().min(1).max(200).optional(),
   photoUrl: z.string().url().max(1000).optional().nullable(),
   password: z.string().min(8).max(200).optional(),
+  // Required with `password`: see PUT /api/users/me.
+  currentPassword: z.string().min(1).max(200).optional(),
   phone: z.string().min(6).max(20).optional().nullable(),
 });
 
