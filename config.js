@@ -106,6 +106,15 @@ const schema = z.object({
   // How close, in minutes, the bus must be before parents at that stop get the
   // "approaching your stop" alert. 0 turns the alert off.
   APPROACH_ALERT_MINUTES: z.coerce.number().int().min(0).max(30).default(5),
+  // Whole-system alarms to super admins (systemHealth.js). No GPS from any bus for this
+  // many minutes while trips are running. 0 turns it off.
+  SYSTEM_GPS_SILENCE_MINUTES: z.coerce.number().int().nonnegative().default(10),
+  // Push failing: at least SYSTEM_PUSH_FAIL_RATE of the pushes in the last
+  // SYSTEM_PUSH_WINDOW_MINUTES failed, out of at least SYSTEM_PUSH_MIN_ATTEMPTS.
+  // A window of 0 turns it off.
+  SYSTEM_PUSH_WINDOW_MINUTES: z.coerce.number().int().nonnegative().default(30),
+  SYSTEM_PUSH_MIN_ATTEMPTS: z.coerce.number().int().min(1).default(20),
+  SYSTEM_PUSH_FAIL_RATE: z.coerce.number().min(0).max(1).default(0.5),
 });
 
 const parsed = schema.safeParse(process.env);

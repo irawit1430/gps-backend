@@ -80,6 +80,7 @@ const logger = require('./logger');
 const S = require('./schemas');
 const { selectJourney, selectNextJourney, journeyState } = require('./journey');
 const liveEta = require('./liveEta');
+const systemHealth = require('./systemHealth');
 const { plannedAt, plannedMinutes, SCHOOL_STOP_ID } = require('./routePlan');
 const { calendarDate, dayBounds, DEFAULT_ZONE } = require('./schoolTime');
 const { validate } = require('./middleware/validate');
@@ -3726,6 +3727,8 @@ async function pushToUsers(userIds, payload) {
     if (tokens.length === 0) return;
 
     const { invalidTokens, accepted = [], failed = [] } = await sendPush(tokens, payload);
+    // An uninstalled app (invalidTokens) is ordinary churn; a failed send is not.
+    systemHealth.notePush({ accepted: accepted.length, failed: failed.length, codes: failed.map((f) => f.code) });
     if (invalidTokens?.length) {
       // Uninstalled app / re-registered device: drop the token so it is not retried.
       await prisma.user.updateMany({
@@ -3854,6 +3857,33 @@ async function notifyApproaching({ trip, plan, progress: at, now }) {
   }
 }
 liveEta.onApproach(notifyApproaching);
+
+// A whole-system alarm (systemHealth.js) for every super admin: bell, push, email, and
+// the log. Push is tried even for a push alarm, since failing is rarely total; email
+// is the channel that does not depend on Firebase.
+async function notifySuperAdmins({ check, status, title, message, detail }) {
+  const log = status === 'DOWN' ? logger.error.bind(logger) : logger.info.bind(logger);
+  log({ check, status, detail }, `system health: ${title}`);
+  const admins = await prisma.user.findMany({ where: { role: 'SUPER_ADMIN' }, select: { id: true } });
+  const ids = admins.map((a) => a.id);
+  if (ids.length === 0) return;
+  const context = { type: 'SYSTEM_HEALTH', check, status, ...detail };
+  await prisma.notification.createMany({ data: ids.map((userId) => ({ userId, title, message, type: 'SYSTEM', context })) });
+  if (io) ids.forEach((id) => emitToUser(io, id, 'notification', { title, message, type: 'SYSTEM', context }));
+  await pushToUsers(ids, { title, body: message, data: context });
+  await emailUsers(ids, { subject: `Voltava: ${title}`, text: message });
+}
+
+// What the whole-system alarms see right now, for the super admin.
+app.get('/api/admin/system-health', authorizeRoles('SUPER_ADMIN'), async (req, res) => {
+  try {
+    const runningTrips = await prisma.trip.count({ where: { status: { in: ['ON_SCHEDULE', 'DELAYED'] } } });
+    res.json({ runningTrips, ...systemHealth.snapshot({ pushWindowMinutes: config.SYSTEM_PUSH_WINDOW_MINUTES }) });
+  } catch (err) {
+    req.log.error({ err }, 'system health failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 // How far back a replayed check-in is recognised as the same scan.
 const IDEMPOTENCY_WINDOW_MS = 10 * 60 * 1000;
@@ -5009,4 +5039,4 @@ app.use((err, req, res, next) => {
 });
 
 // pushToUsers is exported for its tests; nothing outside server.js calls it.
-module.exports = { app, server, io, prisma, pushToUsers };
+module.exports = { app, server, io, prisma, pushToUsers, notifySuperAdmins };

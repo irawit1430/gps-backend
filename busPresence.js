@@ -11,6 +11,8 @@
 //     announces the ONLINE→OFFLINE edge; without this one a dashboard that dims a
 //     bus on the sweep event has nothing to light it back up.
 
+const systemHealth = require('./systemHealth');
+
 const STATUS_WRITE_INTERVAL_MS = 5 * 60 * 1000;
 const MAX_ENTRIES = 5000;
 
@@ -23,6 +25,9 @@ const lastFix = new Map(); // busId → { at, speed, source: 'tracker' | 'phone'
 
 function noteFix(busId, { speed, source }, at = Date.now()) {
   if (!busId) return;
+  // Both ingest paths come through here, so this is also the system-wide "GPS is
+  // arriving" signal (systemHealth.js).
+  systemHealth.noteFix(at);
   if (!lastFix.has(busId) && lastFix.size >= MAX_ENTRIES) {
     lastFix.delete(lastFix.keys().next().value);
   }

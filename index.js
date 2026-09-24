@@ -19,7 +19,7 @@ if (config.RUN_MIGRATIONS) {
   }
 }
 
-const { server, io, prisma } = require('./server.js');
+const { server, io, prisma, notifySuperAdmins } = require('./server.js');
 const { startTcpServer } = require('./tcp-server.js');
 const { flushFirestore } = require('./firebase.js');
 const { emitToSchool, emitToUser } = require('./middleware/socketAuth');
@@ -28,6 +28,7 @@ const { materialiseRuns } = require('./materialiseRuns');
 const { sweepUnstartedTrips } = require('./staleTrips');
 const { loadRevocations } = require('./sessionRevocations');
 const { sweepDarkBuses } = require('./darkBuses');
+const { sweepSystemHealth } = require('./systemHealth');
 
 // Put back the sign-out-everywhere cutoffs saved before this restart, before accepting
 // a single request: until they are back, tokens revoked by a password change or
@@ -106,6 +107,22 @@ if (config.BUS_DARK_MINUTES > 0) {
     }
   }, 60 * 1000);
 }
+
+// Whole-system alarms (every minute): no GPS from any bus while trips run, or push
+// failing across the board. See systemHealth.js.
+setInterval(async () => {
+  try {
+    await sweepSystemHealth(prisma, {
+      notify: notifySuperAdmins,
+      gpsSilenceMinutes: config.SYSTEM_GPS_SILENCE_MINUTES,
+      pushWindowMinutes: config.SYSTEM_PUSH_WINDOW_MINUTES,
+      pushMinAttempts: config.SYSTEM_PUSH_MIN_ATTEMPTS,
+      pushFailRate: config.SYSTEM_PUSH_FAIL_RATE,
+    });
+  } catch (err) {
+    logger.error({ err }, 'System health sweep failed');
+  }
+}, 60 * 1000);
 
 // Unstarted trip sweep (hourly). See staleTrips.js for why these must not stay PLANNED,
 // and why only the school hears about it: the driver app stops GPS on any CANCELLED
