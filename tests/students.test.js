@@ -40,7 +40,7 @@ describe('GET /api/schools/:schoolId/students', () => {
       {
         id: 1, rfidTag: 'TAG1', name: 'Student 1', grade: '5th', photoUrl: 'url1',
         guardianPhone: null, parentId: null, parentName: null, parentEmail: null, parentPhone: null, qrCodeImported: false,
-        assignedRoute: 'Unassigned', routeStopName: 'Unassigned',
+        assignedRoute: 'Unassigned', routeStopName: 'Unassigned', stopTime: null,
         boardingStatus: null, lastCheckIn: null,
         // A child with no assignment has no mappings to act on, but the key is always
         // present so the dashboard never has to guard for undefined.
@@ -62,6 +62,60 @@ describe('GET /api/schools/:schoolId/students', () => {
 
     expect(res.status).toBe(200);
     expect(res.body[0]).toMatchObject({ assignedRoute: 'Route 1', routeStopName: 'Stop A' });
+  });
+
+  // The profile's "Pickup Time" read "Not provided" for every child: nothing sent one.
+  // It is the morning departure plus the stop's minutes from the start of the route.
+  describe('pickup time', () => {
+    const run = (departure, endDate = '2099-12-31') => ({ departure, endDate: new Date(endDate) });
+    const withMapping = (mapping) => prisma.student.findMany.mockResolvedValue([{
+      id: 6, rfidTag: 'T6', name: 'S6', grade: null, photoUrl: null, guardianPhone: null, parent: null,
+      routeMappings: [{ id: 'm6', direction: null, ...mapping }],
+    }]);
+    const stop = (expectedArrivalMinutes, runs) => ({
+      routeStop: { name: 'Stop A', expectedArrivalMinutes, route: { name: 'Route 1', runs } },
+    });
+    const pickup = async () => (await get(1)).body[0].stopTime;
+
+    it('asks for the morning departures and the stop timing', async () => {
+      withMapping(stop(10, []));
+      await get(1);
+
+      const { select } = prisma.student.findMany.mock.calls[0][0].include.routeMappings.include.routeStop;
+      expect(select.expectedArrivalMinutes).toBe(true);
+      expect(select.route.select.runs).toEqual({
+        where: { active: true, direction: 'TO_SCHOOL' }, select: { departure: true, endDate: true },
+      });
+    });
+
+    it('is the departure plus the minutes to the stop', async () => {
+      withMapping(stop(10, [run('07:15')]));
+      expect(await pickup()).toBe('07:25');
+    });
+
+    it('carries past the hour', async () => {
+      withMapping(stop(55, [run('07:15')]));
+      expect(await pickup()).toBe('08:10');
+    });
+
+    it('lists each different morning time once, earliest first', async () => {
+      withMapping(stop(10, [run('08:30'), run('07:15'), run('07:15')]));
+      expect(await pickup()).toBe('07:25 / 08:40');
+    });
+
+    it('ignores a run whose dates are over', async () => {
+      withMapping(stop(10, [run('07:15'), run('06:00', '2020-06-30')]));
+      expect(await pickup()).toBe('07:25');
+    });
+
+    it.each([
+      ['a stop with no timing', stop(null, [run('07:15')])],
+      ['a route with no morning run', stop(10, [])],
+      ['a drop-off-only stop', { ...stop(10, [run('07:15')]), direction: 'FROM_SCHOOL' }],
+    ])('is empty for %s', async (_label, mapping) => {
+      withMapping(mapping);
+      expect(await pickup()).toBeNull();
+    });
   });
 
   // The parent account's number is the one the office dials; guardianPhone is the
@@ -127,7 +181,8 @@ describe('GET /api/schools/:schoolId/students', () => {
     await get(1);
 
     const include = prisma.student.findMany.mock.calls[0][0].include;
-    expect(include.routeMappings.include.routeStop.select.route.select).toEqual({ name: true });
+    // The name, and the morning departures for the pickup time: never the polyline.
+    expect(Object.keys(include.routeMappings.include.routeStop.select.route.select)).toEqual(['name', 'runs']);
     // Email is the parent's sign-in, which the office needs to help a locked-out parent.
     expect(include.parent.select).toEqual({ name: true, phone: true, email: true });
   });

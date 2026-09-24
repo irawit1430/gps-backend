@@ -1198,6 +1198,24 @@ app.put('/api/trips/:tripId',
   }
 );
 
+// When the bus reaches a child's pickup stop: each current morning run's departure plus
+// the stop's minutes from the start of the route. A later Saturday bus reads
+// "07:25 / 08:40". null when there is nothing to go on: a drop-off-only stop, a stop
+// with no timing, or no morning run.
+function pickupTime(mapping, today) {
+  if (!mapping || mapping.direction === 'FROM_SCHOOL') return null;
+  const offset = mapping.routeStop?.expectedArrivalMinutes;
+  if (offset == null) return null;
+  const times = (mapping.routeStop.route?.runs || [])
+    .filter((r) => ymd(r.endDate) >= today)
+    .map((r) => {
+      const [h, min] = r.departure.split(':').map(Number);
+      const at = (h * 60 + min + offset) % 1440;
+      return `${String(Math.floor(at / 60)).padStart(2, '0')}:${String(at % 60).padStart(2, '0')}`;
+    });
+  return [...new Set(times)].sort().join(' / ') || null;
+}
+
 app.get('/api/schools/:schoolId/students', requireTenant('schoolId'), schoolAdminsOnly, async (req, res) => {
   try {
     const startOfToday = new Date();
@@ -1225,14 +1243,22 @@ app.get('/api/schools/:schoolId/students', requireTenant('schoolId'), schoolAdmi
           include: {
             routeStop: {
               select: {
-                id: true, name: true, lat: true, lng: true, routeId: true,
-                route: { select: { name: true } },
+                id: true, name: true, lat: true, lng: true, routeId: true, expectedArrivalMinutes: true,
+                // The morning departures, for the pickup time. Nothing sent one, so the
+                // profile read "Pickup Time: Not provided" for every child.
+                route: {
+                  select: {
+                    name: true,
+                    runs: { where: { active: true, direction: 'TO_SCHOOL' }, select: { departure: true, endDate: true } },
+                  },
+                },
               },
             },
           },
         },
       },
     });
+    const today = calendarDate(new Date());
 
     // Today's scans in one bounded query, latest per student. These two fields used
     // to be the literals 'Absent' and '--:--', so every child read as absent forever.
@@ -1265,6 +1291,7 @@ app.get('/api/schools/:schoolId/students', requireTenant('schoolId'), schoolAdmi
           parentPhone: s.parent?.phone || null,
           assignedRoute: m?.routeStop?.route?.name || 'Unassigned',
           routeStopName: m?.routeStop?.name || 'Unassigned',
+          stopTime: pickupTime(m, today),
           // Every assignment this child holds — a pickup and a drop-off stop are two.
           // The two fields above stay as they are, showing the first, so nothing reading
           // them breaks; anything that needs to ACT on an assignment reads this instead.
