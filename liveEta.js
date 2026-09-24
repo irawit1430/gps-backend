@@ -51,10 +51,17 @@ async function loadPlan(prisma, routeId, direction) {
     where: { id: routeId },
     select: {
       geometry: true,
+      estimatedDuration: true,
+      school: { select: { latitude: true, longitude: true, stopDwellMinutes: true } },
       stops: { orderBy: { orderIdx: 'asc' }, select: { id: true, lat: true, lng: true, orderIdx: true, expectedArrivalMinutes: true } },
     },
   });
-  const plan = route ? buildPlan(route, direction, config.STOP_DWELL_MINUTES) : null;
+  // The school's own waiting time, or the server default.
+  const dwell = route?.school?.stopDwellMinutes ?? config.STOP_DWELL_MINUTES;
+  const school = route?.school?.latitude != null && route?.school?.longitude != null
+    ? { lat: route.school.latitude, lng: route.school.longitude }
+    : null;
+  const plan = route ? buildPlan(route, direction, dwell, school) : null;
   bounded(plans, key, { plan, expires: Date.now() + PLAN_TTL_MS });
   return plan;
 }
@@ -184,6 +191,11 @@ function tripChanged(tripId) {
   trips.delete(tripId);
 }
 
+// A school's timing settings or location changed: rebuild every plan on next use.
+function plansChanged() {
+  plans.clear();
+}
+
 function onApproach(handler) {
   approachHandler = handler;
 }
@@ -194,4 +206,4 @@ function clear() {
   progress.clear();
 }
 
-module.exports = { onFix, etaFor, plansFor, passedAt, tripChanged, onApproach, clear, planKey, LIVE_MAX_AGE_MS };
+module.exports = { onFix, etaFor, plansFor, passedAt, tripChanged, plansChanged, onApproach, clear, planKey, LIVE_MAX_AGE_MS };

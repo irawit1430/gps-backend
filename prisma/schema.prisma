@@ -112,6 +112,9 @@ model School {
   supportHours  String?
   leaveCutoffMinutes Int?
   leaveResponseHours Int?
+  // Minutes the bus waits at each stop; added to ETAs per stop before yours. NULL
+  // means the server default (STOP_DWELL_MINUTES).
+  stopDwellMinutes Float?
   address       String?
   contactPerson String?
   city          String?

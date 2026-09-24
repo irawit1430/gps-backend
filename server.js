@@ -80,7 +80,7 @@ const logger = require('./logger');
 const S = require('./schemas');
 const { selectJourney, selectNextJourney, journeyState } = require('./journey');
 const liveEta = require('./liveEta');
-const { plannedAt, plannedMinutes } = require('./routePlan');
+const { plannedAt, plannedMinutes, SCHOOL_STOP_ID } = require('./routePlan');
 const { calendarDate, dayBounds, DEFAULT_ZONE } = require('./schoolTime');
 const { validate } = require('./middleware/validate');
 const { authenticate, authorizeRoles, requireTenant, requireSelfOrRoles, logoutToken, invalidateUser, requireCurrentPassword } = require('./middleware/auth');
@@ -2577,6 +2577,16 @@ function requireTenantUserAccess(paramName, expectedRole) {
 const requireParentAccess = requireTenantUserAccess('parentId', 'PARENT');
 const requireDriverAccess = requireTenantUserAccess('driverId', 'DRIVER');
 
+// When a morning trip reaches school, in the shape of the stop ETA fields.
+function schoolEta(trip, plans, now) {
+  const none = { schoolEtaAt: null, schoolEtaMinutes: null, schoolEtaBasis: null };
+  if (!trip || trip.direction !== 'TO_SCHOOL') return none;
+  const plan = plans.get(liveEta.planKey(trip.routeId, trip.direction));
+  if (!plan?.schoolStopId) return none;
+  const e = liveEta.etaFor(trip, { id: plan.schoolStopId }, plans, now);
+  return { schoolEtaAt: e.stopEtaAt, schoolEtaMinutes: e.stopEtaMinutes, schoolEtaBasis: e.etaBasis };
+}
+
 app.get('/api/parents/:parentId/students',
   requireParentAccess,
   async (req, res) => {
@@ -2584,7 +2594,7 @@ app.get('/api/parents/:parentId/students',
       const students = await prisma.student.findMany({
         where: { parentId: req.params.parentId },
         include: {
-          school: { select: { phone: true, contactPhone: true, timezone: true, leaveCutoffMinutes: true, leaveResponseHours: true } },
+          school: { select: { name: true, phone: true, contactPhone: true, timezone: true, leaveCutoffMinutes: true, leaveResponseHours: true } },
           routeMappings: {
             // Oldest first, so the fallbacks below are stable across refreshes.
             orderBy: { createdAt: 'asc' },
@@ -2731,6 +2741,11 @@ app.get('/api/parents/:parentId/students',
           // filled it in). Combined with trip.startTime it gives a real arrival time.
           stopOffsetMinutes: stop?.expectedArrivalMinutes ?? null,
           ...liveEta.etaFor(t, stop, plans, now),
+          // On the way in, once the child is aboard, what the parent is waiting for is
+          // school, not the stop the bus has already left. null on the way home, and
+          // when the school's location is not set.
+          schoolName: s.school?.name || null,
+          ...schoolEta(t, plans, now),
           trip: t
             ? {
                 id: t.id,
@@ -2795,6 +2810,7 @@ app.get('/api/parents/:parentId/students/:studentId/trip',
         include: {
           route: {
             include: {
+              school: { select: { name: true, latitude: true, longitude: true } },
               stops: {
                 orderBy: { orderIdx: 'asc' },
                 // `direction` rides along so a stop's boarding count covers the children
@@ -2836,6 +2852,7 @@ app.get('/api/parents/:parentId/students/:studentId/trip',
 
       const ridesThisLeg = (m) => !trip.direction || !m.direction || m.direction === trip.direction;
       const plans = await liveEta.plansFor(prisma, [trip]);
+      const schoolPlan = plans.get(liveEta.planKey(trip.routeId, trip.direction));
       const stops = trip.route.stops.map((stop) => {
         const stopStudentIds = new Set(
           stop.studentMappings.filter(ridesThisLeg).map((m) => m.studentId)
@@ -2864,11 +2881,32 @@ app.get('/api/parents/:parentId/students/:studentId/trip',
           orderIdx: stop.orderIdx,
           expectedArrivalMinutes: stop.expectedArrivalMinutes ?? null,
           ...liveEta.etaFor(trip, stop, plans),
+          isSchool: stop.id === schoolPlan?.schoolStopId,
           isMyStop: stop.id === mapping.routeStop.id,
           boardedCount: boardings.length,
           passedAt: firstPassage ? new Date(firstPassage).toISOString() : null,
         };
       });
+      // A route drawn without a stop at the school still ends there in the morning and
+      // starts there in the afternoon. Show it, last in pickup order: the app lists the
+      // way home backwards, which puts it first.
+      if (schoolPlan?.schoolStopId === SCHOOL_STOP_ID) {
+        const school = schoolPlan.stops.find((st) => st.id === SCHOOL_STOP_ID);
+        const passed = liveEta.passedAt(trip.id, SCHOOL_STOP_ID);
+        stops.push({
+          id: SCHOOL_STOP_ID,
+          name: trip.route.school?.name || 'School',
+          lat: trip.route.school?.latitude ?? null,
+          lng: trip.route.school?.longitude ?? null,
+          orderIdx: Math.max(-1, ...trip.route.stops.map((st) => st.orderIdx)) + 1,
+          expectedArrivalMinutes: school?.planned ?? null,
+          ...liveEta.etaFor(trip, { id: SCHOOL_STOP_ID }, plans),
+          isSchool: true,
+          isMyStop: false,
+          boardedCount: 0,
+          passedAt: passed ? passed.toISOString() : null,
+        });
+      }
 
       res.json({
         id: trip.id,
@@ -3743,7 +3781,7 @@ async function notifyApproaching({ trip, plan, progress: at, now }) {
   if (!window) return;
   const here = plannedAt(plan, at.along);
   if (here == null) return;
-  const due = plan.stops.filter((s) => s.planned != null && !at.passed.has(s.id)
+  const due = plan.stops.filter((s) => s.planned != null && !s.isSchool && !at.passed.has(s.id)
     && s.planned - here <= window && !approachDecided.has(`${trip.id}:${s.id}`));
   if (due.length === 0) return;
   if (approachDecided.size > 50_000) approachDecided.clear();
@@ -4213,6 +4251,24 @@ app.get('/api/schools/:id', schoolAdminsOnly, async (req, res) => {
   }
 });
 
+// The school's own say in how its buses are timed: how long a bus waits at each stop.
+// Only the super admin could edit a school before, so every school ran on the server
+// default whatever its stops were like.
+app.patch('/api/schools/:schoolId/transport', requireTenant('schoolId'), schoolAdminsOnly, validate({ body: S.schoolTransport }), async (req, res) => {
+  try {
+    const school = await prisma.school.update({
+      where: { id: req.params.schoolId },
+      data: { stopDwellMinutes: req.body.stopDwellMinutes },
+      select: { id: true, stopDwellMinutes: true },
+    });
+    liveEta.plansChanged();
+    res.json({ ...school, defaultStopDwellMinutes: config.STOP_DWELL_MINUTES });
+  } catch (err) {
+    req.log.error({ err }, 'update school transport settings failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 app.post('/api/schools', authorizeRoles('SUPER_ADMIN'), validate({ body: S.createSchool }), async (req, res) => {
   try {
     const school = await prisma.school.create({ data: req.body });
@@ -4226,6 +4282,7 @@ app.post('/api/schools', authorizeRoles('SUPER_ADMIN'), validate({ body: S.creat
 app.put('/api/schools/:id', authorizeRoles('SUPER_ADMIN'), validate({ body: S.updateSchool }), async (req, res) => {
   try {
     const school = await prisma.school.update({ where: { id: req.params.id }, data: req.body });
+    liveEta.plansChanged(); // location or waiting time may have moved every ETA
     res.json(school);
   } catch (err) {
     req.log.error({ err }, 'update school failed');

@@ -16,6 +16,20 @@
 
 const EARTH_M = 6371000;
 const RAD = Math.PI / 180;
+// The school, when it is not one of the route's own stops.
+const SCHOOL_STOP_ID = 'school';
+// A stop this close to the school is the school.
+const AT_SCHOOL_M = 300;
+// With no router time for the drive between the school and the nearest stop, the
+// road is taken as 1.35 x the straight line at 22 km/h: the parent app's own fallback.
+const DETOUR = 1.35;
+const FALLBACK_KMH = 22;
+
+function metres(a, b) {
+  const dLat = (b.lat - a.lat) * RAD, dLng = (b.lng - a.lng) * RAD;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * RAD) * Math.cos(b.lat * RAD) * Math.sin(dLng / 2) ** 2;
+  return 2 * EARTH_M * Math.asin(Math.sqrt(h));
+}
 
 // Google's encoded polyline format, which both OSRM and the Routes API return.
 function decodePolyline(str) {
@@ -56,25 +70,54 @@ function project(plan, lat, lng, maxDist = Infinity, fromSeg = 0) {
   return out;
 }
 
-// route: { geometry, stops: [{ id, lat, lng, orderIdx, expectedArrivalMinutes }] }
+// route: { geometry, estimatedDuration, stops: [{ id, lat, lng, orderIdx, expectedArrivalMinutes }] }
 // direction: the trip's RunDirection, or null for a hand-made trip (pickup order).
-function buildPlan(route, direction, dwellMinutes = 0) {
+// school: { lat, lng } when the school's location is known.
+//
+// The school is where the morning ends and the afternoon begins. A route drawn without
+// a stop at the school left that drive out of every timetable: no time for reaching
+// school once a child was on board, and the afternoon's first house counted from
+// nothing. When the school is not already a stop it is added as one (id 'school').
+function buildPlan(route, direction, dwellMinutes = 0, school = null) {
   const pickupOrder = [...(route?.stops || [])].sort((a, b) => a.orderIdx - b.orderIdx);
   if (pickupOrder.length === 0) return null;
   const reverse = direction === 'FROM_SCHOOL';
-  const inOrder = reverse ? [...pickupOrder].reverse() : pickupOrder;
 
-  // Driving minutes from this leg's first stop. Homeward, a stop that was 25 minutes
-  // into a 30-minute morning is 5 minutes from the school end. That assumes the road
-  // takes as long each way, which beats reading the morning numbers backwards.
+  // Driving minutes from the first pickup. Homeward, a stop that was 25 minutes into a
+  // 30-minute morning is 5 minutes from the school end. That assumes the road takes as
+  // long each way, which beats reading the morning numbers backwards.
   const timed = pickupOrder.map((s) => s.expectedArrivalMinutes).filter((m) => m != null);
   const span = timed.length ? Math.max(...timed) : null;
-  const drive = (m) => (m == null ? null : reverse ? span - m : m);
 
-  // The road, in driving order. Without a stored geometry the stops themselves are the
+  // The road, in pickup order. Without a stored geometry the stops themselves are the
   // line: straight hops, still enough to tell which stops are behind the bus.
   let pts = typeof route.geometry === 'string' && route.geometry ? decodePolyline(route.geometry) : [];
   if (pts.length < 2) pts = pickupOrder.map((s) => ({ lat: s.lat, lng: s.lng }));
+
+  const last = pickupOrder[pickupOrder.length - 1];
+  const knownSchool = school && Number.isFinite(school.lat) && Number.isFinite(school.lng) ? school : null;
+  let schoolStopId = null;
+  let schoolLeg = 0;
+  let stopsInPickupOrder = pickupOrder.map((s) => ({ ...s, minutes: s.expectedArrivalMinutes }));
+  if (knownSchool && metres(last, knownSchool) <= AT_SCHOOL_M) {
+    schoolStopId = last.id; // the route already ends at the school
+  } else if (knownSchool) {
+    schoolStopId = SCHOOL_STOP_ID;
+    // The route editor asks for the road on to the school, so a stored road that ends
+    // there carries the real drive in estimatedDuration. Otherwise, estimate it.
+    const roadReachesSchool = metres(pts[pts.length - 1], knownSchool) <= AT_SCHOOL_M;
+    const routed = route.estimatedDuration != null && span != null ? route.estimatedDuration - span : null;
+    schoolLeg = roadReachesSchool && routed >= 1
+      ? routed
+      : Math.max(1, Math.ceil((metres(last, knownSchool) * DETOUR) / 1000 / FALLBACK_KMH * 60));
+    if (!roadReachesSchool) pts = [...pts, { lat: knownSchool.lat, lng: knownSchool.lng }];
+    stopsInPickupOrder = [...stopsInPickupOrder, {
+      id: SCHOOL_STOP_ID, lat: knownSchool.lat, lng: knownSchool.lng, minutes: span == null ? null : span + schoolLeg,
+    }];
+  }
+  const total = span == null ? null : span + schoolLeg;
+  const drive = (m) => (m == null || total == null ? null : reverse ? total - m : m);
+  const inOrder = reverse ? [...stopsInPickupOrder].reverse() : stopsInPickupOrder;
   if (reverse) pts = [...pts].reverse();
   const refLat = pts[0].lat;
   const line = [];
@@ -84,7 +127,7 @@ function buildPlan(route, direction, dwellMinutes = 0) {
     if (line.length) cum += Math.hypot(xy.x - line[line.length - 1].x, xy.y - line[line.length - 1].y);
     line.push({ ...xy, cum });
   }
-  const plan = { refLat, line, length: cum, dwellMinutes, stops: [] };
+  const plan = { refLat, line, length: cum, dwellMinutes, schoolStopId, stops: [] };
 
   // Each stop's place on the road, never behind the one before it. A road that passes
   // a later stop early (a loop, a street driven both ways) must not pull it forward, so
@@ -98,9 +141,10 @@ function buildPlan(route, direction, dwellMinutes = 0) {
       seg = pick.seg;
       along = Math.max(along, pick.along);
     }
-    const minutes = drive(s.expectedArrivalMinutes);
+    const minutes = drive(s.minutes);
     plan.stops.push({
       id: s.id,
+      isSchool: s.id === schoolStopId,
       rank,
       along,
       // Arrival, counted from departure: driving time plus a wait at every stop the
@@ -134,4 +178,4 @@ function plannedAt(plan, along) {
   return timed[timed.length - 1].planned;
 }
 
-module.exports = { buildPlan, plannedMinutes, plannedAt, project, decodePolyline };
+module.exports = { buildPlan, plannedMinutes, plannedAt, project, decodePolyline, SCHOOL_STOP_ID };

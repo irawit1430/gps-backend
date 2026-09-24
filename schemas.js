@@ -37,6 +37,7 @@ exports.createSchool = z.object({
   supportHours: z.string().max(300).optional().nullable(),
   leaveCutoffMinutes: z.number().int().min(0).max(10080).optional().nullable(),
   leaveResponseHours: z.number().int().min(1).max(720).optional().nullable(),
+  stopDwellMinutes: z.number().min(0).max(10).optional().nullable(),
   address: z.string().max(500).optional().nullable(),
   contactPerson: z.string().max(200).optional().nullable(),
   city: z.string().max(100).optional().nullable(),
@@ -53,6 +54,12 @@ exports.createSchool = z.object({
 });
 
 exports.updateSchool = exports.createSchool.partial();
+
+// What a school's own admin may change about how its buses are timed. null goes back
+// to the server default.
+exports.schoolTransport = z.object({
+  stopDwellMinutes: z.number().min(0).max(10).nullable(),
+}).strict();
 
 // qrToken is accepted on the way IN and never sent back out — a school arriving with
 // cards already printed has to be able to tell us what is on them, but knowing a token

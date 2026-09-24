@@ -77,3 +77,43 @@ it('decodes the route shape the routers return', () => {
 
   expect(pts.map((p) => [p.lat, p.lng])).toEqual([[38.5, -120.2], [40.7, -120.95], [43.252, -126.453]]);
 });
+
+describe('the school', () => {
+  // School about 2.2 km past D, on the same road.
+  const school = { lat: 12.97, lng: 77.65 };
+
+  it('ends the morning when the route has no stop there', () => {
+    const plan = buildPlan(route, 'TO_SCHOOL', 1, school);
+
+    expect(plan.schoolStopId).toBe('school');
+    const last = plan.stops[plan.stops.length - 1];
+    expect(last).toMatchObject({ id: 'school', isSchool: true });
+    // D is 20 min of driving; the school ~2.2 km on, x1.35 at 22 km/h: 8 more. Waits
+    // at B, C and D: 3.
+    expect(last.planned).toBe(20 + 8 + 3);
+  });
+
+  it('starts the afternoon, with every house counted from it', () => {
+    const plan = buildPlan(route, 'FROM_SCHOOL', 1, school);
+
+    expect(plan.stops.map((s) => [s.id, s.planned])).toEqual([['school', 0], ['D', 8], ['C', 14], ['B', 22], ['A', 31]]);
+  });
+
+  it('uses the routed drive when the stored road runs on to the school', () => {
+    const road = [...route.stops.map((s) => ({ lat: s.lat, lng: s.lng })), school];
+    const plan = buildPlan({ ...route, geometry: encode(road), estimatedDuration: 26 }, 'TO_SCHOOL', 0, school);
+
+    expect(plannedMinutes(plan, 'school')).toBe(26);
+  });
+
+  it('is the last stop when the route already ends there', () => {
+    const plan = buildPlan(route, 'TO_SCHOOL', 0, { lat: 12.97, lng: 77.6301 });
+
+    expect(plan.schoolStopId).toBe('D');
+    expect(plan.stops.map((s) => s.id)).toEqual(['A', 'B', 'C', 'D']);
+  });
+
+  it('is left out when its location is not known', () => {
+    expect(buildPlan(route, 'TO_SCHOOL', 0, null).schoolStopId).toBeNull();
+  });
+});

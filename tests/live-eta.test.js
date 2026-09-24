@@ -128,3 +128,26 @@ it('does nothing for a trip that is not running', async () => {
 
   expect(liveEta.passedAt(trip.id, 'A')).toBeNull();
 });
+
+describe("the school's own settings", () => {
+  afterEach(() => { delete route.school; });
+
+  it("uses the school's waiting time instead of the default", async () => {
+    route.school = { latitude: null, longitude: null, stopDwellMinutes: 3 };
+    trip = { ...trip, status: 'PLANNED', startTime: null };
+
+    // D: 12 driving + 3 minutes at B and 3 at C.
+    expect(clock(await eta('D', 0))).toBe(18);
+  });
+
+  it('times the drive on to school, for children already aboard', async () => {
+    route.school = { latitude: 12.97, longitude: 77.65, stopDwellMinutes: 0 };
+    await fix(0.025, 10); // between C and D
+
+    const e = await eta('school', 10);
+    expect(e.etaBasis).toBe('LIVE_POSITION');
+    // From here: ~2 min to D, then ~8 on to the school.
+    expect(clock(e)).toBeGreaterThan(18);
+    expect(clock(e)).toBeLessThan(22);
+  });
+});
