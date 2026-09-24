@@ -82,7 +82,14 @@ const schema = z.object({
   PARENT_DEFAULT_PASSWORD: z.string().min(8).optional().or(z.literal('').transform(() => undefined)),
 
   RATE_LIMIT_LOGIN_PER_MIN: z.coerce.number().int().positive().default(5),
+  // Per signed-in user (or per IP for requests without a token).
   RATE_LIMIT_GLOBAL_PER_MIN: z.coerce.number().int().positive().default(300),
+  // GPS is signed per device, so its budget is per device. The driver app sends every
+  // 15 s and replays a backlog after a dead spot; 120 leaves room for both.
+  RATE_LIMIT_TELEMETRY_PER_DEVICE_PER_MIN: z.coerce.number().int().positive().default(120),
+  // A backstop per IP address. Mobile operators put many phones behind one address,
+  // so this is deliberately far above any one user's budget.
+  RATE_LIMIT_PER_IP_PER_MIN: z.coerce.number().int().positive().default(6000),
 
   // How long a trip may sit in ON_SCHEDULE/DELAYED before a new trip for the same
   // bus or driver treats it as abandoned and closes it. A school run is hours, not

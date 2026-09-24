@@ -149,11 +149,38 @@ const loginLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: 'Too many login attempts; try again shortly.' },
 });
+// Budgets used to be per IP address for everything. A mobile operator puts many phones
+// behind one address, so the buses and families on one network shared 300 requests a
+// minute: in a load test with 500 buses on one address, 88% of GPS was refused. Now:
+// - GPS is limited per device (it is signed per device), not per address;
+// - a request with a token is limited per token, i.e. per signed-in user;
+// - every address still has a ceiling, far above any one user's budget, which bounds
+//   anyone spraying made-up device ids or tokens.
+const isTelemetry = (req) => req.path === '/api/telemetry';
+const tokenKey = (req) => {
+  const h = req.get('authorization');
+  return h && h.startsWith('Bearer ') ? `token:${crypto.createHash('sha256').update(h.slice(7)).digest('hex').slice(0, 32)}` : null;
+};
 const globalLimiter = rateLimit({
   windowMs: 60_000,
   limit: config.RATE_LIMIT_GLOBAL_PER_MIN,
   standardHeaders: true,
   legacyHeaders: false,
+  skip: isTelemetry,
+  keyGenerator: (req) => tokenKey(req) || `ip:${req.ip}`,
+});
+const ipCeiling = rateLimit({
+  windowMs: 60_000,
+  limit: config.RATE_LIMIT_PER_IP_PER_MIN,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+const telemetryLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: config.RATE_LIMIT_TELEMETRY_PER_DEVICE_PER_MIN,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `device:${String(req.body?.deviceId || '')}`,
 });
 const bulkImportLimiter = rateLimit({
   windowMs: 60_000,
@@ -162,6 +189,7 @@ const bulkImportLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: 'Too many bulk imports; try again shortly.' },
 });
+app.use(ipCeiling);
 app.use(globalLimiter);
 
 // ─── Public routes (health, login, telemetry) ──────────────
@@ -386,7 +414,7 @@ const busPresence = require('./busPresence');
 const mailer = require('./mailer');
 const gpsWriteGate = require('./gpsWriteGate');
 const { resolveRunOnDate, departureAt, ymd } = require('./runSchedule');
-app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => next(), // placeholder to satisfy ordering
+app.post('/api/telemetry', validate({ body: S.telemetry }), telemetryLimiter, (req, res, next) => next(), // placeholder to satisfy ordering
   // deferred HMAC attach after prisma exists:
   async (req, res, next) => (await telemetryHmac(prisma))(req, res, next),
   async (req, res) => {

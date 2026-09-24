@@ -12,3 +12,7 @@ firebase-key.json
 
 # Logs
 *.log
+
+# Load test fleet (device secrets) and results
+loadtest/.fleet.json
+loadtest/result.json
