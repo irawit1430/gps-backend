@@ -99,6 +99,13 @@ const schema = z.object({
   // admins are told (darkBuses.js). A phone that stopped while standing still is not
   // counted: it only sends after the bus moves. 0 turns the alert off.
   BUS_DARK_MINUTES: z.coerce.number().int().nonnegative().default(5),
+  // Minutes a bus waits at each stop for children to get on or off. A route's stop
+  // times are pure driving time, so without this every ETA ran early, by about the
+  // number of stops before yours. Applies to every school. 0 turns it off.
+  STOP_DWELL_MINUTES: z.coerce.number().min(0).max(10).default(1),
+  // How close, in minutes, the bus must be before parents at that stop get the
+  // "approaching your stop" alert. 0 turns the alert off.
+  APPROACH_ALERT_MINUTES: z.coerce.number().int().min(0).max(30).default(5),
 });
 
 const parsed = schema.safeParse(process.env);

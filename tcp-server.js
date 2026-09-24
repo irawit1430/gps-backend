@@ -7,6 +7,7 @@ const liveFixGuard = require('./liveFixGuard');
 const busPresence = require('./busPresence');
 const gpsWriteGate = require('./gpsWriteGate');
 const positionAudience = require('./positionAudience');
+const liveEta = require('./liveEta');
 const config = require('./config');
 const logger = require('./logger');
 
@@ -145,6 +146,8 @@ function startTcpServer(io, tcpPort = config.TCP_PORT) {
                   timestamp: fixAt,
                 };
                 emitToSchool(io, bus.schoolId, 'location_update', positionPayload);
+                // Where along its route the bus is, for parents' ETAs. Not awaited.
+                liveEta.onFix(prisma, { tripId: activeTripId, lat: parsed.lat, lng: parsed.lng, at: fixAt }, logger);
                 // The school room holds admins only. Parents and the driver are
                 // addressed individually, scoped to the trip they are actually on.
                 await positionAudience.emitToRiders(

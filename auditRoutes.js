@@ -154,7 +154,9 @@ function registerAuditRoutes(app, { prisma, io, emitToUser, emitToSchool, isPush
     const children = await prisma.student.findMany({ where: { parentId: req.params.parentId }, select: { id: true, schoolId: true, routeMappings: { select: { direction: true, routeStop: { select: { routeId: true } } } } } });
     const routeIds = [...new Set(children.flatMap(c => c.routeMappings.map(m => m.routeStop.routeId)))];
     const trips = await prisma.trip.findMany({ where: { routeId: { in: routeIds } }, select: { id: true, routeId: true, direction: true } });
-    const alerts = await prisma.emergencyAlert.findMany({ where: { audience: { not: 'DRIVERS' }, OR: [{ tripId: { in: trips.map(t => t.id) } }, { tripId: null, schoolId: { in: [...new Set(children.map(c => c.schoolId))] } }], ...(req.query.status === 'ACTIVE' ? { status: 'ACTIVE' } : {}) }, orderBy: [{ status: 'asc' }, { updatedAt: 'desc' }], take: limitOf(req) });
+    // A driver's DELAY report reaches parents as a delay notification (server.js
+    // tellParentsOfDelay). Listed here it showed as an emergency banner.
+    const alerts = await prisma.emergencyAlert.findMany({ where: { audience: { not: 'DRIVERS' }, type: { not: 'DELAY' }, OR: [{ tripId: { in: trips.map(t => t.id) } }, { tripId: null, schoolId: { in: [...new Set(children.map(c => c.schoolId))] } }], ...(req.query.status === 'ACTIVE' ? { status: 'ACTIVE' } : {}) }, orderBy: [{ status: 'asc' }, { updatedAt: 'desc' }], take: limitOf(req) });
     const acknowledgements = await prisma.incidentAcknowledgement.findMany({ where: { userId: req.params.parentId, alertId: { in: alerts.map(a => a.id) } } });
     res.json(alerts.map(a => {
       const t = trips.find(t => t.id === a.tripId);

@@ -25,17 +25,6 @@ function selectNextJourney(mappings, now = new Date()) {
   candidates.sort((a, b) => +new Date(a.trip.scheduledStart) - +new Date(b.trip.scheduledStart));
   return candidates[0] || null;
 }
-function stopEta(trip, stop, now = new Date()) {
-  const offset = stop?.expectedArrivalMinutes;
-  const anchor = trip?.startTime || trip?.scheduledStart;
-  const base = { arrivalConfirmed: false, etaKind: 'SCHEDULE_PROJECTION', etaConfidence: 'SCHEDULE_ONLY' };
-  if (!anchor || offset == null || ['COMPLETED', 'CANCELLED'].includes(trip?.status)) {
-    return { ...base, stopEtaAt: null, stopEtaMinutes: null, etaBasis: null, etaStatus: 'UNAVAILABLE', overdue: false };
-  }
-  const at = new Date(+new Date(anchor) + offset * 60000);
-  const overdue = +at <= +now;
-  return { ...base, stopEtaAt: at.toISOString(), stopEtaMinutes: Math.round((at - now) / 60000), etaBasis: trip.startTime ? 'ACTUAL_START' : 'SCHEDULED_START', etaStatus: overdue ? 'OVERDUE_UNCONFIRMED' : 'ESTIMATED', overdue };
-}
 function journeyState(trip, scan) {
   if (!trip) return 'UNKNOWN';
   if (trip.status === 'CANCELLED') return 'CANCELLED';
@@ -45,4 +34,5 @@ function journeyState(trip, scan) {
   if (scan?.type === 'NO_SHOW') return 'NO_SHOW';
   return moving(trip) ? 'ACTIVE' : 'SCHEDULED';
 }
-module.exports = { selectJourney, selectNextJourney, stopEta, journeyState, matchesDirection };
+// Stop ETAs live in liveEta.js, which knows the bus's position and the leg's direction.
+module.exports = { selectJourney, selectNextJourney, journeyState, matchesDirection };

@@ -6,6 +6,7 @@ jest.mock('@prisma/client', () => {
   const mockPrisma = {
     student: { findMany: jest.fn() },
     attendanceLog: { findMany: jest.fn() },
+    route: { findUnique: jest.fn() },
   };
   return { PrismaClient: jest.fn(() => mockPrisma) };
 });
@@ -106,6 +107,18 @@ describe('GET /api/schools/:schoolId/students', () => {
     it('ignores a run whose dates are over', async () => {
       withMapping(stop(10, [run('07:15'), run('06:00', '2020-06-30')]));
       expect(await pickup()).toBe('07:25');
+    });
+
+    it('includes a wait at each stop before this one, like the parents\' ETA', async () => {
+      // The third stop, 20 min of driving in: a minute's wait at the second.
+      prisma.route.findUnique.mockResolvedValue({ geometry: null, stops: [
+        { id: 's1', lat: 12.97, lng: 77.6, orderIdx: 0, expectedArrivalMinutes: 0 },
+        { id: 's2', lat: 12.97, lng: 77.61, orderIdx: 1, expectedArrivalMinutes: 10 },
+        { id: 's3', lat: 12.97, lng: 77.62, orderIdx: 2, expectedArrivalMinutes: 20 },
+      ] });
+      withMapping({ routeStop: { id: 's3', routeId: 'r-waits', name: 'Stop C', expectedArrivalMinutes: 20, route: { name: 'Route 1', runs: [run('07:15')] } } });
+
+      expect(await pickup()).toBe('07:36');
     });
 
     it.each([

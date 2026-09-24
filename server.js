@@ -78,7 +78,9 @@ function distanceMeters(aLat, aLng, bLat, bLng) {
 const config = require('./config');
 const logger = require('./logger');
 const S = require('./schemas');
-const { selectJourney, selectNextJourney, stopEta, journeyState } = require('./journey');
+const { selectJourney, selectNextJourney, journeyState } = require('./journey');
+const liveEta = require('./liveEta');
+const { plannedAt, plannedMinutes } = require('./routePlan');
 const { calendarDate, dayBounds, DEFAULT_ZONE } = require('./schoolTime');
 const { validate } = require('./middleware/validate');
 const { authenticate, authorizeRoles, requireTenant, requireSelfOrRoles, logoutToken, invalidateUser, requireCurrentPassword } = require('./middleware/auth');
@@ -473,6 +475,8 @@ app.post('/api/telemetry', validate({ body: S.telemetry }), (req, res, next) => 
           timestamp: fixAt,
         };
         emitToSchool(io, bus.schoolId, 'location_update', positionPayload);
+        // Where along its route the bus is, for parents' ETAs. Not awaited: see liveEta.
+        liveEta.onFix(prisma, { tripId: activeTrip?.id, lat, lng, at: fixAt }, req.log);
         // Admins get every bus in their school; a parent or driver gets only the bus
         // their own trip is on. Both halves are required — the school room no longer
         // contains parents, so without this the tracking screen never updates.
@@ -1199,18 +1203,20 @@ app.put('/api/trips/:tripId',
 );
 
 // When the bus reaches a child's pickup stop: each current morning run's departure plus
-// the stop's minutes from the start of the route. A later Saturday bus reads
-// "07:25 / 08:40". null when there is nothing to go on: a drop-off-only stop, a stop
-// with no timing, or no morning run.
-function pickupTime(mapping, today) {
+// the minutes to the stop, from the same morning timetable the parents' ETA uses (so
+// with the wait at each earlier stop). A later Saturday bus reads "07:25 / 08:40". null
+// when there is nothing to go on: a drop-off-only stop, a stop with no timing, or no
+// morning run.
+function pickupTime(mapping, today, plans) {
   if (!mapping || mapping.direction === 'FROM_SCHOOL') return null;
-  const offset = mapping.routeStop?.expectedArrivalMinutes;
+  const plan = plans?.get(liveEta.planKey(mapping.routeStop?.routeId, 'TO_SCHOOL'));
+  const offset = plan ? plannedMinutes(plan, mapping.routeStop.id) : mapping.routeStop?.expectedArrivalMinutes;
   if (offset == null) return null;
   const times = (mapping.routeStop.route?.runs || [])
     .filter((r) => ymd(r.endDate) >= today)
     .map((r) => {
       const [h, min] = r.departure.split(':').map(Number);
-      const at = (h * 60 + min + offset) % 1440;
+      const at = Math.round(h * 60 + min + offset) % 1440;
       return `${String(Math.floor(at / 60)).padStart(2, '0')}:${String(at % 60).padStart(2, '0')}`;
     });
   return [...new Set(times)].sort().join(' / ') || null;
@@ -1259,6 +1265,8 @@ app.get('/api/schools/:schoolId/students', requireTenant('schoolId'), schoolAdmi
       },
     });
     const today = calendarDate(new Date());
+    const plans = await liveEta.plansFor(prisma, [...new Set(students.map((s) => s.routeMappings[0]?.routeStop?.routeId).filter(Boolean))]
+      .map((routeId) => ({ routeId, direction: 'TO_SCHOOL' })));
 
     // Today's scans in one bounded query, latest per student. These two fields used
     // to be the literals 'Absent' and '--:--', so every child read as absent forever.
@@ -1291,7 +1299,7 @@ app.get('/api/schools/:schoolId/students', requireTenant('schoolId'), schoolAdmi
           parentPhone: s.parent?.phone || null,
           assignedRoute: m?.routeStop?.route?.name || 'Unassigned',
           routeStopName: m?.routeStop?.name || 'Unassigned',
-          stopTime: pickupTime(m, today),
+          stopTime: pickupTime(m, today, plans),
           // Every assignment this child holds — a pickup and a drop-off stop are two.
           // The two fields above stay as they are, showing the first, so nothing reading
           // them breaks; anything that needs to ACT on an assignment reads this instead.
@@ -2640,6 +2648,11 @@ app.get('/api/parents/:parentId/students',
           : [],
       ]);
 
+      // The live position and the leg's own timetable, for every trip shown below.
+      const now = new Date();
+      const journeys = new Map(students.map((s) => [s.id, selectJourney(s.routeMappings, now, s.school?.timezone || DEFAULT_ZONE)]));
+      const plans = await liveEta.plansFor(prisma, [...journeys.values()].map((j) => j?.trip));
+
       const formatted = students.map((s) => {
         // A child can hold a pickup mapping and a drop-off mapping, each on its own
         // route with its own active trip, so [0] showed the morning stop all afternoon
@@ -2648,7 +2661,7 @@ app.get('/api/parents/:parentId/students',
         // started, then any trip at all. One symmetric mapping resolves to itself,
         // exactly as before.
         const zone = s.school?.timezone || DEFAULT_ZONE;
-        const best = selectJourney(s.routeMappings, new Date(), zone);
+        const best = journeys.get(s.id);
         const next = selectNextJourney(s.routeMappings, new Date());
         const stop = best?.stop || null;
         const t = best?.trip || null;
@@ -2717,7 +2730,7 @@ app.get('/api/parents/:parentId/students',
           // Schedule offset from trip start, in minutes (null when the school has not
           // filled it in). Combined with trip.startTime it gives a real arrival time.
           stopOffsetMinutes: stop?.expectedArrivalMinutes ?? null,
-          ...stopEta(t, stop),
+          ...liveEta.etaFor(t, stop, plans, now),
           trip: t
             ? {
                 id: t.id,
@@ -2822,6 +2835,7 @@ app.get('/api/parents/:parentId/students/:studentId/trip',
       ]);
 
       const ridesThisLeg = (m) => !trip.direction || !m.direction || m.direction === trip.direction;
+      const plans = await liveEta.plansFor(prisma, [trip]);
       const stops = trip.route.stops.map((stop) => {
         const stopStudentIds = new Set(
           stop.studentMappings.filter(ridesThisLeg).map((m) => m.studentId)
@@ -2834,6 +2848,10 @@ app.get('/api/parents/:parentId/students/:studentId/trip',
           ...logs.filter((l) => l.stopId === stop.id),
           ...routeEvents.filter((e) => e.stopId === stop.id && e.type === 'ARRIVED').map((e) => ({ timestamp: e.occurredAt })),
         ];
+        // The bus's own GPS reaching the stop counts too: a stop where nobody boards
+        // otherwise never reads as passed.
+        const gpsPassage = liveEta.passedAt(trip.id, stop.id);
+        if (gpsPassage) stopEvents.push({ timestamp: gpsPassage });
         const firstPassage = stopEvents.reduce(
           (earliest, l) => (!earliest || l.timestamp < earliest ? l.timestamp : earliest),
           null
@@ -2845,7 +2863,7 @@ app.get('/api/parents/:parentId/students/:studentId/trip',
           lng: stop.lng,
           orderIdx: stop.orderIdx,
           expectedArrivalMinutes: stop.expectedArrivalMinutes ?? null,
-          ...stopEta(trip, stop),
+          ...liveEta.etaFor(trip, stop, plans),
           isMyStop: stop.id === mapping.routeStop.id,
           boardedCount: boardings.length,
           passedAt: firstPassage ? new Date(firstPassage).toISOString() : null,
@@ -3000,6 +3018,25 @@ app.get('/api/parents/:parentId/notifications',
   }
 );
 
+// A driver's "running late" arrives through the SOS endpoint (type DELAY), and went to
+// parents as a push titled "Emergency alert" and a red emergency banner in the app.
+// Late is not an emergency. It goes out as a delay (inbox and push), and only to
+// parents who kept the app's "Delays" switch on.
+async function tellParentsOfDelay(alert) {
+  const parents = await parentIdsOnTrip(alert.tripId);
+  if (parents.length === 0) return;
+  const users = await prisma.user.findMany({ where: { id: { in: parents } }, select: { id: true, notificationSettings: true } });
+  const title = 'Bus running late';
+  const message = alert.message || "Your child's bus is running late.";
+  const context = { type: 'DELAY', alertId: alert.id, tripId: alert.tripId };
+  for (const u of users) {
+    if (!wantsNotification(u.notificationSettings, 'delayAlerts')) continue;
+    const n = await prisma.notification.create({ data: { userId: u.id, title, message, type: 'DELAY', context } });
+    emitToUser(io, u.id, 'notification', n);
+    pushToUsers([u.id], { title, body: message, data: { ...context, notificationId: n.id } });
+  }
+}
+
 // ─── Driver APIs ──────────────────────────────────────────
 async function sosHandler(req, res) {
   try {
@@ -3034,7 +3071,10 @@ async function sosHandler(req, res) {
     emitToSchool(io, alert.schoolId, 'emergency_alert', alert);
     // Parents are not in the school room. Reach only the families whose child rides
     // this trip — a parent should not be alarmed by an unrelated bus.
-    if (alert.tripId) {
+    if (alert.tripId && alert.type === 'DELAY') {
+      // The alert is saved and the school told; a notification failure must not 500.
+      await tellParentsOfDelay(alert).catch((err) => req.log.warn({ err: err.message }, 'delay notification failed'));
+    } else if (alert.tripId) {
       const parents = await parentIdsOnTrip(alert.tripId);
       parents.forEach((pid) => emitToUser(io, pid, 'emergency_alert', alert));
       pushToUsers(parents, {
@@ -3402,6 +3442,7 @@ app.get('/api/drivers/:driverId/trips',
 // room (admin dashboards) and to the assigned driver, who is not in that room.
 // `trip` must carry route.schoolId.
 function emitTripChange(trip, reason) {
+  if (trip?.id) liveEta.tripChanged(trip.id);
   if (!io || !trip) return;
   const payload = {
     tripId: trip.id,
@@ -3683,6 +3724,98 @@ async function pushToUsers(userIds, payload) {
     logger.error({ err: err.message }, 'push dispatch failed');
   }
 }
+
+// "The bus is about 5 minutes from your stop." The parent app has offered this switch
+// ("Approaching your stop") all along and nothing ever sent it.
+//
+// Runs from liveEta on each live fix. A stop is due once the timetable's minutes still
+// to go from where the bus is fall inside APPROACH_ALERT_MINUTES. Each parent hears it
+// once per stop per trip: the notification's eventKey is unique, so a restart or a
+// second fix cannot repeat it.
+//
+// Who hears it: on the way to school, families at that stop whose child has not been
+// scanned yet and is not on leave; on the way home, only families whose child is on
+// the bus. "Your child's bus is nearly home" is a false promise for a child who never
+// got on.
+const approachDecided = new Set(); // `${tripId}:${stopId}` already handled in this process
+async function notifyApproaching({ trip, plan, progress: at, now }) {
+  const window = config.APPROACH_ALERT_MINUTES;
+  if (!window) return;
+  const here = plannedAt(plan, at.along);
+  if (here == null) return;
+  const due = plan.stops.filter((s) => s.planned != null && !at.passed.has(s.id)
+    && s.planned - here <= window && !approachDecided.has(`${trip.id}:${s.id}`));
+  if (due.length === 0) return;
+  if (approachDecided.size > 50_000) approachDecided.clear();
+  for (const s of due) approachDecided.add(`${trip.id}:${s.id}`);
+
+  const homeward = trip.direction === 'FROM_SCHOOL';
+  const mappings = await prisma.studentRouteMapping.findMany({
+    where: {
+      routeStopId: { in: due.map((s) => s.id) },
+      ...(trip.direction ? { OR: [{ direction: null }, { direction: trip.direction }] } : {}),
+    },
+    select: {
+      routeStopId: true,
+      studentId: true,
+      routeStop: { select: { name: true } },
+      student: { select: { name: true, parentId: true, parent: { select: { notificationSettings: true } } } },
+    },
+  });
+  const ids = mappings.map((m) => m.studentId);
+  if (ids.length === 0) return;
+  const [scans, leave] = await Promise.all([
+    prisma.attendanceLog.findMany({
+      where: { tripId: trip.id, studentId: { in: ids } },
+      orderBy: { timestamp: 'desc' },
+      select: { studentId: true, type: true },
+    }),
+    prisma.leaveApplication.findMany({
+      where: { studentId: { in: ids }, status: 'APPROVED', startDate: { lte: new Date(now) }, endDate: { gte: new Date(now) } },
+      select: { studentId: true, direction: true },
+    }),
+  ]);
+  const lastScan = new Map();
+  for (const l of scans) if (!lastScan.has(l.studentId)) lastScan.set(l.studentId, l.type);
+  const away = new Set(leave.filter((l) => !l.direction || l.direction === trip.direction).map((l) => l.studentId));
+
+  // One message per parent per stop, naming every child of theirs it concerns.
+  const byParent = new Map();
+  for (const m of mappings) {
+    const parentId = m.student?.parentId;
+    if (!parentId) continue;
+    if (!wantsNotification(m.student.parent?.notificationSettings, 'geofenceAlerts')) continue;
+    if (!wantsNotification(m.student.parent?.notificationSettings, 'approaching')) continue;
+    const scan = lastScan.get(m.studentId);
+    if (homeward ? scan !== 'BOARDED' : scan || away.has(m.studentId)) continue;
+    const key = `${m.routeStopId}:${parentId}`;
+    if (!byParent.has(key)) byParent.set(key, { parentId, stopId: m.routeStopId, stopName: m.routeStop?.name || 'your stop', names: [] });
+    byParent.get(key).names.push((m.student.name || 'Your child').split(' ')[0]);
+  }
+
+  for (const { parentId, stopId, stopName, names } of byParent.values()) {
+    const minutes = Math.max(1, Math.round(plan.stops.find((s) => s.id === stopId).planned - here));
+    const who = names.join(' and ');
+    const title = homeward ? 'Almost home' : 'Bus almost at your stop';
+    const message = homeward
+      ? `${who}'s bus is about ${minutes} min from ${stopName}. Please be there to meet them.`
+      : `${who}'s bus is about ${minutes} min from ${stopName}.`;
+    const context = { type: 'APPROACHING', tripId: trip.id, stopId };
+    let n;
+    try {
+      n = await prisma.notification.create({
+        data: { userId: parentId, title, message, type: 'ARRIVAL', context, eventKey: `approaching:${trip.id}:${stopId}:${parentId}` },
+      });
+    } catch (err) {
+      if (err.code === 'P2002') continue; // already told, before a restart
+      throw err;
+    }
+    if (io) emitToUser(io, parentId, 'notification', n);
+    // Awaited, though nothing waits on this handler: it keeps one fix's alerts in order.
+    await pushToUsers([parentId], { title, body: message, data: { ...context, notificationId: n.id } });
+  }
+}
+liveEta.onApproach(notifyApproaching);
 
 // How far back a replayed check-in is recognised as the same scan.
 const IDEMPOTENCY_WINDOW_MS = 10 * 60 * 1000;
