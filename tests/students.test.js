@@ -41,6 +41,7 @@ describe('GET /api/schools/:schoolId/students', () => {
       {
         id: 1, rfidTag: 'TAG1', name: 'Student 1', grade: '5th', photoUrl: 'url1',
         guardianPhone: null, parentId: null, parentName: null, parentEmail: null, parentPhone: null, qrCodeImported: false,
+        cardPrintedAt: null,
         assignedRoute: 'Unassigned', routeStopName: 'Unassigned', stopTime: null,
         boardingStatus: null, lastCheckIn: null,
         // A child with no assignment has no mappings to act on, but the key is always

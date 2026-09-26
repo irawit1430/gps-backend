@@ -27,7 +27,7 @@ const busPresence = require('./busPresence');
 const { materialiseRuns } = require('./materialiseRuns');
 const { sweepUnstartedTrips } = require('./staleTrips');
 const { loadRevocations } = require('./sessionRevocations');
-const { sweepDarkBuses } = require('./darkBuses');
+const { sweepDarkBuses, sweepUntrackedTrips } = require('./darkBuses');
 const { sweepSystemHealth } = require('./systemHealth');
 
 // Put back the sign-out-everywhere cutoffs saved before this restart, before accepting
@@ -104,6 +104,18 @@ if (config.BUS_DARK_MINUTES > 0) {
       if (flagged.length > 0) logger.warn({ flagged }, 'Buses on running trips stopped sending GPS');
     } catch (err) {
       logger.error({ err }, 'Dark bus sweep failed');
+    }
+  }, 60 * 1000);
+}
+
+// Trips running with no GPS at all since they started (every minute). See darkBuses.js.
+if (config.TRACKING_CONFIRM_MINUTES > 0) {
+  setInterval(async () => {
+    try {
+      const flagged = await sweepUntrackedTrips(prisma, { io, emitToUser, minutes: config.TRACKING_CONFIRM_MINUTES });
+      if (flagged.length > 0) logger.warn({ flagged }, 'Trips running with no GPS since they started');
+    } catch (err) {
+      logger.error({ err }, 'Untracked trip sweep failed');
     }
   }, 60 * 1000);
 }

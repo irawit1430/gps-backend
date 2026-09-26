@@ -82,4 +82,67 @@ async function sweepDarkBuses(prisma, { io, emitToSchool, emitToUser, minutes, m
   return flagged;
 }
 
-module.exports = { isDark, sweepDarkBuses };
+// A trip that started and has never sent a position: tracking did not start on the
+// driver's phone (location refused, no credentials, a crash), or the tracker is dead.
+// Silence is not "dark" here, because there is no last fix to be silent since. It is
+// the one case the sweep above cannot see, and the one a school most needs to hear:
+// every parent on the route is looking at an empty map from the first stop.
+//
+// Checked in memory first, then against the trip's stored GPS, so a restart does not
+// flag trips that were tracking perfectly well.
+async function untrackedTrips(prisma, { minutes, now = Date.now(), schoolId } = {}) {
+  if (!minutes) return [];
+  const startedBefore = new Date(now - minutes * 60_000);
+  const trips = await prisma.trip.findMany({
+    where: {
+      status: { in: ['ON_SCHEDULE', 'DELAYED'] },
+      startTime: { lt: startedBefore },
+      ...(schoolId ? { route: { schoolId } } : {}),
+    },
+    select: {
+      id: true, startTime: true, driverId: true,
+      bus: { select: { id: true, licensePlate: true, schoolId: true } },
+      route: { select: { name: true, schoolId: true } },
+    },
+  });
+  const out = [];
+  for (const trip of trips) {
+    const fix = busPresence.lastFixOf(trip.bus.id);
+    if (fix && fix.at >= new Date(trip.startTime).getTime()) continue;
+    const stored = await prisma.gpsLog.findFirst({ where: { tripId: trip.id }, select: { id: true } });
+    if (stored) continue;
+    out.push(trip);
+  }
+  return out;
+}
+
+async function sweepUntrackedTrips(prisma, { io, emitToUser, minutes, now = Date.now() }) {
+  const trips = await untrackedTrips(prisma, { minutes, now });
+  const flagged = [];
+  for (const trip of trips) {
+    const schoolId = trip.route?.schoolId || trip.bus.schoolId || null;
+    const since = Math.floor((now - new Date(trip.startTime).getTime()) / 60_000);
+    const title = 'Trip running with no GPS';
+    const message =
+      `${trip.bus.licensePlate} on ${trip.route?.name || 'its route'} started ${since} minutes ago and has not sent ` +
+      'a single position. Parents see no bus on the map. Call the driver.';
+    const context = { type: 'TRACKING_UNVERIFIED', busId: trip.bus.id, tripId: trip.id };
+    const admins = await prisma.user.findMany({
+      where: schoolId ? { schoolId, role: { in: ['SCHOOL_ADMIN', 'SUPER_ADMIN'] } } : { role: 'SUPER_ADMIN' },
+      select: { id: true },
+    });
+    if (admins.length === 0) continue;
+    // Once per trip per admin, however many passes see it.
+    const { count } = await prisma.notification.createMany({
+      data: admins.map((a) => ({ userId: a.id, title, message, type: 'SYSTEM', context, eventKey: `tracking-unverified:${trip.id}:${a.id}` })),
+      skipDuplicates: true,
+    });
+    if (count > 0) {
+      if (io) admins.forEach((a) => emitToUser(io, a.id, 'notification', { title, message, type: 'SYSTEM', context }));
+      flagged.push({ tripId: trip.id, busId: trip.bus.id, schoolId, minutes: since });
+    }
+  }
+  return flagged;
+}
+
+module.exports = { isDark, sweepDarkBuses, untrackedTrips, sweepUntrackedTrips };

@@ -80,7 +80,10 @@ const logger = require('./logger');
 const S = require('./schemas');
 const { selectJourney, selectNextJourney, journeyState } = require('./journey');
 const liveEta = require('./liveEta');
+const rosterImport = require('./rosterImport');
+const parentInvites = require('./parentInvites');
 const systemHealth = require('./systemHealth');
+const { untrackedTrips } = require('./darkBuses');
 const { plannedAt, plannedMinutes, SCHOOL_STOP_ID } = require('./routePlan');
 const { calendarDate, dayBounds, DEFAULT_ZONE } = require('./schoolTime');
 const { validate } = require('./middleware/validate');
@@ -102,6 +105,7 @@ const {
   sendPush,
   isPushConfigured,
 } = require('./firebase');
+const { sendApns, isApnsConfigured } = require('./apns');
 
 // ─── Boot ───────────────────────────────────────────────────
 const app = express();
@@ -128,7 +132,12 @@ app.use(
     credentials: true,
   })
 );
-app.use(express.json({ limit: '256kb' }));
+// A roster import is the one request allowed a bigger body: 1,200 children in one file
+// is about 300 KB. Everything else keeps the 256 KB cap.
+const ROSTER_IMPORT_PATH = /^\/api\/schools\/[^/]+\/students\/bulk$/;
+const jsonBody = express.json({ limit: '256kb' });
+const rosterBody = express.json({ limit: '1mb' });
+app.use((req, res, next) => (ROSTER_IMPORT_PATH.test(req.path) ? rosterBody : jsonBody)(req, res, next));
 app.use(
   pinoHttp({
     logger,
@@ -184,7 +193,9 @@ const telemetryLimiter = rateLimit({
 });
 const bulkImportLimiter = rateLimit({
   windowMs: 60_000,
-  limit: 5,
+  // A check (dry run) and an import are one request each, and an office fixing a file
+  // checks it several times.
+  limit: 12,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many bulk imports; try again shortly.' },
@@ -240,7 +251,10 @@ const DUMMY_HASH = '$2a$10$e8wWwFkWyVb0f4pL7pTDe.a9B6gZ7rV5rY6f8rG8g8g8g8g8g8g8g
 app.post('/api/auth/login', loginLimiter, validate({ body: S.login }), async (req, res) => {
   try {
     const { email, password } = req.body;
-    const user = await prisma.user.findUnique({ where: { email } });
+    // Phones capitalise the first letter of an email. Parent accounts made by an import
+    // or an invite are stored lowercased, so try that before saying no.
+    let user = await prisma.user.findUnique({ where: { email } });
+    if (!user && email !== email.toLowerCase()) user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
     if (!user) {
       await bcrypt.compare(password, DUMMY_HASH);
       req.log.warn('login rejected');
@@ -250,6 +264,15 @@ app.post('/api/auth/login', loginLimiter, validate({ body: S.login }), async (re
     if (!ok) {
       req.log.warn({ userId: user.id }, 'login rejected');
       return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    // An invite code is only good until its date. Said after the code matched, so it
+    // tells nothing to someone guessing emails.
+    if (user.mustResetPassword && user.inviteExpiresAt && new Date(user.inviteExpiresAt) < new Date()) {
+      req.log.warn({ userId: user.id }, 'login rejected: invite expired');
+      return res.status(401).json({
+        error: 'This invite code has expired. Ask your school\'s transport office to send a new one.',
+        code: 'INVITE_EXPIRED',
+      });
     }
 
     await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
@@ -302,7 +325,8 @@ app.post('/api/auth/change-password', authenticate, validate({ body: S.changePas
     const hashed = await bcrypt.hash(newPassword, 10);
     await prisma.user.update({
       where: { id: user.id },
-      data: { password: hashed, mustResetPassword: false },
+      // Their own password now: an invite's expiry must never apply to it.
+      data: { password: hashed, mustResetPassword: false, inviteExpiresAt: null },
     });
     // A password change ends every existing session for this user, including this one...
     invalidateUser(user.id);
@@ -930,6 +954,8 @@ app.put('/api/parents/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), valid
     if (data.password) {
       data.password = await bcrypt.hash(data.password, 10);
       data.mustResetPassword = true;
+      // A password the office set by hand has no invite date to run out on.
+      data.inviteExpiresAt = null;
     }
     const updated = await prisma.user.update({
       where: { id: req.params.id },
@@ -1014,7 +1040,8 @@ app.post('/api/parents/:parentId/reset-password',
       const tempPassword = generateTempPassword();
       const hashed = await bcrypt.hash(tempPassword, 10);
       await prisma.$transaction([
-        prisma.user.update({ where: { id: parent.id }, data: { password: hashed, mustResetPassword: true } }),
+        // inviteExpiresAt cleared: an old invite's date must not kill this password.
+        prisma.user.update({ where: { id: parent.id }, data: { password: hashed, mustResetPassword: true, inviteExpiresAt: null } }),
         prisma.passwordResetRequest.updateMany({
           where: { userId: parent.id, status: 'PENDING' },
           data: { status: 'APPROVED', resolvedBy: req.user.id, resolvedAt: new Date() },
@@ -1035,6 +1062,358 @@ app.post('/api/parents/:parentId/reset-password',
     }
   }
 );
+
+// ─── Parent invites and activation ─────────────────────────
+// How each family gets into the parent app, and where every family stands. See
+// parentInvites.js for the rules; the endpoints below only load, check and record.
+
+const INVITE_FIELDS = {
+  id: true, role: true, schoolId: true, name: true, email: true, phone: true,
+  mustResetPassword: true, inviteSentAt: true, inviteExpiresAt: true, inviteChannel: true, lastLoginAt: true,
+  parentStudents: { select: { name: true, guardianPhone: true } },
+  school: { select: { name: true, timezone: true } },
+};
+
+const appLinks = () => ({ android: config.PARENT_APP_ANDROID_URL || null, ios: config.PARENT_APP_IOS_URL || null });
+
+// Make a fresh code for one family and send or hand it back. The code becomes the
+// account's password, so the previous code (and any session opened with it) stops
+// working the moment this one is made. Never throws for a mail failure: that is
+// recorded as EMAIL_FAILED and reported, because the office has to act on it.
+async function sendParentInvite(parent, channel, log) {
+  const code = generateTempPassword(10);
+  const now = new Date();
+  const expiresAt = parentInvites.expiryFor(config.PARENT_INVITE_DAYS, now);
+  const message = parentInvites.inviteMessage({
+    parentName: parent.name && !/^Parent of /.test(parent.name) ? parent.name : null,
+    email: parent.email, code, schoolName: parent.school?.name,
+    childNames: (parent.parentStudents || []).map((s) => s.name),
+    expiresAt, links: appLinks(), timeZone: parent.school?.timezone,
+  });
+  const locked = { password: await bcrypt.hash(code, 10), mustResetPassword: true, inviteExpiresAt: expiresAt };
+
+  if (channel === 'EMAIL') {
+    await prisma.user.update({ where: { id: parent.id }, data: { ...locked, inviteSentAt: null, inviteChannel: 'EMAIL' } });
+    invalidateUser(parent.id);
+    const sent = await mailer.sendMail({ to: parent.email, subject: message.subject, text: message.text, html: message.html });
+    await prisma.user.update({
+      where: { id: parent.id },
+      data: sent ? { inviteSentAt: now, inviteChannel: 'EMAIL' } : { inviteSentAt: null, inviteChannel: 'EMAIL_FAILED' },
+    });
+    log?.info({ parentId: parent.id, sent }, 'parent invite emailed');
+    // The code went into the email, and nowhere else.
+    return { parentId: parent.id, channel, sent, expiresAt };
+  }
+
+  await prisma.user.update({ where: { id: parent.id }, data: { ...locked, inviteSentAt: now, inviteChannel: channel } });
+  invalidateUser(parent.id);
+  log?.info({ parentId: parent.id, channel }, 'parent invite made for staff to send');
+  return {
+    parentId: parent.id, channel, sent: null, expiresAt, code,
+    name: parent.name, email: parent.email,
+    // Where WhatsApp or SMS should go: the parent's own number, else the one on the child.
+    phone: parent.phone || (parent.parentStudents || []).map((s) => s.guardianPhone).find(Boolean) || null,
+    childNames: (parent.parentStudents || []).map((s) => s.name),
+    message: { subject: message.subject, text: message.text },
+  };
+}
+
+function inviteRefusal(parent) {
+  if (!parent || parent.role !== 'PARENT') return { status: 404, body: { error: 'Parent not found' } };
+  if (!parentInvites.canInvite(parent)) {
+    return { status: 409, body: { error: 'This parent has already chosen their own password. Use Reset password if they are locked out.', code: 'ALREADY_ACTIVE' } };
+  }
+  return null;
+}
+
+app.post('/api/parents/:parentId/invite',
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  validate({ body: S.parentInvite }),
+  async (req, res) => {
+    try {
+      const parent = await prisma.user.findUnique({ where: { id: req.params.parentId }, select: INVITE_FIELDS });
+      if (parent && req.user.role === 'SCHOOL_ADMIN' && parent.schoolId !== req.user.schoolId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      const refused = inviteRefusal(parent);
+      if (refused) return res.status(refused.status).json(refused.body);
+      if (req.body.channel === 'EMAIL' && !mailer.isConfigured()) {
+        return res.status(409).json({ error: 'Email is not set up on this server. Send the invite by WhatsApp, SMS or print instead.', code: 'EMAIL_OFF' });
+      }
+      const result = await sendParentInvite(parent, req.body.channel, req.log);
+      if (req.body.channel === 'EMAIL' && !result.sent) {
+        return res.status(502).json({ ...result, error: `The invite email to ${parent.email} could not be sent. Check the address, or send it another way.`, code: 'EMAIL_FAILED' });
+      }
+      res.json(result);
+    } catch (err) {
+      req.log.error({ err }, 'parent invite failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
+// Invites for many families at once: by email, or as codes for printed letters.
+app.post('/api/schools/:schoolId/parent-invites',
+  requireTenant('schoolId'),
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  validate({ body: S.parentInviteBatch }),
+  async (req, res) => {
+    try {
+      const { parentIds, channel } = req.body;
+      if (channel === 'EMAIL' && !mailer.isConfigured()) {
+        return res.status(409).json({ error: 'Email is not set up on this server. Print the invites instead.', code: 'EMAIL_OFF' });
+      }
+      const parents = await prisma.user.findMany({
+        where: { id: { in: parentIds }, schoolId: req.params.schoolId },
+        select: INVITE_FIELDS,
+      });
+      const byId = new Map(parents.map((p) => [p.id, p]));
+      const results = [];
+      const skipped = [];
+      for (const id of parentIds) {
+        const parent = byId.get(id);
+        const refused = inviteRefusal(parent);
+        if (refused) { skipped.push({ parentId: id, reason: refused.body.code || 'NOT_FOUND', error: refused.body.error }); continue; }
+        results.push(await sendParentInvite(parent, channel, req.log));
+      }
+      res.json({
+        channel,
+        sent: channel === 'EMAIL' ? results.filter((r) => r.sent).length : results.length,
+        failed: results.filter((r) => r.sent === false).map((r) => ({ parentId: r.parentId, error: 'Email could not be sent' })),
+        skipped,
+        // PRINT only: the letters. Shown once, like any credential.
+        letters: channel === 'PRINT' ? results : undefined,
+      });
+    } catch (err) {
+      req.log.error({ err }, 'parent invite batch failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
+// Take an invite back: sent to the wrong number, or a family that left. The code stops
+// working at once; the account stays, unopened, until a new invite goes out.
+app.post('/api/parents/:parentId/invite/revoke',
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  async (req, res) => {
+    try {
+      const parent = await prisma.user.findUnique({ where: { id: req.params.parentId }, select: INVITE_FIELDS });
+      if (parent && req.user.role === 'SCHOOL_ADMIN' && parent.schoolId !== req.user.schoolId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      const refused = inviteRefusal(parent);
+      if (refused) return res.status(refused.status).json(refused.body);
+      await prisma.user.update({
+        where: { id: parent.id },
+        data: {
+          password: await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10),
+          mustResetPassword: true, inviteSentAt: null, inviteExpiresAt: new Date(), inviteChannel: 'REVOKED',
+        },
+      });
+      invalidateUser(parent.id);
+      req.log.info({ parentId: parent.id, by: req.user.id }, 'parent invite revoked');
+      res.json({ parentId: parent.id, revoked: true });
+    } catch (err) {
+      req.log.error({ err }, 'revoke parent invite failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
+// Where every family stands: linked, invited, signed in, password chosen, alerts
+// reaching a phone. "Shared the app with parents" means nothing until this says so.
+function pushStateOf(devices) {
+  const live = devices.filter((d) => d.enabled);
+  if (devices.length === 0) return 'NONE';
+  if (live.length === 0) return 'FAILING';
+  if (live.some((d) => d.provider === 'APNS') && !isApnsConfigured() && !live.some((d) => d.provider === 'FCM')) return 'IPHONE_NOT_SENDING';
+  if (live.some((d) => d.lastAcceptedAt && !d.lastFailure)) return 'DELIVERING';
+  if (live.every((d) => d.lastFailure)) return 'FAILING';
+  return 'REGISTERED';
+}
+
+app.get('/api/schools/:schoolId/parent-activation', requireTenant('schoolId'), schoolAdminsOnly, async (req, res) => {
+  try {
+    const { schoolId } = req.params;
+    const now = new Date();
+    const [parents, studentCounts, orphans] = await Promise.all([
+      prisma.user.findMany({
+        where: { schoolId, role: 'PARENT' },
+        orderBy: { name: 'asc' },
+        select: {
+          id: true, name: true, email: true, phone: true, createdAt: true, lastLoginAt: true,
+          mustResetPassword: true, inviteSentAt: true, inviteExpiresAt: true, inviteChannel: true,
+          parentStudents: { select: { id: true, name: true, grade: true, guardianPhone: true, _count: { select: { routeMappings: true } } } },
+          pushDevices: { select: { platform: true, provider: true, enabled: true, lastAcceptedAt: true, lastFailure: true, updatedAt: true } },
+        },
+      }),
+      Promise.all([
+        prisma.student.count({ where: { schoolId } }),
+        prisma.student.count({ where: { schoolId, routeMappings: { none: {} } } }),
+      ]),
+      prisma.student.findMany({
+        where: { schoolId, parentId: null },
+        orderBy: { name: 'asc' },
+        select: { id: true, name: true, grade: true, rfidTag: true, guardianPhone: true },
+      }),
+    ]);
+
+    const stages = {};
+    const push = {};
+    const rows = parents.map((p) => {
+      const stage = parentInvites.stageOf(p, now);
+      const pushState = pushStateOf(p.pushDevices);
+      stages[stage] = (stages[stage] || 0) + 1;
+      if (stage === 'ACTIVATED') push[pushState] = (push[pushState] || 0) + 1;
+      const seen = [p.lastLoginAt, ...p.pushDevices.map((d) => d.updatedAt)].filter(Boolean).map((d) => new Date(d).getTime());
+      return {
+        id: p.id, name: p.name, email: p.email,
+        phone: p.phone || p.parentStudents.map((s) => s.guardianPhone).find(Boolean) || null,
+        stage,
+        children: p.parentStudents.map((s) => ({ id: s.id, name: s.name, grade: s.grade, hasStop: s._count.routeMappings > 0 })),
+        invite: { sentAt: p.inviteSentAt, expiresAt: p.inviteExpiresAt, channel: p.inviteChannel },
+        signedInAt: p.lastLoginAt,
+        passwordChosen: !p.mustResetPassword,
+        push: {
+          state: pushState,
+          devices: p.pushDevices.map((d) => ({ platform: d.platform, provider: d.provider, enabled: d.enabled, lastAcceptedAt: d.lastAcceptedAt, lastFailure: d.lastFailure })),
+        },
+        lastSeenAt: seen.length ? new Date(Math.max(...seen)) : null,
+      };
+    });
+
+    res.json({
+      totals: {
+        students: studentCounts[0],
+        studentsWithoutParent: orphans.length,
+        studentsWithoutStop: studentCounts[1],
+        parents: parents.length,
+        stages,
+        // Of the families who finished activating: are alerts reaching a phone?
+        push,
+      },
+      parents: rows,
+      studentsWithoutParent: orphans,
+      emailConfigured: mailer.isConfigured(),
+      iphonePushConfigured: isApnsConfigured(),
+      appLinks: appLinks(),
+      inviteDays: config.PARENT_INVITE_DAYS,
+    });
+  } catch (err) {
+    req.log.error({ err }, 'parent activation failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Everything standing between this school and a safe day, in one list: the exception
+// queue. Staff used to hold it in their heads: children with no parent or no stop,
+// families never invited, alerts not reaching phones, password requests waiting, a bus
+// running with no GPS, and whether the platform itself is having a bad morning.
+//
+// Each item is counted here and worded for the office, with where to fix it, so the
+// dashboard only has to list them. An empty list means nothing is waiting.
+app.get('/api/schools/:schoolId/readiness', requireTenant('schoolId'), schoolAdminsOnly, async (req, res) => {
+  try {
+    const { schoolId } = req.params;
+    const now = new Date();
+    const running = { in: ['ON_SCHEDULE', 'DELAYED'] };
+    const [
+      students, noParent, noStop, cardsUnprinted, cardsNeverScanned, parents, resetRequests,
+      routesNoStops, runsNoCrew, sos, untracked, darkTrips,
+    ] = await Promise.all([
+      prisma.student.count({ where: { schoolId } }),
+      prisma.student.count({ where: { schoolId, parentId: null } }),
+      prisma.student.count({ where: { schoolId, routeMappings: { none: {} } } }),
+      prisma.student.count({ where: { schoolId, qrCodeImported: false, qrCardPrintedAt: null } }),
+      prisma.student.count({ where: { schoolId, qrCardPrintedAt: { not: null }, attendanceLogs: { none: { source: 'SCAN' } } } }),
+      prisma.user.findMany({
+        where: { schoolId, role: 'PARENT' },
+        select: {
+          mustResetPassword: true, inviteSentAt: true, inviteExpiresAt: true, inviteChannel: true, lastLoginAt: true,
+          pushDevices: { select: { provider: true, enabled: true, lastAcceptedAt: true, lastFailure: true } },
+        },
+      }),
+      prisma.passwordResetRequest.count({ where: { schoolId, status: 'PENDING', user: { role: { in: SCHOOL_RESETTABLE_ROLES } } } }),
+      prisma.route.count({ where: { schoolId, stops: { none: {} } } }),
+      prisma.run.count({ where: { active: true, route: { schoolId }, OR: [{ busId: null }, { driverId: null }] } }),
+      prisma.emergencyAlert.count({ where: { schoolId, status: 'ACTIVE', type: { in: ['DRIVER_SOS', 'HARDWARE_SOS'] } } }),
+      untrackedTrips(prisma, { minutes: config.TRACKING_CONFIRM_MINUTES, schoolId }),
+      prisma.trip.findMany({
+        where: { status: running, route: { schoolId }, bus: { status: 'OFFLINE' } },
+        select: { id: true, bus: { select: { licensePlate: true } }, route: { select: { name: true } } },
+      }),
+    ]);
+
+    const stages = {};
+    let pushFailing = 0;
+    let noPush = 0;
+    let iphoneWaiting = 0;
+    for (const p of parents) {
+      const stage = parentInvites.stageOf(p, now);
+      stages[stage] = (stages[stage] || 0) + 1;
+      if (stage !== 'ACTIVATED') continue;
+      const state = pushStateOf(p.pushDevices);
+      if (state === 'FAILING') pushFailing++;
+      else if (state === 'NONE') noPush++;
+      else if (state === 'IPHONE_NOT_SENDING') iphoneWaiting++;
+    }
+
+    const items = [];
+    const add = (severity, key, count, title, detail, href) => {
+      if (count > 0) items.push({ key, severity, count, title, detail, href });
+    };
+    const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+    // Now: children are on a bus and something is wrong.
+    add('critical', 'SOS_ACTIVE', sos, 'SOS not resolved', `${plural(sos, 'emergency alert is', 'emergency alerts are')} still open.`, '/overview');
+    add('critical', 'TRIP_UNTRACKED', untracked.length, 'Trip running with no GPS',
+      untracked.map((t) => `${t.bus.licensePlate} (${t.route.name})`).join(', ') + ': started, but never sent a position. Call the driver.', '/map');
+    add('critical', 'BUS_DARK', darkTrips.length, 'Bus stopped sending GPS',
+      darkTrips.map((t) => `${t.bus.licensePlate} (${t.route.name})`).join(', ') + ': on a running trip and not reporting.', '/map');
+    // Before the next trip: children and families who are not set up.
+    add('warning', 'STUDENT_NO_STOP', noStop, 'Children with no stop', `${plural(noStop, 'child has', 'children have')} no bus stop, so no driver will expect them.`, '/students?filter=unassigned');
+    add('warning', 'STUDENT_NO_PARENT', noParent, 'Children with no parent account', `${plural(noParent, 'child has', 'children have')} no parent linked. Nobody is told when they board.`, '/parents?view=unlinked');
+    add('warning', 'PARENT_NOT_INVITED', stages.NOT_INVITED || 0, 'Parents not invited', `${plural(stages.NOT_INVITED || 0, 'family has', 'families have')} an account but no invite yet.`, '/parents?stage=NOT_INVITED');
+    add('warning', 'INVITE_EMAIL_FAILED', stages.EMAIL_FAILED || 0, 'Invite emails that failed', `${plural(stages.EMAIL_FAILED || 0, 'invite email', 'invite emails')} did not send. Check the address or send another way.`, '/parents?stage=EMAIL_FAILED');
+    add('warning', 'INVITE_EXPIRED', stages.INVITE_EXPIRED || 0, 'Invites expired', `${plural(stages.INVITE_EXPIRED || 0, 'family', 'families')} did not use their code in time. Send a new one.`, '/parents?stage=INVITE_EXPIRED');
+    add('warning', 'PUSH_FAILING', pushFailing, 'Alerts not reaching phones', `${plural(pushFailing, 'family\'s phone is', 'families\' phones are')} refusing alerts. They still see them in the app.`, '/parents?push=FAILING');
+    add('warning', 'PASSWORD_REQUESTS', resetRequests, 'Password requests waiting', `${plural(resetRequests, 'person is', 'people are')} locked out and waiting for the office.`, '/students?passwordRequests=1');
+    add('warning', 'RUN_NO_CREW', runsNoCrew, 'Schedules missing a bus or driver', `${plural(runsNoCrew, 'schedule has', 'schedules have')} no bus or no driver, so no trip will be made.`, '/schedules');
+    add('warning', 'ROUTE_NO_STOPS', routesNoStops, 'Routes with no stops', `${plural(routesNoStops, 'route has', 'routes have')} no stops yet.`, '/routes');
+    add('warning', 'CARD_NOT_PRINTED', cardsUnprinted, 'Cards not printed', `${plural(cardsUnprinted, 'child has', 'children have')} no printed card. Drivers will mark them by name.`, '/cards');
+    // Worth knowing.
+    add('info', 'CARD_NEVER_SCANNED', cardsNeverScanned, 'Cards never scanned', `${plural(cardsNeverScanned, 'printed card has', 'printed cards have')} not been scanned on a bus yet. Check they reached the children.`, '/cards');
+    add('info', 'PARENT_NO_PUSH', noPush, 'Families without alerts on', `${plural(noPush, 'family has', 'families have')} signed in but not allowed notifications.`, '/parents?push=NONE');
+    add('info', 'IPHONE_PUSH_OFF', iphoneWaiting, 'iPhone alerts not switched on', `${plural(iphoneWaiting, 'family uses', 'families use')} an iPhone. iPhone alerts are not set up on the server yet; they see updates in the app.`, '/parents?push=IPHONE_NOT_SENDING');
+    if (!config.PARENT_APP_ANDROID_URL) add('info', 'APP_LINK_MISSING', 1, 'App store link not set', 'Invites tell families to search the store, because no Play Store link is set.', '/parents');
+
+    // The platform's own health, in the school's words. A school seeing thirty buses go
+    // quiet at once should read "Voltava is having a problem", not suspect thirty phones.
+    const health = systemHealth.snapshot({ pushWindowMinutes: config.SYSTEM_PUSH_WINDOW_MINUTES });
+    const platform = health.alarms.map((a) => ({
+      check: a.check,
+      since: a.since,
+      message: a.check === 'GPS_INTAKE'
+        ? 'Voltava is not receiving bus positions from any school right now. We are on it. Buses are safe; the map is not updating.'
+        : 'Voltava is having trouble sending phone alerts right now. Parents still see every update inside the app.',
+    }));
+
+    res.json({
+      generatedAt: now.toISOString(),
+      platform: { degraded: platform.length > 0, alarms: platform },
+      items,
+      counts: { students, parents: parents.length, stages },
+      setup: {
+        androidPush: isPushConfigured(),
+        iphonePush: isApnsConfigured(),
+        email: mailer.isConfigured(),
+        appLinks: appLinks(),
+      },
+    });
+  } catch (err) {
+    req.log.error({ err }, 'school readiness failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 app.get('/api/schools/:schoolId/drivers', requireTenant('schoolId'), schoolAdminsOnly, async (req, res) => {
   try {
@@ -1354,6 +1733,9 @@ app.get('/api/schools/:schoolId/students', requireTenant('schoolId'), schoolAdmi
           // flag is false for everyone; wrong the day imports land, and quiet either
           // way. The token itself is never on this payload.
           qrCodeImported: s.qrCodeImported,
+          // When this child's card print was last confirmed (null: not printed, or the
+          // school's own card, which qrCodeImported says).
+          cardPrintedAt: s.qrCardPrintedAt ? s.qrCardPrintedAt.toISOString() : null,
         };
       })
     );
@@ -1376,37 +1758,51 @@ async function studentCreateHandler(req, res) {
       return res.status(403).json({ error: 'Forbidden' });
     }
 
-    let { rfidTag, name, grade, guardianPhone, parentEmail, parentName } = req.body;
+    let { rfidTag, name, grade, guardianPhone, parentName, routeStopId } = req.body;
+    // The parent's sign-in. Lowercased so one family typed two ways stays one account.
+    const parentEmail = req.body.parentEmail ? req.body.parentEmail.trim().toLowerCase() : null;
     if (!rfidTag || typeof rfidTag !== 'string' || rfidTag.trim() === '') {
       rfidTag = `RFID-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
     } else {
       rfidTag = rfidTag.trim();
     }
 
-    // Wrap parent-provisioning + student-create in a transaction
+    // The stop must be this school's. Checked before the transaction so a bad id is a
+    // 400 about the stop, not a rolled-back child.
+    if (routeStopId) {
+      const stop = await prisma.routeStop.findUnique({ where: { id: routeStopId }, select: { route: { select: { schoolId: true } } } });
+      if (!stop || stop.route.schoolId !== schoolId) return res.status(400).json({ error: 'That stop is not on one of this school\'s routes' });
+    }
+
+    // Child, parent account and stop in one transaction: either the child is ready to
+    // ride or nothing was saved. Two requests used to leave a child created with no stop
+    // whenever the second failed.
+    const lockedHash = parentEmail ? await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10) : null;
     const result = await prisma.$transaction(async (tx) => {
       let parentId = null;
-      let generatedPassword = null;
+      let parentCreated = false;
       if (parentEmail) {
-        let parent = await tx.user.findUnique({ where: { email: parentEmail } });
+        let parent = await tx.user.findFirst({ where: { email: { equals: parentEmail, mode: 'insensitive' } } });
         if (parent && (parent.role !== 'PARENT' || parent.schoolId !== schoolId)) {
           const err = new Error('Parent account belongs to another tenant or role');
           err.code = 'PARENT_TENANT_CONFLICT';
           throw err;
         }
         if (!parent) {
-          generatedPassword = parentOpeningPassword();
-          const hashed = await bcrypt.hash(generatedPassword, 10);
+          // Opens with a lock nobody holds. The family gets its own one-time code from
+          // its invite (parentInvites.js); no password leaves this request.
           parent = await tx.user.create({
             data: {
               email: parentEmail,
-              password: hashed,
+              password: lockedHash,
               role: 'PARENT',
               name: parentName || `Parent of ${name}`,
+              phone: guardianPhone || null,
               schoolId,
               mustResetPassword: true,
             },
           });
+          parentCreated = true;
         }
         parentId = parent.id;
       }
@@ -1417,13 +1813,19 @@ async function studentCreateHandler(req, res) {
           ...qrFieldsFor(req.body.qrToken),
         },
       });
-      return { student, generatedPassword };
+      if (routeStopId) {
+        await tx.studentRouteMapping.create({ data: { studentId: student.id, routeStopId, direction: req.body.direction ?? null } });
+      }
+      return { student, parentId, parentCreated };
     });
+    if (routeStopId) rosterChanged();
 
     res.json({
       student: withoutQrToken(result.student),
-      parentCredentials: result.generatedPassword
-        ? { email: parentEmail, temporaryPassword: result.generatedPassword }
+      stopAssigned: Boolean(routeStopId),
+      // Who to invite. The dashboard offers to send the invite straight away.
+      parent: result.parentId
+        ? { id: result.parentId, email: parentEmail, created: result.parentCreated, invited: false }
         : null,
     });
   } catch (err) {
@@ -1555,103 +1957,51 @@ app.post('/api/schools/:schoolId/broadcast', requireTenant('schoolId'), authoriz
   }
 });
 
+// The school's roster: create or complete every child in one file, with their parent's
+// account and their stop. See rosterImport.js for the rules. `?dryRun=1` answers with
+// exactly what an import would do and writes nothing; without it the import happens
+// only if every row is clean, all at once.
 app.post('/api/schools/:schoolId/students/bulk', bulkImportLimiter, requireTenant('schoolId'), authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), validate({ body: S.bulkStudents }), async (req, res) => {
+  const dryRun = ['1', 'true'].includes(String(req.query.dryRun || '').toLowerCase());
+  const { schoolId } = req.params;
   try {
-    const students = req.body;
-    let createdCount = 0;
-    // Temp passwords for parents provisioned by this import, returned once so the
-    // admin can hand them out. Shape depends on PARENT_DEFAULT_PASSWORD: one shared
-    // string for the whole school when set — the owner's call, so an import of 300
-    // families is one notice rather than 300 slips — or a unique readable password per
-    // parent when it is not.
-    //
-    // Shared means exactly what it says: the string opens every parent account created
-    // since it last changed, and each of those shows a child's live location. See the
-    // note on PARENT_DEFAULT_PASSWORD in config.js before changing how this is handled.
-    const parentCredentials = [];
-
-    // Process in transaction
-    await prisma.$transaction(async (tx) => {
-      for (const [i, st] of students.entries()) {
-        let parent = null;
-        if (st.parentEmail) {
-          const existing = await tx.user.findUnique({ where: { email: st.parentEmail } });
-          if (existing) {
-            if (existing.role !== 'PARENT' || existing.schoolId !== req.params.schoolId) {
-              const err = new Error('Parent account belongs to another tenant or role');
-              err.code = 'PARENT_TENANT_CONFLICT';
-              throw err;
-            }
-            parent = existing;
-          } else {
-            const tempPassword = parentOpeningPassword();
-            parent = await tx.user.create({
-              data: {
-                email: st.parentEmail,
-                name: st.parentName || 'Parent',
-                password: await bcrypt.hash(tempPassword, 10),
-                role: 'PARENT',
-                schoolId: req.params.schoolId,
-                mustResetPassword: true,
-              }
-            });
-            parentCredentials.push({ email: st.parentEmail, temporaryPassword: tempPassword });
-          }
-        }
-        try {
-          await tx.student.create({
-            data: {
-              schoolId: req.params.schoolId,
-              rfidTag: st.rfidTag,
-              name: st.name,
-              grade: st.grade,
-              guardianPhone: st.guardianPhone || null,
-              parentId: parent ? parent.id : null,
-              ...qrFieldsFor(st.qrToken),
-            }
-          });
-        } catch (rowErr) {
-          // A 600-row import that fails with "a code is already in use" and no row
-          // number is a spreadsheet someone has to bisect by hand. Name the row and
-          // the student; the transaction still aborts, so nothing is half-applied.
-          if (rowErr.code === 'P2002') {
-            const err = new Error('duplicate in import');
-            err.code = 'IMPORT_ROW_CONFLICT';
-            err.row = i + 1;
-            err.studentName = st.name;
-            err.detail = duplicateStudentFieldError(rowErr);
-            throw err;
-          }
-          throw rowErr;
-        }
-        createdCount++;
-      }
-    });
-    // parentCredentials still lists every provisioned parent, because the office needs
-    // to know WHICH families now have an account. With a shared password every row
-    // carries the same string; `sharedPassword` says so, so the UI can print one notice
-    // instead of repeating it 300 times.
-    res.json({
-      success: true,
-      message: `Created ${createdCount} students successfully.`,
-      parentCredentials,
-      sharedPassword: Boolean(config.PARENT_DEFAULT_PASSWORD),
-    });
-  } catch (err) {
-    if (err.code === 'PARENT_TENANT_CONFLICT') {
-      return res.status(409).json({ error: 'Import aborted: a parent email belongs to another account' });
+    if (dryRun) {
+      const planned = await rosterImport.planRoster(prisma, schoolId, req.body);
+      return res.json({ dryRun: true, committed: false, totals: rosterImport.totals(planned), rows: rosterImport.publicPlan(planned) });
     }
-    if (err.code === 'IMPORT_ROW_CONFLICT') {
+
+    // A new parent opens with a lock nobody holds: a hash of a secret thrown away here.
+    // The family gets its own code from its invite (parentInvites.js). One hash for the
+    // whole file, because bcrypt per parent is seconds of CPU for a large school.
+    const lockedHash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10);
+    const outcome = await prisma.$transaction(async (tx) => {
+      // Planned again inside the transaction, so it answers to the rows as they are now,
+      // not as they were when the office previewed.
+      const planned = await rosterImport.planRoster(tx, schoolId, req.body);
+      if (planned.some((p) => p.errors.length)) return { planned, written: 0 };
+      const written = await rosterImport.applyRoster(tx, schoolId, planned, { lockedHash, qrFieldsFor });
+      return { planned, written };
+    }, { timeout: 120_000, maxWait: 10_000 });
+
+    const totals = rosterImport.totals(outcome.planned);
+    const rows = rosterImport.publicPlan(outcome.planned);
+    if (totals.needsCorrection > 0) {
       return res.status(409).json({
-        error: `Import aborted at row ${err.row} (${err.studentName}): ${err.detail}`,
-        row: err.row,
-        studentName: err.studentName,
+        error: `${totals.needsCorrection} ${totals.needsCorrection === 1 ? 'row needs' : 'rows need'} correcting. Nothing was imported.`,
+        dryRun: false, committed: false, totals, rows,
       });
     }
+    if (outcome.written > 0) rosterChanged();
+    res.json({
+      success: true, dryRun: false, committed: true, totals, rows,
+      message: `Imported ${totals.new} new ${totals.new === 1 ? 'student' : 'students'} and updated ${totals.updated}.`,
+    });
+  } catch (err) {
+    // Someone else wrote the same Student ID or card between the check and the write.
     if (err.code === 'P2002') {
-      return res.status(400).json({ error: 'Import aborted: an RFID tag or parent email in this batch is already in use.' });
+      return res.status(409).json({ error: `Import aborted: ${duplicateStudentFieldError(err)} Check the file again and retry.` });
     }
-    req.log.error({ err }, 'bulk student import failed');
+    req.log.error({ err }, 'roster import failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -2366,7 +2716,7 @@ app.post('/api/schools/:schoolId/qr-cards',
         // an admin could print another school's cards by pasting their ids.
         where: { id: { in: req.body.studentIds }, schoolId: req.params.schoolId },
         select: {
-          id: true, name: true, grade: true, qrToken: true, qrCodeImported: true,
+          id: true, name: true, grade: true, qrToken: true, qrCodeImported: true, qrCardPrintedAt: true,
           routeMappings: {
             select: { routeStop: { select: { name: true } } },
             orderBy: { createdAt: 'asc' },
@@ -2382,25 +2732,14 @@ app.post('/api/schools/:schoolId/qr-cards',
         return res.status(403).json({ error: 'Forbidden: one or more students are outside this school' });
       }
 
-      // Stamp what we just handed out. Printing is the act that creates a card, so
-      // recording it here means nobody has to remember to tick anything — and it is
-      // the only honest signal that a card exists in a child's hand rather than a
-      // token existing in a table.
-      //
-      // Deliberately not conditional on the sheet actually reaching paper: we cannot
-      // observe a printer. "These were issued for printing" is what we know, and
-      // reissuing is cheap, so erring towards marking them is the right way round.
-      const issuedAt = new Date();
-      if (students.length > 0) {
-        await prisma.student.updateMany({
-          where: { id: { in: students.map((st) => st.id) } },
-          data: { qrCardPrintedAt: issuedAt },
-        });
-      }
-
+      // Nothing is stamped here. This hands out the codes for a print run; it cannot see
+      // a printer jam or a sheet left in the tray, and qrCardPrintedAt is what tells a
+      // driver to expect a card from this child. The office confirms the sheets came
+      // out right (POST .../qr-cards/printed), and that is what marks them printed.
+      // Printing again gives the same codes, so a reprint never changes who a card is.
       req.log.info(
         { schoolId: req.params.schoolId, requested: req.body.studentIds.length, returned: students.length },
-        'qr cards issued'
+        'qr cards generated for printing'
       );
 
       res.json(
@@ -2413,11 +2752,59 @@ app.post('/api/schools/:schoolId/qr-cards',
           // A school that brought its own codes already has cards for these children.
           // Printing again hands a child a second, competing code.
           qrCodeImported: st.qrCodeImported,
-          printedAt: issuedAt.toISOString(),
+          // When a print of this card was last confirmed; null until the office says so.
+          printedAt: st.qrCardPrintedAt ? st.qrCardPrintedAt.toISOString() : null,
         }))
       );
     } catch (err) {
       req.log.error({ err }, 'qr cards failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
+// The office confirms a print run came out: every card readable, none missing. Only
+// now is a card "printed", which is what the driver app reads as "this child has a
+// card". Cards the school brought itself were never ours to print and are left alone.
+app.post('/api/schools/:schoolId/qr-cards/printed',
+  requireTenant('schoolId'),
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  validate({ body: S.qrCards }),
+  async (req, res) => {
+    try {
+      const at = new Date();
+      const { count } = await prisma.student.updateMany({
+        where: { id: { in: req.body.studentIds }, schoolId: req.params.schoolId, qrCodeImported: false },
+        data: { qrCardPrintedAt: at },
+      });
+      req.log.info({ schoolId: req.params.schoolId, confirmed: count, by: req.user.id }, 'qr card print confirmed');
+      res.json({ confirmed: count, printedAt: at.toISOString() });
+    } catch (err) {
+      req.log.error({ err }, 'confirm qr print failed');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
+// A lost or misprinted card: give the child a new code. The old card stops matching at
+// once (the driver roster carries the hash of the new one), and the child reads as
+// "no card" until the replacement's print is confirmed.
+app.post('/api/students/:id/qr-card/replace',
+  authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  async (req, res) => {
+    try {
+      const student = await prisma.student.findUnique({ where: { id: req.params.id }, select: { id: true, schoolId: true } });
+      if (!student) return res.status(404).json({ error: 'Student not found' });
+      if (req.user.role === 'SCHOOL_ADMIN' && student.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
+      await prisma.student.update({
+        where: { id: student.id },
+        data: { qrToken: newQrToken(), qrCodeImported: false, qrCardPrintedAt: null },
+      });
+      rosterChanged();
+      req.log.info({ studentId: student.id, by: req.user.id }, 'qr card replaced');
+      res.json({ studentId: student.id, replaced: true });
+    } catch (err) {
+      req.log.error({ err }, 'replace qr card failed');
       res.status(500).json({ error: 'Internal server error' });
     }
   }
@@ -3290,6 +3677,7 @@ app.put('/api/users/me', validate({ body: S.updateMe }), async (req, res) => {
       }
       data.password = await bcrypt.hash(data.password, 10);
       data.mustResetPassword = false;
+      data.inviteExpiresAt = null;
     }
     const updated = await prisma.user.update({ where: { id: req.user.id }, data });
     // A self password change revokes existing sessions (consistency with change-password).
@@ -3668,6 +4056,47 @@ app.post('/api/trips/:tripId/pre-trip-check', ownsTrip, validate({ body: S.preTr
   }
 });
 
+// The driver's phone started the trip but could not start sharing its position. The
+// trip still runs (a bus full of children does not wait on a phone), so the school has
+// to know at once that nobody can see it, rather than find out from parents.
+app.post('/api/trips/:tripId/tracking-problem', ownsTrip, validate({ body: S.trackingProblem }), async (req, res) => {
+  try {
+    if (req.user.role !== 'DRIVER') return res.status(403).json({ error: "Only the trip's driver can report this" });
+    const trip = await prisma.trip.findUnique({
+      where: { id: req.params.tripId },
+      select: { id: true, status: true, bus: { select: { id: true, licensePlate: true } }, route: { select: { name: true, schoolId: true } } },
+    });
+    if (!trip) return res.status(404).json({ error: 'Trip not found' });
+    const why = {
+      permission: 'location permission is off on the driver\'s phone',
+      provisioning: 'the phone could not get this bus\'s GPS key',
+      transient: 'the phone could not start location sharing',
+    }[req.body.reason];
+    const title = 'Trip running with no GPS';
+    const message = `${trip.bus.licensePlate} on ${trip.route.name} is running, but ${why}. Parents see no bus on the map. Call the driver.`;
+    const context = { type: 'TRACKING_UNVERIFIED', busId: trip.bus.id, tripId: trip.id, reason: req.body.reason, detail: req.body.message || null };
+    const admins = await prisma.user.findMany({
+      where: { schoolId: trip.route.schoolId, role: { in: ['SCHOOL_ADMIN', 'SUPER_ADMIN'] } },
+      select: { id: true },
+    });
+    let told = 0;
+    if (admins.length) {
+      // Same key as the sweep's, so one trip is one alert whichever notices first.
+      ({ count: told } = await prisma.notification.createMany({
+        data: admins.map((a) => ({ userId: a.id, title, message, type: 'SYSTEM', context, eventKey: `tracking-unverified:${trip.id}:${a.id}` })),
+        skipDuplicates: true,
+      }));
+      if (io && told > 0) admins.forEach((a) => emitToUser(io, a.id, 'notification', { title, message, type: 'SYSTEM', context }));
+    }
+    req.log.warn({ tripId: trip.id, reason: req.body.reason }, 'driver reported tracking problem');
+    // "Delivered to school" is what the driver app may say; nothing more.
+    res.json({ delivered: admins.length > 0, admins: admins.length });
+  } catch (err) {
+    req.log.error({ err }, 'tracking problem report failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // The school (or the driver) reads it back. Parents are kept out by ownsTrip.
 app.get('/api/trips/:tripId/pre-trip-check', ownsTrip, async (req, res) => {
   try {
@@ -3747,14 +4176,27 @@ async function pushToUsers(userIds, payload) {
     const enabledIds = enabledUsers.map((u) => u.id);
     const devices = prisma.pushDevice?.findMany
       ? await prisma.pushDevice.findMany({
-          where: { userId: { in: enabledIds }, enabled: true, provider: 'FCM' },
-          select: { token: true },
+          where: { userId: { in: enabledIds }, enabled: true, provider: { in: ['FCM', 'APNS'] } },
+          select: { token: true, provider: true },
         })
       : [];
-    const tokens = [...new Set([...enabledUsers.map((u) => u.fcmToken), ...devices.map((d) => d.token)].filter(Boolean))];
-    if (tokens.length === 0) return;
+    const tokens = [...new Set([
+      ...enabledUsers.map((u) => u.fcmToken),
+      ...devices.filter((d) => d.provider !== 'APNS').map((d) => d.token),
+    ].filter(Boolean))];
+    // iPhones go to Apple. Only when it is set up: an unconfigured sender is not a
+    // failed push, and counting it as one would raise the platform's push alarm.
+    const iphones = isApnsConfigured() ? [...new Set(devices.filter((d) => d.provider === 'APNS').map((d) => d.token))] : [];
+    if (tokens.length === 0 && iphones.length === 0) return;
 
-    const { invalidTokens, accepted = [], failed = [] } = await sendPush(tokens, payload);
+    const empty = { invalidTokens: [], accepted: [], failed: [] };
+    const [android, apple] = await Promise.all([
+      tokens.length ? sendPush(tokens, payload) : empty,
+      iphones.length ? sendApns(iphones, payload) : empty,
+    ]);
+    const invalidTokens = [...(android.invalidTokens || []), ...(apple.invalidTokens || [])];
+    const accepted = [...(android.accepted || []), ...(apple.accepted || [])];
+    const failed = [...(android.failed || []), ...(apple.failed || [])];
     // An uninstalled app (invalidTokens) is ordinary churn; a failed send is not.
     systemHealth.notePush({ accepted: accepted.length, failed: failed.length, codes: failed.map((f) => f.code) });
     if (invalidTokens?.length) {
@@ -4736,18 +5178,6 @@ app.delete('/api/admins/:id', async (req, res) => {
   }
 });
 
-// The opening password for a newly provisioned PARENT account.
-//
-// PARENT_DEFAULT_PASSWORD set: every parent gets that same string, which is what makes
-// a 300-family import one line on a notice instead of 300 slips. Unset: a unique
-// readable password per parent, returned once by the endpoint that created it.
-//
-// Parents only. Drivers and admins keep unique passwords — a driver account can start
-// and end trips, and an admin account can read the whole school.
-function parentOpeningPassword() {
-  return config.PARENT_DEFAULT_PASSWORD || generateTempPassword();
-}
-
 // Readable alphabet: no O/0/I/1, so a temp password can be read out over a phone
 // without spelling it letter by letter, and typed off a printed slip without a support
 // call. Every account this server provisions uses it — driver creation, student import,
@@ -4815,7 +5245,7 @@ app.post('/api/password-reset-requests/:id/approve',
       await prisma.$transaction([
         prisma.user.update({
           where: { id: request.userId },
-          data: { password: hashed, mustResetPassword: true },
+          data: { password: hashed, mustResetPassword: true, inviteExpiresAt: null },
         }),
         prisma.passwordResetRequest.update({
           where: { id: request.id },

@@ -4,6 +4,7 @@ const { validate } = require('./middleware/validate');
 const S = require('./schemas');
 const { createLeave, changeLeave, fail } = require('./leaveWorkflows');
 const { calendarDate, DEFAULT_ZONE } = require('./schoolTime');
+const { isApnsConfigured } = require('./apns');
 const uuid = z.string().uuid();
 const text = z.string().trim().min(1).max(1000);
 const limitOf = req => Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 20));
@@ -93,16 +94,21 @@ function registerAuditRoutes(app, { prisma, io, emitToUser, emitToSchool, isPush
     res.json({ preferences });
   }));
 
-  const deviceSchema = z.object({ deviceId: z.string().min(1).max(200), platform: z.enum(['ANDROID', 'IOS']), provider: z.literal('FCM'), token: z.string().min(10).max(4096) });
+  // FCM for Android; APNS for iPhones, whose token only Apple accepts (apns.js).
+  const deviceSchema = z.object({ deviceId: z.string().min(1).max(200), platform: z.enum(['ANDROID', 'IOS']), provider: z.enum(['FCM', 'APNS']), token: z.string().min(10).max(4096) })
+    .refine((d) => (d.provider === 'APNS') === (d.platform === 'IOS'), { message: 'APNS is for iPhones, FCM for Android' });
   router.post('/api/users/me/push-devices', validate({ body: deviceSchema }), guarded(async (req, res) => {
-    if (!isPushConfigured()) return res.status(503).json({ pushEnabled: false, error: 'Push notifications are not configured' });
+    // An iPhone is kept even while Apple push is off: the school can then see which
+    // families are on an iPhone and waiting for it, instead of reading "no device".
+    // The answer says whether anything will be sent, so the app does not promise alerts.
+    if (req.body.provider === 'FCM' && !isPushConfigured()) return res.status(503).json({ pushEnabled: false, error: 'Push notifications are not configured' });
     const { deviceId, token, platform, provider } = req.body;
     const record = await prisma.$transaction(async tx => {
       // A rotating/reassigned installation token belongs to exactly one account.
       await tx.pushDevice.deleteMany({ where: { token, NOT: { userId: req.user.id, deviceId } } });
       return tx.pushDevice.upsert({ where: { userId_deviceId: { userId: req.user.id, deviceId } }, create: { userId: req.user.id, ...req.body }, update: { token, platform, provider, enabled: true, lastFailure: null, lastAcceptedAt: null } });
     });
-    res.json({ id: record.id, registered: true, deliveryConfirmed: false, provider });
+    res.json({ id: record.id, registered: true, deliveryConfirmed: false, provider, pushEnabled: provider === 'APNS' ? isApnsConfigured() : true });
   }));
   router.delete('/api/users/me/push-devices/:deviceId', guarded(async (req, res) => {
     await prisma.pushDevice.deleteMany({ where: { userId: req.user.id, deviceId: req.params.deviceId } });
@@ -115,7 +121,7 @@ function registerAuditRoutes(app, { prisma, io, emitToUser, emitToSchool, isPush
     ]);
     let preferences = user?.notificationSettings || {};
     if (typeof preferences === 'string') { try { preferences = JSON.parse(preferences); } catch { preferences = {}; } }
-    res.json({ pushConfigured: isPushConfigured(), supportedProviders: ['FCM'], devices, legacyTokenRegistered: Boolean(user?.fcmToken), deliveryConfirmed: devices.some(d => Boolean(d.lastAcceptedAt)),
+    res.json({ pushConfigured: isPushConfigured(), supportedProviders: ['FCM', ...(isApnsConfigured() ? ['APNS'] : [])], devices, legacyTokenRegistered: Boolean(user?.fcmToken), deliveryConfirmed: devices.some(d => Boolean(d.lastAcceptedAt)),
       email: { configured: mailer.isConfigured(), recipient: user?.email || null }, sms: { configured: false }, permissionSource: 'DEVICE', preferences });
   }));
 

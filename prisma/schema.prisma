@@ -87,6 +87,12 @@ model User {
   // (password change or reset, role or school change) so it outlives a restart. See
   // sessionRevocations.js.
   tokensValidAfter     DateTime?
+  // Parent invites (parentInvites.js). The one-time code is the password itself, so a
+  // code that has expired stops opening the account: login refuses it after
+  // inviteExpiresAt. Cleared when the parent chooses their own password.
+  inviteSentAt         DateTime?
+  inviteExpiresAt      DateTime?
+  inviteChannel        String?   // EMAIL | WHATSAPP | SMS | PRINT | COPY | EMAIL_FAILED | REVOKED
   schoolId             String?
   school               School?  @relation(fields: [schoolId], references: [id])
   lastLoginAt   DateTime?

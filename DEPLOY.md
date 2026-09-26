@@ -278,6 +278,17 @@ Uptime check (from Cloud Console → Monitoring → Uptime checks):
   `TELEMETRY_ACCEPT_BUS_SECRET=0` and every old copy stops working. If hardware shows
   up there, rotate and re-flash it first.
 - **Deploys**: `git pull && npm ci && npm run build && npm run migrate:deploy && pm2 reload voltava-fleet`.
+- **Parent invites (migration `zd_parent_invites`)**. New parents no longer get a
+  password from an import. The school sends each family its own one-time code from the
+  dashboard's Parents page (email, WhatsApp, SMS or a printed letter). After deploying:
+  - remove `PARENT_DEFAULT_PASSWORD` from `.env` (it is ignored, and logged as such);
+  - set `PARENT_APP_ANDROID_URL` (and `PARENT_APP_IOS_URL`) once the store listings are
+    live, so invites link to them;
+  - email invites need `EMAIL_SMTP_*` and `EMAIL_FROM`; without them the dashboard
+    offers WhatsApp, SMS and print only.
+- **iPhone push**: set `APNS_KEY`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID`
+  (`.env.example` says where each comes from). Until all four are set iPhones register
+  but are not sent to, and the school's readiness page says so.
 - **Never skip `npm ci` on a deploy.** The GCP cheatsheet`s shorter sequence omits it,
   and the first deploy that added a dependency (nodemailer) crash-looped the API ~190
   times before anyone noticed — `curl -s` prints nothing on connection-refused, so it

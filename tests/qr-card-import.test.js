@@ -36,11 +36,12 @@ describe('createStudent / updateStudent accept an imported code', () => {
 
   it('flows through the bulk schema, which is the path a school actually uses', () => {
     const rows = S.bulkStudents.parse([
-      { name: 'Aryan', qrToken: 'SCH-1' },
-      { name: 'Sashank' },
+      { rfidTag: 'A-1', name: 'Aryan', qrToken: 'SCH-1' },
+      { rfidTag: 'A-2', name: 'Sashank', qrToken: '' },
     ]);
     expect(rows[0].qrToken).toBe('SCH-1');
-    expect(rows[1].qrToken).toBeUndefined();
+    // An empty spreadsheet cell is "no code", never a code that is an empty string.
+    expect(rows[1].qrToken).toBeNull();
   });
 });
 
@@ -69,13 +70,14 @@ describe('qrFieldsFor', () => {
 });
 
 describe('server wiring', () => {
-  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'server.js'), 'utf8');
+  const read = (f) => require('fs').readFileSync(require('path').join(__dirname, '..', f), 'utf8');
+  const src = read('server.js');
 
   it.each([
-    ['create', /tx\.student\.create\([\s\S]{0,400}qrFieldsFor\(req\.body\.qrToken\)/],
-    ['bulk import', /tx\.student\.create\([\s\S]{0,400}qrFieldsFor\(st\.qrToken\)/],
-  ])('the %s path uses qrFieldsFor rather than always generating', (_label, pattern) => {
-    expect(src).toMatch(pattern);
+    ['create', 'server.js', /tx\.student\.create\([\s\S]{0,400}qrFieldsFor\(req\.body\.qrToken\)/],
+    ['roster import', 'rosterImport.js', /tx\.student\.create\([\s\S]{0,400}qrFieldsFor\(row\.qrToken\)/],
+  ])('the %s path uses qrFieldsFor rather than always generating', (_label, file, pattern) => {
+    expect(read(file)).toMatch(pattern);
   });
 
   // Knowing a token is enough to print a working duplicate. The qr-cards endpoint
@@ -95,8 +97,5 @@ describe('server wiring', () => {
     expect(src).not.toMatch(/error: 'RFID Tag is already assigned to another student\.' \}/);
   });
 
-  it('a failed import row reports which row, not just that one failed', () => {
-    expect(src).toMatch(/IMPORT_ROW_CONFLICT/);
-    expect(src).toMatch(/Import aborted at row \$\{err\.row\}/);
-  });
+  // Which line failed is now part of every row's result (tests/roster-import.test.js).
 });

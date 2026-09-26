@@ -118,6 +118,17 @@
    inside 10 minutes, because storing the key needs a column. If item 9 is ever
    approved, add `AttendanceLog.idempotencyKey String? @unique` and match on it.
 
+11. **Parent onboarding is invites, not passwords (2026-09-27, 30-bus UAT report).**
+   Owner approved three `User` columns (`inviteSentAt`, `inviteExpiresAt`,
+   `inviteChannel`, migration `zd_parent_invites`) and retiring `PARENT_DEFAULT_PASSWORD`.
+   Imports and Add student no longer return any password (`parentCredentials` is gone);
+   a new parent opens locked, and the school sends each family a one-time code
+   (`parentInvites.js`) that expires. The roster import takes Student ID, class, parent
+   email, route and stop in one all-or-nothing, rerunnable pass (`rosterImport.js`).
+   `GET /api/schools/:id/parent-activation` and `/readiness` give the school its funnel
+   and exception queue. iPhones now register as `APNS` and are sent to via `apns.js`
+   once the four `APNS_*` settings exist.
+
 ## Key file addresses
 - API + routes: `server.js`
 - Auth / RBAC / token revocation: `middleware/auth.js`

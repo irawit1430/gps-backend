@@ -4,7 +4,8 @@ const jwt = require('jsonwebtoken');
 jest.mock('@prisma/client', () => {
   const tx = {
     student: { create: jest.fn().mockResolvedValue({ id: 's1', name: 'Asha' }) },
-    user: { findUnique: jest.fn().mockResolvedValue(null), create: jest.fn() },
+    user: { findUnique: jest.fn().mockResolvedValue(null), findFirst: jest.fn().mockResolvedValue(null), create: jest.fn() },
+    studentRouteMapping: { create: jest.fn() },
   };
   const mockPrisma = {
     student: { create: jest.fn(), findUnique: jest.fn() },
@@ -54,7 +55,7 @@ describe('a newly created student gets a QR token', () => {
   });
 
   it('does not attach an existing parent account from another school', async () => {
-    prisma.__tx.user.findUnique.mockResolvedValue({
+    prisma.__tx.user.findFirst.mockResolvedValue({
       id: 'parent-other', role: 'PARENT', schoolId: 'school-other',
     });
 

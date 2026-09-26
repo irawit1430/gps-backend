@@ -112,8 +112,8 @@ describe('school admins cannot use role bypasses against another tenant', () => 
 });
 
 describe('bulk student import abuse limits', () => {
-  it('rejects more than 500 rows before opening a transaction', async () => {
-    const rows = Array.from({ length: 501 }, (_, i) => ({ name: `Student ${i}` }));
+  it('rejects more than 2,000 rows before opening a transaction', async () => {
+    const rows = Array.from({ length: 2001 }, (_, i) => ({ rfidTag: `R${i}`, name: `Student ${i}` }));
     const res = await request(app)
       .post(`/api/schools/${SCHOOL}/students/bulk`)
       .set('Authorization', `Bearer ${superAdmin}`)

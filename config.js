@@ -22,6 +22,17 @@ const schema = z.object({
 
   FIREBASE_SERVICE_ACCOUNT: z.string().optional(),
 
+  // iPhone push, sent straight to Apple (apns.js). All four or iPhone push stays off.
+  // APNS_KEY is the .p8 file from Apple Developer > Keys: pasted as is, with \n for
+  // newlines, or base64. APNS_BUNDLE_ID is the parent app's iOS bundle id.
+  APNS_KEY: z.string().optional(),
+  APNS_KEY_ID: z.string().optional(),
+  APNS_TEAM_ID: z.string().optional(),
+  APNS_BUNDLE_ID: z.string().optional(),
+  // 1 for App Store and TestFlight builds; 0 for development builds, whose tokens only
+  // Apple's sandbox accepts.
+  APNS_PRODUCTION: boolish.default('1'),
+
   // SMTP rather than a provider SDK, so switching providers is a credential change.
   // Unset = email silently disabled, same contract as FIREBASE_SERVICE_ACCOUNT.
   EMAIL_SMTP_HOST: z.string().optional(),
@@ -64,22 +75,13 @@ const schema = z.object({
   SEED_ADMIN_PASSWORD: z.string().min(12).optional().or(z.literal('').transform(() => undefined)),
   ENABLE_MOCK_DATA: boolish.default('0'),
 
-  // Shared opening password for every parent account the system provisions — bulk
-  // import and single student creation. Set by the product owner so 300 families can
-  // be onboarded with one line on a notice instead of 300 printed slips.
-  //
-  // It is a shared secret with no expiry, and every account it opens holds a child's
-  // live position. Consequences, so they are on the record rather than discovered:
-  //   - One leaked slip opens every account created since the last rotation, and any
-  //     parent can reach another family's child by guessing an email.
-  //   - Until a parent changes it, the account can do nothing else (requireCurrentPassword
-  //     in middleware/auth.js). But whoever changes it first owns the account: a stranger
-  //     with the slip can still claim a family's account before the family does.
-  //   - The risk compounds with time, because accounts accumulate and the string does
-  //     not change on its own.
-  // Rotate it on a schedule and after every import, which is the reason it is config
-  // and not a literal. Unset it to go back to a unique password per parent.
-  PARENT_DEFAULT_PASSWORD: z.string().min(8).optional().or(z.literal('').transform(() => undefined)),
+  // Parent invites (parentInvites.js). Days a one-time code keeps working.
+  PARENT_INVITE_DAYS: z.coerce.number().int().min(1).max(30).default(7),
+  // The store pages an invite points families to. Set them once the listings are live;
+  // until then an invite says "find Voltava on the Play Store" and the school's
+  // readiness page says the links are missing. Never guessed from the package name.
+  PARENT_APP_ANDROID_URL: z.string().url().optional().or(z.literal('').transform(() => undefined)),
+  PARENT_APP_IOS_URL: z.string().url().optional().or(z.literal('').transform(() => undefined)),
 
   RATE_LIMIT_LOGIN_PER_MIN: z.coerce.number().int().positive().default(5),
   // Per signed-in user (or per IP for requests without a token).
@@ -106,6 +108,9 @@ const schema = z.object({
   // admins are told (darkBuses.js). A phone that stopped while standing still is not
   // counted: it only sends after the bus moves. 0 turns the alert off.
   BUS_DARK_MINUTES: z.coerce.number().int().nonnegative().default(5),
+  // Minutes after a trip starts by which its first GPS position must have arrived.
+  // After that the school's admins are told the trip is running untracked. 0 = off.
+  TRACKING_CONFIRM_MINUTES: z.coerce.number().int().nonnegative().default(3),
   // Minutes a bus waits at each stop for children to get on or off. A route's stop
   // times are pure driving time, so without this every ETA ran early, by about the
   // number of stops before yours. Applies to every school. 0 turns it off.
@@ -138,6 +143,12 @@ config.TELEMETRY_HMAC_ENFORCE =
   config.TELEMETRY_HMAC_ENFORCE === undefined || config.TELEMETRY_HMAC_ENFORCE.trim() === ''
     ? config.NODE_ENV === 'production'
     : boolish.parse(config.TELEMETRY_HMAC_ENFORCE.trim());
+
+// Retired: one opening password shared by every new parent. A leaked slip opened other
+// families' accounts. Each family now gets its own invite code, so this is ignored.
+if (process.env.PARENT_DEFAULT_PASSWORD) {
+  console.warn('WARNING: PARENT_DEFAULT_PASSWORD is ignored. Every parent now gets their own invite code; remove it from the environment.');
+}
 
 // Cross-field checks
 if (config.ALLOW_SEED && (!config.SEED_ADMIN_EMAIL || !config.SEED_ADMIN_PASSWORD)) {

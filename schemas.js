@@ -75,6 +75,10 @@ exports.createStudent = z.object({
   parentEmail: z.string().email().optional().nullable(),
   parentName: z.string().max(200).optional().nullable(),
   qrToken: importedQrToken.optional(),
+  // The child's stop, saved in the same transaction as the child. Two requests left a
+  // child created with no stop whenever the second one failed.
+  routeStopId: uuid.optional().nullable(),
+  direction: z.enum(RUN_DIRECTION).optional().nullable(),
 });
 
 // Only real Student columns are updatable. createStudent also carries
@@ -328,6 +332,23 @@ exports.EMERGENCY_TYPE = EMERGENCY_TYPE;
 
 
 // One message from the school office to one family (POST /api/parents/:parentId/messages).
+// Parent invites (parentInvites.js). EMAIL is sent by the server; the rest hand the
+// code back for school staff to pass on.
+const INVITE_CHANNEL = ['EMAIL', 'WHATSAPP', 'SMS', 'PRINT', 'COPY'];
+exports.parentInvite = z.object({ channel: z.enum(INVITE_CHANNEL) }).strict();
+// Batches are small on purpose: each invite is a bcrypt hash and, by email, an SMTP
+// round trip. The dashboard sends a school's worth as a run of these.
+exports.parentInviteBatch = z.object({
+  parentIds: z.array(uuid).min(1).max(50),
+  channel: z.enum(['EMAIL', 'PRINT']),
+}).strict();
+
+// The driver app could not start tracking for a trip it has just started.
+exports.trackingProblem = z.object({
+  reason: z.enum(['permission', 'provisioning', 'transient']),
+  message: z.string().trim().max(300).optional(),
+}).strict();
+
 exports.parentMessage = z.object({
   subject: z.string().trim().min(1).max(200),
   message: z.string().trim().min(1).max(2000),
@@ -347,9 +368,30 @@ exports.broadcast = z.object({
   type: z.enum(['SOS', 'SYSTEM', 'DELAY']).optional(),
 });
 
-// Bounded below the global 256 KB JSON cap as a second, semantic abuse boundary.
-// Five hundred rows is still a full large intake and keeps transaction time bounded.
-exports.bulkStudents = z.array(exports.createStudent).min(1).max(500);
+// One row of a roster import (rosterImport.js). Spreadsheet cells arrive as '' when
+// empty; that is "not given", never a value to store, so it becomes null before any
+// rule runs. Emails are lowercased: they are the parent's sign-in, and one family typed
+// two ways must not become two accounts.
+const cell = (schema) => z.preprocess((v) => (typeof v === 'string' && v.trim() === '' ? null : v), schema);
+exports.rosterRow = z.object({
+  // The line in the office's file, echoed back so every message points at it.
+  line: z.number().int().positive().optional(),
+  // Required here, unlike single create: it is what makes a second upload of the same
+  // file find the same children instead of adding them again.
+  rfidTag: z.string().trim().min(1, 'Student ID is required').max(64),
+  name: z.string().trim().min(1, 'Student name is required').max(200),
+  grade: cell(z.string().trim().max(50).nullable().optional()),
+  guardianPhone: cell(z.string().trim().min(6).max(20).nullable().optional()),
+  parentEmail: cell(z.string().trim().toLowerCase().email('Parent email is not a valid email address').nullable().optional()),
+  parentName: cell(z.string().trim().max(200).nullable().optional()),
+  route: cell(z.string().trim().max(200).nullable().optional()),
+  stop: cell(z.string().trim().max(200).nullable().optional()),
+  qrToken: cell(importedQrToken.nullable().optional()),
+});
+
+// A whole school in one file: 1,200 children is the size this has to handle. The route
+// takes a larger body than the global JSON cap for exactly this reason (server.js).
+exports.bulkStudents = z.array(exports.rosterRow).min(1).max(2000);
 
 exports.updateMe = z.object({
   name: z.string().min(1).max(200).optional(),

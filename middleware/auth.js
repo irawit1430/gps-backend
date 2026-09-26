@@ -132,14 +132,14 @@ function requireSelfOrRoles(paramName, ...allowedRoles) {
 
 // A parent still on the password they were provisioned with.
 //
-// That password can be one shared by a whole school (PARENT_DEFAULT_PASSWORD), so an
-// account nobody has claimed yet opens for anyone who has the notice and can guess an
-// email — and every parent account can see a child's live position. mustResetPassword
+// That is an invite code or a temporary password the office handed over, and every
+// parent account can see a child's live position, so until the family chooses its own
+// password the account must not be usable by whoever else saw the code. mustResetPassword
 // used to be advisory: login reported it, nothing enforced it, and an unchanged account
 // stayed fully usable. Login now carries it in the token for parents, and until the
 // password changes that token can do nothing but change it (or log out).
 //
-// Parents only: they are the accounts a shared password opens, and the parent app
+// Parents only: they are the accounts opened by a code on paper or in a message, and the parent app
 // already routes a forced reset. Drivers and admins get individual passwords, and the
 // super-admin dashboard has no reset flow to route them to.
 function passwordResetPending(user) {
