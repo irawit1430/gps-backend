@@ -111,6 +111,7 @@ describe('GET /api/schools/:id/readiness', () => {
     const res = await get(`/api/schools/${SCHOOL}/readiness`);
 
     expect(res.status).toBe(200);
+    // A bus listed as untracked is not listed again as dark (t1 is not in the OFFLINE list here).
     const keys = res.body.items.map((i) => [i.severity, i.key, i.count]);
     expect(keys).toEqual([
       ['critical', 'SOS_ACTIVE', 1],
@@ -129,6 +130,15 @@ describe('GET /api/schools/:id/readiness', () => {
     ]);
     expect(res.body.items[1].detail).toMatch(/BR01 1111 \(Route 1\)/);
     expect(res.body.platform).toEqual({ degraded: false, alarms: [] });
+  });
+
+  it('counts a bus that never reported once, not also as dark', async () => {
+    const t1 = { id: 't1', startTime: new Date(Date.now() - 20 * 60_000), bus: { id: 'b1', licensePlate: 'BR01 1111', schoolId: SCHOOL }, route: { name: 'Route 1', schoolId: SCHOOL } };
+    prisma.trip.findMany.mockResolvedValue([t1]);
+    const res = await get(`/api/schools/${SCHOOL}/readiness`);
+    const keys = res.body.items.map((i) => i.key);
+    expect(keys).toContain('TRIP_UNTRACKED');
+    expect(keys).not.toContain('BUS_DARK');
   });
 
   it('tells the school when the platform itself is down, in its own words', async () => {

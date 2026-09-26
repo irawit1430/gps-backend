@@ -1344,6 +1344,11 @@ app.get('/api/schools/:schoolId/readiness', requireTenant('schoolId'), schoolAdm
       }),
     ]);
 
+    // A trip that never sent a position is already listed as untracked; the 15-minute
+    // sweep also marks its bus offline, and one bus is one problem, not two.
+    const untrackedIds = new Set(untracked.map((t) => t.id));
+    const darkOnly = darkTrips.filter((t) => !untrackedIds.has(t.id));
+
     const stages = {};
     let pushFailing = 0;
     let noPush = 0;
@@ -1367,8 +1372,8 @@ app.get('/api/schools/:schoolId/readiness', requireTenant('schoolId'), schoolAdm
     add('critical', 'SOS_ACTIVE', sos, 'SOS not resolved', `${plural(sos, 'emergency alert is', 'emergency alerts are')} still open.`, '/overview');
     add('critical', 'TRIP_UNTRACKED', untracked.length, 'Trip running with no GPS',
       untracked.map((t) => `${t.bus.licensePlate} (${t.route.name})`).join(', ') + ': started, but never sent a position. Call the driver.', '/map');
-    add('critical', 'BUS_DARK', darkTrips.length, 'Bus stopped sending GPS',
-      darkTrips.map((t) => `${t.bus.licensePlate} (${t.route.name})`).join(', ') + ': on a running trip and not reporting.', '/map');
+    add('critical', 'BUS_DARK', darkOnly.length, 'Bus stopped sending GPS',
+      darkOnly.map((t) => `${t.bus.licensePlate} (${t.route.name})`).join(', ') + ': on a running trip and not reporting.', '/map');
     // Before the next trip: children and families who are not set up.
     add('warning', 'STUDENT_NO_STOP', noStop, 'Children with no stop', `${plural(noStop, 'child has', 'children have')} no bus stop, so no driver will expect them.`, '/students?filter=unassigned');
     add('warning', 'STUDENT_NO_PARENT', noParent, 'Children with no parent account', `${plural(noParent, 'child has', 'children have')} no parent linked. Nobody is told when they board.`, '/parents?view=unlinked');
