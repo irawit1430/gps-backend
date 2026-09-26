@@ -24,7 +24,7 @@ run() { # name dir command...
   local name="$1" dir="$2"; shift 2
   local log; log="$(mktemp)"
   if (cd "$dir" && "$@") >"$log" 2>&1; then
-    results+=("| $name | pass | $(grep -Eo 'Tests:? +[0-9]+ passed[^|]*|[0-9]+ passed' "$log" | tail -1) |")
+    results+=("| $name | pass | $(grep -Eo 'Tests:? +[0-9]+ passed[^|]*|[0-9]+ steps passed|[0-9]+ passed' "$log" | tail -1) |")
   else
     results+=("| $name | **FAIL** | see output below |")
     failed=1
@@ -52,6 +52,9 @@ if [ -n "${E2E_DATABASE_URL:-}" ] && [ -n "${E2E_TARGET:-}" ]; then
   run "end to end: onboarding desk test" "$BACKEND" env DATABASE_URL="$E2E_DATABASE_URL" TARGET="$E2E_TARGET" node e2e/onboarding-desk-test.js
 fi
 
+# Read before this run writes its own file into the backend tree.
+flags=(); for repo in "$BACKEND" "$SCHOOL" "$SUPERADMIN" "$PARENT" "$DRIVER"; do flags+=("$(dirty "$repo")"); done
+
 mkdir -p "$BACKEND/docs/releases"
 out="$BACKEND/docs/releases/$(date -u +%Y-%m-%d)-$(git -C "$BACKEND" rev-parse --short HEAD).md"
 {
@@ -61,11 +64,11 @@ out="$BACKEND/docs/releases/$(date -u +%Y-%m-%d)-$(git -C "$BACKEND" rev-parse -
   echo
   echo "| Product | Repository | Commit |"
   echo "|---|---|---|"
-  echo "| Backend | irawit1430/gps-backend | \`$(sha "$BACKEND")\`$(dirty "$BACKEND") |"
-  echo "| School dashboard | irawit1430/school- | \`$(sha "$SCHOOL")\`$(dirty "$SCHOOL") |"
-  echo "| Super admin | irawit1430/voltava-superadmin-dashboard | \`$(sha "$SUPERADMIN")\`$(dirty "$SUPERADMIN") |"
-  echo "| Parent app | irawit1430/voltava-parent-app | \`$(sha "$PARENT")\`$(dirty "$PARENT") |"
-  echo "| Driver app | irawit1430/voltava-drive | \`$(sha "$DRIVER")\`$(dirty "$DRIVER") |"
+  echo "| Backend | irawit1430/gps-backend | \`$(sha "$BACKEND")\`${flags[0]} |"
+  echo "| School dashboard | irawit1430/school- | \`$(sha "$SCHOOL")\`${flags[1]} |"
+  echo "| Super admin | irawit1430/voltava-superadmin-dashboard | \`$(sha "$SUPERADMIN")\`${flags[2]} |"
+  echo "| Parent app | irawit1430/voltava-parent-app | \`$(sha "$PARENT")\`${flags[3]} |"
+  echo "| Driver app | irawit1430/voltava-drive | \`$(sha "$DRIVER")\`${flags[4]} |"
   echo
   echo "| Check | Result | Detail |"
   echo "|---|---|---|"
