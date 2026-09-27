@@ -4,6 +4,9 @@
 //
 //   DATABASE_URL=postgresql://…/voltava_e2e TARGET=http://127.0.0.1:3900 node e2e/onboarding-desk-test.js
 //
+// Start that server with RATE_LIMIT_LOGIN_PER_MIN=100: the script signs in more than
+// five times a minute, and otherwise waits out the limit.
+//
 // Point it at a SCRATCH database and a server using that same database, never at
 // production: it creates a school, 100 children and their parents, and a running trip.
 // It refuses a database whose name does not say it is for testing.
@@ -34,12 +37,20 @@ const step = async (name, fn) => {
     throw err;
   }
 };
-const call = async (method, path, body, token) => {
+const call = async (method, path, body, token, retried = false) => {
   const res = await fetch(TARGET + path, {
     method,
     headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
+  // The script signs in more often than a person would (5 a minute by default). Wait
+  // once rather than fail on the next step with no token.
+  if (res.status === 429 && !retried) {
+    const wait = Math.min(65, Number(res.headers.get('retry-after')) || 60);
+    console.log(`      (rate limited on ${path}; waiting ${wait}s. Start the server with RATE_LIMIT_LOGIN_PER_MIN=100 to skip this.)`);
+    await sleep(wait * 1000);
+    return call(method, path, body, token, true);
+  }
   const text = await res.text();
   let data;
   try { data = JSON.parse(text); } catch { data = text; }
@@ -200,6 +211,52 @@ async function seed() {
     assert.equal(again.status, 200);
     const notes = await prisma.notification.count({ where: { eventKey: { startsWith: `tracking-unverified:${trip.id}:` } } });
     assert.equal(notes, 1, 'one alert per admin per trip');
+  });
+
+  await step('a trip started without GPS says why, and the school hears the reason', async () => {
+    // The step before left this driver on a running trip; one at a time is the rule.
+    await prisma.trip.updateMany({ where: { driverId: s.driver.id, status: { in: ['ON_SCHEDULE', 'DELAYED'] } }, data: { status: 'COMPLETED' } });
+    const bus = await prisma.bus.create({ data: { schoolId: s.school.id, licensePlate: `E2E-G-${s.tag}`, capacity: 40, deviceId: `e2e-g-${s.tag}` } });
+    const trip = await prisma.trip.create({ data: { routeId: s.r1.id, busId: bus.id, driverId: s.driver.id, status: 'PLANNED', scheduledStart: new Date(Date.now() + 10 * 60_000) } });
+    const d = await call('POST', '/api/auth/login', { email: s.driver.email, password: s.password });
+    const check = await call('GET', `/api/trips/${trip.id}/tracking-check`, null, d.body.token);
+    assert.equal(check.status, 200);
+    assert.equal(check.body.verified, false);
+    const start = await call('PATCH', `/api/trips/${trip.id}/status`, { status: 'ON_SCHEDULE', gpsOverrideReason: 'Phone GPS is not working' }, d.body.token);
+    assert.equal(start.status, 200, JSON.stringify(start.body));
+    const told = await prisma.notification.findFirst({ where: { eventKey: { startsWith: `tracking-unverified:${trip.id}:` } } });
+    assert.ok(told && told.message.includes('Phone GPS is not working'), 'the school hears the reason');
+    await prisma.trip.update({ where: { id: trip.id }, data: { status: 'COMPLETED' } });
+  });
+
+  await step('a refused check-in reaches the office, is recorded once, and the driver sees the answer', async () => {
+    const bus = await prisma.bus.create({ data: { schoolId: s.school.id, licensePlate: `E2E-R-${s.tag}`, capacity: 40, deviceId: `e2e-r-${s.tag}` } });
+    const trip = await prisma.trip.create({ data: { routeId: s.r1.id, busId: bus.id, driverId: s.driver.id, status: 'COMPLETED', startTime: new Date(Date.now() - 60 * 60_000) } });
+    const child = await prisma.student.findFirst({ where: { schoolId: s.school.id }, orderBy: { name: 'asc' } });
+    const d = await call('POST', '/api/auth/login', { email: s.driver.email, password: s.password });
+    const scan = {
+      studentId: child.id, tripId: trip.id, type: 'BOARDED', occurredAt: new Date(Date.now() - 50 * 60_000).toISOString(),
+      source: 'SCAN', reason: 'The trip was not running at that time', idempotencyKey: `${trip.id}.${child.id}.BOARDED.e2e`,
+    };
+    const sent = await call('POST', '/api/attendance/review-cases', { scans: [scan], clientKey: `e2e-case-${s.tag}` }, d.body.token);
+    assert.equal(sent.status, 201, JSON.stringify(sent.body));
+    const retry = await call('POST', '/api/attendance/review-cases', { scans: [scan], clientKey: `e2e-case-${s.tag}` }, d.body.token);
+    assert.equal(retry.body.caseId, sent.body.caseId, 'a retry finds the same case');
+
+    const list = await call('GET', `${base}/attendance-review`, null, T);
+    const open = list.body.find((c) => c.id === sent.body.caseId);
+    assert.equal(open.scans[0].studentName, child.name);
+    const ready = await call('GET', `${base}/readiness`, null, T);
+    assert.ok(ready.body.items.some((i) => i.key === 'ATTENDANCE_REVIEW'), 'readiness lists it');
+
+    const decided = await call('PATCH', `/api/attendance/review-cases/${sent.body.caseId}`, { status: 'RESOLVED', reason: 'Called the parent: she boarded', record: true }, T);
+    assert.equal(decided.body.recorded, 1);
+    const twice = await call('PATCH', `/api/attendance/review-cases/${sent.body.caseId}`, { status: 'RESOLVED', reason: 'again', record: true }, T);
+    assert.equal(twice.status, 409);
+    assert.equal(await prisma.attendanceLog.count({ where: { studentId: child.id, tripId: trip.id, source: 'MANUAL' } }), 1);
+
+    const mine = await call('GET', `/api/attendance/review-cases?ids=${sent.body.caseId}`, null, d.body.token);
+    assert.equal(mine.body[0].status, 'RESOLVED');
   });
 
   await step('readiness lists what is waiting, and no family\'s phone is claimed as alerted', async () => {
