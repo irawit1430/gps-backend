@@ -9,6 +9,7 @@ jest.mock('@prisma/client', () => {
     user: { findMany: jest.fn() },
     student: { count: jest.fn(), findMany: jest.fn() },
     passwordResetRequest: { count: jest.fn() },
+    accountRequest: { count: jest.fn() },
     route: { count: jest.fn() },
     run: { count: jest.fn() },
     emergencyAlert: { count: jest.fn() },
@@ -55,6 +56,7 @@ beforeEach(() => {
   prisma.student.findMany.mockResolvedValue([{ id: 's9', name: 'Orphan', grade: '3', rfidTag: 'R9', guardianPhone: null }]);
   prisma.student.count.mockResolvedValue(0);
   prisma.passwordResetRequest.count.mockResolvedValue(0);
+  prisma.accountRequest.count.mockResolvedValue(0);
   prisma.route.count.mockResolvedValue(0);
   prisma.run.count.mockResolvedValue(0);
   prisma.emergencyAlert.count.mockResolvedValue(0);

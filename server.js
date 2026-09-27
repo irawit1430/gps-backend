@@ -1318,7 +1318,7 @@ app.get('/api/schools/:schoolId/readiness', requireTenant('schoolId'), schoolAdm
     const now = new Date();
     const running = { in: ['ON_SCHEDULE', 'DELAYED'] };
     const [
-      students, noParent, noStop, cardsUnprinted, cardsNeverScanned, parents, resetRequests,
+      students, noParent, noStop, cardsUnprinted, cardsNeverScanned, parents, resetRequests, reviewCases,
       routesNoStops, runsNoCrew, sos, untracked, darkTrips,
     ] = await Promise.all([
       prisma.student.count({ where: { schoolId } }),
@@ -1334,6 +1334,7 @@ app.get('/api/schools/:schoolId/readiness', requireTenant('schoolId'), schoolAdm
         },
       }),
       prisma.passwordResetRequest.count({ where: { schoolId, status: 'PENDING', user: { role: { in: SCHOOL_RESETTABLE_ROLES } } } }),
+      prisma.accountRequest.count({ where: { schoolId, type: REVIEW_TYPE, status: 'PENDING' } }),
       prisma.route.count({ where: { schoolId, stops: { none: {} } } }),
       prisma.run.count({ where: { active: true, route: { schoolId }, OR: [{ busId: null }, { driverId: null }] } }),
       prisma.emergencyAlert.count({ where: { schoolId, status: 'ACTIVE', type: { in: ['DRIVER_SOS', 'HARDWARE_SOS'] } } }),
@@ -1381,6 +1382,7 @@ app.get('/api/schools/:schoolId/readiness', requireTenant('schoolId'), schoolAdm
     add('warning', 'INVITE_EMAIL_FAILED', stages.EMAIL_FAILED || 0, 'Invite emails that failed', `${plural(stages.EMAIL_FAILED || 0, 'invite email', 'invite emails')} did not send. Check the address or send another way.`, '/parents?stage=EMAIL_FAILED');
     add('warning', 'INVITE_EXPIRED', stages.INVITE_EXPIRED || 0, 'Invites expired', `${plural(stages.INVITE_EXPIRED || 0, 'family', 'families')} did not use their code in time. Send a new one.`, '/parents?stage=INVITE_EXPIRED');
     add('warning', 'PUSH_FAILING', pushFailing, 'Alerts not reaching phones', `${plural(pushFailing, 'family\'s phone is', 'families\' phones are')} refusing alerts. They still see them in the app.`, '/parents?push=FAILING');
+    add('warning', 'ATTENDANCE_REVIEW', reviewCases, 'Refused check-ins to review', `${plural(reviewCases, 'driver has', 'drivers have')} sent check-ins the system refused. Decide whether they go into the record.`, '/students?review=1');
     add('warning', 'PASSWORD_REQUESTS', resetRequests, 'Password requests waiting', `${plural(resetRequests, 'person is', 'people are')} locked out and waiting for the office.`, '/students?passwordRequests=1');
     add('warning', 'RUN_NO_CREW', runsNoCrew, 'Schedules missing a bus or driver', `${plural(runsNoCrew, 'schedule has', 'schedules have')} no bus or no driver, so no trip will be made.`, '/schedules');
     add('warning', 'ROUTE_NO_STOPS', routesNoStops, 'Routes with no stops', `${plural(routesNoStops, 'route has', 'routes have')} no stops yet.`, '/routes');
@@ -3608,7 +3610,11 @@ app.get('/api/driver/telemetry-credentials', async (req, res) => {
         bus: { select: { id: true, deviceId: true } },
       },
     });
-    const activeTrip = telemetryTripFor(trips);
+    // The app names the trip it is about to start, so a driver with a morning and an
+    // afternoon run gets the key for the one in front of them.
+    const wanted = req.query.tripId ? trips.find((t) => t.id === String(req.query.tripId)) : null;
+    if (req.query.tripId && !wanted) return res.status(404).json({ error: 'That trip is not yours, or has ended' });
+    const activeTrip = wanted || telemetryTripFor(trips);
     if (!activeTrip || !activeTrip.bus) {
       return res.status(404).json({ error: 'No active trip with an assigned device' });
     }
@@ -3934,6 +3940,66 @@ async function ownsTrip(req, res, next) {
   return res.status(403).json({ error: 'Forbidden' });
 }
 
+// Has GPS from this bus reached the server lately? From its tracker (TM-100 / AIS-140)
+// or from a phone. In memory first; the stored trail covers a server restart.
+async function freshFixFor(busId, withinMs = config.TRIP_START_FIX_SECONDS * 1000) {
+  const since = Date.now() - withinMs;
+  const live = busPresence.lastFixOf(busId);
+  if (live && live.at >= since) return { source: live.source === 'tracker' ? 'tracker' : 'phone', at: new Date(live.at) };
+  const stored = await prisma.gpsLog.findFirst({
+    where: { busId, timestamp: { gte: new Date(since) } },
+    orderBy: { timestamp: 'desc' },
+    select: { timestamp: true },
+  });
+  return stored ? { source: 'stored', at: stored.timestamp } : null;
+}
+
+// The driver app asks this before it starts a trip: is this bus's position reaching the
+// school right now? A healthy tracker is enough on its own; otherwise the phone has to
+// get a fix through first.
+app.get('/api/trips/:tripId/tracking-check', ownsTrip, async (req, res) => {
+  try {
+    const trip = await prisma.trip.findUnique({ where: { id: req.params.tripId }, select: { busId: true } });
+    if (!trip) return res.status(404).json({ error: 'Trip not found' });
+    const fix = await freshFixFor(trip.busId);
+    res.json({
+      verified: Boolean(fix),
+      source: fix?.source ?? null,
+      lastFixAt: fix?.at ?? null,
+      withinSeconds: config.TRIP_START_FIX_SECONDS,
+      enforced: config.TRIP_START_REQUIRES_GPS,
+    });
+  } catch (err) {
+    req.log.error({ err }, 'tracking check failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// A trip started with no GPS, by the driver's decision: the school hears it now, with the
+// reason, under the same key as every other "running with no GPS" alert for this trip.
+async function reportStartWithoutGps(tripId, reason, log) {
+  try {
+    const trip = await prisma.trip.findUnique({
+      where: { id: tripId },
+      select: { id: true, bus: { select: { id: true, licensePlate: true } }, route: { select: { name: true, schoolId: true } } },
+    });
+    if (!trip) return;
+    const admins = await prisma.user.findMany({ where: { schoolId: trip.route.schoolId, role: { in: ['SCHOOL_ADMIN', 'SUPER_ADMIN'] } }, select: { id: true } });
+    if (!admins.length) return;
+    const title = 'Trip started without GPS';
+    const message = `${trip.bus.licensePlate} on ${trip.route.name} started with no working GPS. Driver's reason: "${reason}". Parents cannot see the bus. Call the driver.`;
+    const context = { type: 'TRACKING_UNVERIFIED', busId: trip.bus.id, tripId: trip.id, reason: 'override', detail: reason };
+    const { count } = await prisma.notification.createMany({
+      data: admins.map((a) => ({ userId: a.id, title, message, type: 'SYSTEM', context, eventKey: `tracking-unverified:${trip.id}:${a.id}` })),
+      skipDuplicates: true,
+    });
+    if (io && count) admins.forEach((a) => emitToUser(io, a.id, 'notification', { title, message, type: 'SYSTEM', context }));
+    log?.warn({ tripId, reason }, 'trip started without verified GPS');
+  } catch (err) {
+    (log || logger).error({ err: err.message, tripId }, 'could not report a trip started without GPS');
+  }
+}
+
 app.patch('/api/trips/:tripId/status', ownsTrip, validate({ body: S.tripStatus }), async (req, res) => {
   try {
     if (req.user.role === 'DRIVER' && !['ON_SCHEDULE', 'DELAYED', 'COMPLETED'].includes(req.body.status)) {
@@ -3959,6 +4025,20 @@ app.patch('/api/trips/:tripId/status', ownsTrip, validate({ body: S.tripStatus }
       });
       if (await stillBlocking(conflict, req.log)) {
         return res.status(400).json({ error: 'Bus or driver is already on an active trip' });
+      }
+    }
+
+    // A driver starting a trip: its bus's position must be reaching the school, or the
+    // driver must say why it starts without. See TRIP_START_REQUIRES_GPS.
+    let startedWithoutGps = null;
+    if (req.user.role === 'DRIVER' && req.body.status === 'ON_SCHEDULE' && currentTrip?.status === 'PLANNED') {
+      const fix = await freshFixFor(currentTrip.busId);
+      if (!fix && req.body.gpsOverrideReason) startedWithoutGps = req.body.gpsOverrideReason;
+      else if (!fix && config.TRIP_START_REQUIRES_GPS) {
+        return res.status(409).json({
+          error: 'No GPS from this bus has reached the school yet. Turn on location sharing and wait for it, or start without GPS and give the reason.',
+          code: 'GPS_NOT_VERIFIED',
+        });
       }
     }
 
@@ -4013,6 +4093,7 @@ app.patch('/api/trips/:tripId/status', ownsTrip, validate({ body: S.tripStatus }
       include: { route: { select: { schoolId: true, name: true } } },
     });
     emitTripChange(trip, 'status');
+    if (startedWithoutGps) await reportStartWithoutGps(trip.id, startedWithoutGps, req.log);
     res.json(trip);
   } catch (err) {
     req.log.error({ err }, 'update trip failed');
@@ -4098,6 +4179,151 @@ app.post('/api/trips/:tripId/tracking-problem', ownsTrip, validate({ body: S.tra
     res.json({ delivered: admins.length > 0, admins: admins.length });
   } catch (err) {
     req.log.error({ err }, 'tracking problem report failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ─── Refused attendance: the office decides ────────────────
+// A scan the server refused (timed outside its trip, a closed trip, a phone with the
+// wrong clock) is still a child who may have travelled. The driver app used to let the
+// driver delete such scans after tapping "I have told the office", with nothing on the
+// school's side to show it happened. Now the driver sends them here as one case; the
+// phone keeps them until the office closes the case, and the office decides whether
+// they go into the record.
+//
+// Stored as an AccountRequest (type ATTENDANCE_REVIEW): the existing per-school request
+// queue with a status and a decision. `message` holds the case as JSON.
+const REVIEW_TYPE = 'ATTENDANCE_REVIEW';
+const reviewPayload = (row) => {
+  let body = {};
+  try { body = JSON.parse(row.message); } catch { body = { text: row.message }; }
+  return {
+    id: row.id, status: row.status, decisionReason: row.decisionReason ?? null,
+    createdAt: row.createdAt, updatedAt: row.updatedAt, driverId: row.userId,
+    driverName: row.user?.name ?? null,
+    text: body.text ?? '', note: body.note ?? null, scans: body.scans ?? [],
+  };
+};
+
+app.post('/api/attendance/review-cases', validate({ body: S.attendanceReviewCase }), async (req, res) => {
+  try {
+    if (req.user.role !== 'DRIVER') return res.status(403).json({ error: 'Drivers send refused scans for review' });
+    const { scans, note, clientKey } = req.body;
+
+    // A retry after a lost reply must find the case it already made.
+    const prior = await prisma.accountRequest.findFirst({
+      where: { userId: req.user.id, type: REVIEW_TYPE, message: { contains: clientKey } },
+      select: { id: true, status: true },
+    });
+    if (prior) return res.json({ caseId: prior.id, status: prior.status, duplicate: true });
+
+    const tripIds = [...new Set(scans.map((x) => x.tripId))];
+    const trips = await prisma.trip.findMany({
+      where: { id: { in: tripIds } },
+      select: { id: true, driverId: true, direction: true, route: { select: { name: true, schoolId: true } } },
+    });
+    // Only this driver's trips, all in one school.
+    if (trips.length !== tripIds.length || trips.some((t) => t.driverId !== req.user.id)) {
+      return res.status(403).json({ error: 'These scans are not all from your trips' });
+    }
+    const schoolId = trips[0].route.schoolId;
+    if (trips.some((t) => t.route.schoolId !== schoolId)) return res.status(400).json({ error: 'Scans from more than one school' });
+    const students = await prisma.student.findMany({
+      where: { id: { in: [...new Set(scans.map((x) => x.studentId))] }, schoolId },
+      select: { id: true, name: true, grade: true },
+    });
+    const who = new Map(students.map((x) => [x.id, x]));
+    const route = new Map(trips.map((t) => [t.id, t.route.name]));
+    const enriched = scans.map((x) => ({ ...x, studentName: who.get(x.studentId)?.name ?? 'Unknown child', grade: who.get(x.studentId)?.grade ?? null, routeName: route.get(x.tripId) ?? null }));
+    const text = `${scans.length} ${scans.length === 1 ? 'check-in was' : 'check-ins were'} refused and need the office to decide.`;
+
+    const row = await prisma.accountRequest.create({
+      data: { userId: req.user.id, schoolId, type: REVIEW_TYPE, status: 'PENDING', message: JSON.stringify({ clientKey, text, note: note ?? null, scans: enriched }) },
+    });
+
+    const admins = await prisma.user.findMany({ where: { schoolId, role: { in: ['SCHOOL_ADMIN', 'SUPER_ADMIN'] } }, select: { id: true } });
+    if (admins.length) {
+      const title = 'Refused check-ins to review';
+      const message = `A driver sent ${text.charAt(0).toLowerCase()}${text.slice(1)} Open Students → Attendance to review.`;
+      const context = { type: 'ATTENDANCE_REVIEW', caseId: row.id };
+      await prisma.notification.createMany({
+        data: admins.map((a) => ({ userId: a.id, title, message, type: 'SYSTEM', context, eventKey: `attendance-review:${row.id}:${a.id}` })),
+        skipDuplicates: true,
+      });
+      if (io) admins.forEach((a) => emitToUser(io, a.id, 'notification', { title, message, type: 'SYSTEM', context }));
+    }
+    req.log.info({ caseId: row.id, scans: scans.length }, 'refused scans sent for office review');
+    res.status(201).json({ caseId: row.id, status: row.status });
+  } catch (err) {
+    req.log.error({ err }, 'attendance review case failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// The driver's phone asks what became of its cases.
+app.get('/api/attendance/review-cases', async (req, res) => {
+  try {
+    const ids = String(req.query.ids || '').split(',').filter(Boolean).slice(0, 100);
+    const where = { type: REVIEW_TYPE, ...(ids.length ? { id: { in: ids } } : {}) };
+    if (req.user.role === 'DRIVER') where.userId = req.user.id;
+    else if (req.user.role === 'SCHOOL_ADMIN') where.schoolId = req.user.schoolId;
+    else if (req.user.role !== 'SUPER_ADMIN') return res.status(403).json({ error: 'Forbidden' });
+    const rows = await prisma.accountRequest.findMany({ where, orderBy: { createdAt: 'desc' }, take: 100, select: { id: true, status: true, decisionReason: true, updatedAt: true } });
+    res.json(rows);
+  } catch (err) {
+    req.log.error({ err }, 'list review cases failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// The office's list.
+app.get('/api/schools/:schoolId/attendance-review', requireTenant('schoolId'), schoolAdminsOnly, async (req, res) => {
+  try {
+    const status = req.query.status === 'ALL' ? undefined : String(req.query.status || 'PENDING');
+    const rows = await prisma.accountRequest.findMany({
+      where: { schoolId: req.params.schoolId, type: REVIEW_TYPE, ...(status ? { status } : {}) },
+      orderBy: { createdAt: 'desc' },
+      take: 200,
+      include: { user: { select: { name: true } } },
+    });
+    res.json(rows.map(reviewPayload));
+  } catch (err) {
+    req.log.error({ err }, 'attendance review list failed');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// The office decides. RESOLVED with `record` writes the scans into the record as office
+// corrections (MANUAL: no late "your child boarded" push to a family hours later).
+app.patch('/api/attendance/review-cases/:id', authorizeRoles('SUPER_ADMIN', 'SCHOOL_ADMIN'), validate({ body: S.attendanceReviewDecision }), async (req, res) => {
+  try {
+    const row = await prisma.accountRequest.findUnique({ where: { id: req.params.id } });
+    if (!row || row.type !== REVIEW_TYPE) return res.status(404).json({ error: 'Case not found' });
+    if (req.user.role === 'SCHOOL_ADMIN' && row.schoolId !== req.user.schoolId) return res.status(403).json({ error: 'Forbidden' });
+    if (row.status !== 'PENDING') return res.status(409).json({ error: `This case is already ${row.status.toLowerCase()}` });
+
+    let recorded = 0;
+    if (req.body.status === 'RESOLVED' && req.body.record) {
+      const { scans = [] } = reviewPayload(row);
+      const result = await prisma.attendanceLog.createMany({
+        data: scans.map((x) => ({
+          studentId: x.studentId, tripId: x.tripId, type: x.type, source: 'MANUAL',
+          timestamp: new Date(x.occurredAt), recordedBy: req.user.id,
+          requestKey: crypto.createHash('sha256').update(`review:${row.id}:${x.idempotencyKey}`).digest('hex'),
+        })),
+        skipDuplicates: true,
+      });
+      recorded = result.count;
+    }
+    const updated = await prisma.accountRequest.update({
+      where: { id: row.id },
+      data: { status: req.body.status, decisionReason: req.body.reason },
+    });
+    if (io) emitToUser(io, row.userId, 'account_request_changed', { id: row.id, status: updated.status });
+    req.log.info({ caseId: row.id, status: updated.status, recorded, by: req.user.id }, 'attendance review decided');
+    res.json({ id: row.id, status: updated.status, decisionReason: updated.decisionReason, recorded });
+  } catch (err) {
+    req.log.error({ err }, 'attendance review decision failed');
     res.status(500).json({ error: 'Internal server error' });
   }
 });

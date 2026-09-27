@@ -289,6 +289,18 @@ Uptime check (from Cloud Console → Monitoring → Uptime checks):
 - **iPhone push**: set `APNS_KEY`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID`
   (`.env.example` says where each comes from). Until all four are set iPhones register
   but are not sent to, and the school's readiness page says so.
+- **GPS before a trip starts (`TRIP_START_REQUIRES_GPS`)**. The new driver app checks that
+  the school can see the bus before it starts a trip; a driver who starts without GPS
+  must give a reason, and every school admin is told at once ("Trip started without
+  GPS"). The server-side refusal is off (`0`) so drivers on the old app are not locked
+  out. Once every driver phone runs the new build, set `TRIP_START_REQUIRES_GPS=1` and
+  `pm2 reload voltava-fleet`: a start with no position in the last
+  `TRIP_START_FIX_SECONDS` (default 120) and no reason is then refused.
+- **Refused check-ins**. Scans the server refuses are no longer deleted on the driver's
+  phone: the driver sends them to the office, and they wait on the dashboard's
+  Students page ("Attendance to review", also on the readiness list) until someone
+  records or closes each one. No migration: they are `AccountRequest` rows of type
+  `ATTENDANCE_REVIEW`.
 - **Never skip `npm ci` on a deploy.** The GCP cheatsheet`s shorter sequence omits it,
   and the first deploy that added a dependency (nodemailer) crash-looped the API ~190
   times before anyone noticed — `curl -s` prints nothing on connection-refused, so it

@@ -10,7 +10,10 @@ const { tripTelemetryKey } = require('../telemetryKeys');
 // Keys accepted (bus looked up by req.body.deviceId):
 //   - a trip key (telemetryKeys.js) for a trip running on this bus, with that trip's
 //     driver: what driver phones get now. It stops working when the trip ends or is
-//     reassigned.
+//     reassigned. It also works for a trip about to start (PLANNED, due within
+//     PRESTART_WINDOW_MS): the driver app now proves GPS reaches the server BEFORE it
+//     starts the trip, so the first fixes arrive while the trip is still planned. Those
+//     fixes file under no trip; only a running trip tags GPS or reaches parents.
 //   - Bus.deviceSecret, the bus's permanent key, while TELEMETRY_ACCEPT_BUS_SECRET is
 //     on (default): hardware flashed with it, and phones that fetched it before trip
 //     keys existed. Each bus using it is logged, hourly, so it can be switched off.
@@ -21,6 +24,15 @@ const { tripTelemetryKey } = require('../telemetryKeys');
 //   - If enforced and the bus has no key to check against → 403.
 
 const BUS_SECRET_LOG_INTERVAL_MS = 60 * 60 * 1000;
+const PRESTART_WINDOW_MS = 6 * 60 * 60 * 1000;
+const RUNNING = ['ON_SCHEDULE', 'DELAYED'];
+// The query below selects status; a row without one can only have come from a query that
+// asked for running trips alone, so it counts as running.
+const isRunning = (t) => !t.status || RUNNING.includes(t.status);
+
+// A planned trip whose key may sign GPS now: due within the window, or with no time set.
+const aboutToStart = (t, now = Date.now()) =>
+  t.status === 'PLANNED' && (!t.scheduledStart || Math.abs(new Date(t.scheduledStart).getTime() - now) <= PRESTART_WINDOW_MS);
 const busSecretLoggedAt = new Map(); // busId → epoch ms
 
 function noteBusSecretUse(bus) {
@@ -65,9 +77,9 @@ async function telemetryHmac(prisma) {
           trips: {
             // DELAYED is running too. Matching only ON_SCHEDULE filed a late bus's GPS
             // under no trip, and its parents stopped seeing it move. The route needs the
-            // id; driverId is what a trip key is bound to.
-            where: { status: { in: ['ON_SCHEDULE', 'DELAYED'] } },
-            select: { id: true, driverId: true },
+            // id; driverId is what a trip key is bound to. PLANNED only for the key.
+            where: { status: { in: [...RUNNING, 'PLANNED'] } },
+            select: { id: true, driverId: true, status: true, scheduledStart: true },
           },
         },
       });
@@ -76,7 +88,10 @@ async function telemetryHmac(prisma) {
     }
     if (!bus) return res.status(404).json({ error: 'Device not registered' });
 
-    const keys = (bus.trips || []).map((t) => ({ key: tripTelemetryKey(bus.id, t.id, t.driverId) }));
+    const signing = (bus.trips || []).filter((t) => isRunning(t) || aboutToStart(t));
+    const keys = signing.map((t) => ({ key: tripTelemetryKey(bus.id, t.id, t.driverId) }));
+    // Everything after this reads bus.trips as "the running trip": keep it exactly that.
+    bus.trips = (bus.trips || []).filter(isRunning);
     if (bus.deviceSecret && config.TELEMETRY_ACCEPT_BUS_SECRET) keys.push({ key: bus.deviceSecret, busSecret: true });
     if (keys.length === 0) {
       return res.status(403).json({ error: 'Device has no HMAC secret provisioned and no running trip' });

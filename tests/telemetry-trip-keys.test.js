@@ -57,6 +57,27 @@ beforeEach(() => {
 });
 afterEach(() => jest.restoreAllMocks());
 
+describe('before the trip starts', () => {
+  // The driver app proves GPS reaches the school before it starts the trip, so the key
+  // for a trip about to start has to work. Those fixes belong to no trip yet.
+  it('works for a trip due within hours, and files the fix under no trip', async () => {
+    const key = tripTelemetryKey('bus-7', 'trip-1', 'driver-1');
+    prisma.bus.findUnique.mockResolvedValue(bus([{ id: 'trip-1', driverId: 'driver-1', status: 'PLANNED', scheduledStart: new Date(Date.now() + 20 * 60_000) }]));
+
+    const res = await post(key);
+
+    expect(res.status).toBe(200);
+    expect(prisma.gpsLog.create.mock.calls[0]?.[0]?.data?.tripId ?? null).toBeNull();
+    expect(positionAudience.emitToRiders).toHaveBeenCalledWith(expect.anything(), prisma, undefined, 'location_update', expect.anything(), expect.anything());
+  });
+
+  it('does not work for a trip days away', async () => {
+    const key = tripTelemetryKey('bus-7', 'trip-9', 'driver-1');
+    prisma.bus.findUnique.mockResolvedValue(bus([{ id: 'trip-9', driverId: 'driver-1', status: 'PLANNED', scheduledStart: new Date(Date.now() + 2 * 86_400_000) }]));
+    expect((await post(key)).status).toBe(401);
+  });
+});
+
 describe("the phone's key", () => {
   it('is not the bus secret, and is different for every trip, driver and bus', async () => {
     const key = await fetchKey();

@@ -159,6 +159,9 @@ exports.updateTrip = z.object({
 
 exports.tripStatus = z.object({
   status: z.enum(TRIP_STATUS),
+  // Starting a trip with no GPS from the bus is allowed only as a stated decision: the
+  // driver's reason goes to the school's admins at once (see the status route).
+  gpsOverrideReason: z.string().trim().min(3).max(200).optional(),
 });
 
 // The driver app's walk-around before a trip: all six checks, each once, each stamped
@@ -341,6 +344,30 @@ exports.parentInvite = z.object({ channel: z.enum(INVITE_CHANNEL) }).strict();
 exports.parentInviteBatch = z.object({
   parentIds: z.array(uuid).min(1).max(50),
   channel: z.enum(['EMAIL', 'PRINT']),
+}).strict();
+
+// Scans the server refused, sent by the driver to the school office to decide. Kept on
+// the phone until the office closes the case.
+const reviewScan = z.object({
+  studentId: uuid,
+  tripId: uuid,
+  type: z.enum(ATTENDANCE_TYPE),
+  occurredAt: z.string().datetime(),
+  source: z.enum(['SCAN', 'MANUAL']).default('SCAN'),
+  reason: z.string().trim().max(300).default(''),
+  idempotencyKey: z.string().min(1).max(200),
+});
+exports.attendanceReviewCase = z.object({
+  scans: z.array(reviewScan).min(1).max(200),
+  note: z.string().trim().max(500).optional(),
+  // The phone's own id for this submission: a retry after a lost reply finds the same case.
+  clientKey: z.string().min(8).max(100),
+}).strict();
+exports.attendanceReviewDecision = z.object({
+  status: z.enum(['RESOLVED', 'REJECTED']),
+  reason: z.string().trim().min(1).max(500),
+  // RESOLVED only: write the scans into the record as office corrections (MANUAL).
+  record: z.boolean().optional(),
 }).strict();
 
 // The driver app could not start tracking for a trip it has just started.

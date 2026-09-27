@@ -111,6 +111,13 @@ const schema = z.object({
   // Minutes after a trip starts by which its first GPS position must have arrived.
   // After that the school's admins are told the trip is running untracked. 0 = off.
   TRACKING_CONFIRM_MINUTES: z.coerce.number().int().nonnegative().default(3),
+  // A trip starts only once GPS from its bus has reached the server within the last
+  // TRIP_START_FIX_SECONDS, or the driver states why it must start without. The driver
+  // app does this itself from this release. Leave this off until every driver phone
+  // runs that app: older builds start the trip first and would be refused. Then set 1
+  // and the server enforces it too.
+  TRIP_START_REQUIRES_GPS: boolish.default('0'),
+  TRIP_START_FIX_SECONDS: z.coerce.number().int().min(15).max(900).default(120),
   // Minutes a bus waits at each stop for children to get on or off. A route's stop
   // times are pure driving time, so without this every ETA ran early, by about the
   // number of stops before yours. Applies to every school. 0 turns it off.

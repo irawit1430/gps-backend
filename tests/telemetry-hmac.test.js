@@ -97,9 +97,9 @@ describe('POST /api/telemetry with the signature check on', () => {
     const res = await post(fix);
 
     expect(res.status).toBe(200);
-    expect(prisma.bus.findUnique).toHaveBeenCalledWith(expect.objectContaining({
-      include: { trips: { where: { status: { in: ['ON_SCHEDULE', 'DELAYED'] } }, select: { id: true, driverId: true } } },
-    }));
+    // DELAYED is running too; PLANNED is looked up only for its key (see below).
+    const { where } = prisma.bus.findUnique.mock.calls[0][0].include.trips;
+    expect(where.status.in).toEqual(expect.arrayContaining(['ON_SCHEDULE', 'DELAYED']));
     expect(prisma.gpsLog.create).toHaveBeenCalledWith({
       data: expect.objectContaining({ busId: 'bus-1', tripId: 'late-trip' }),
     });
