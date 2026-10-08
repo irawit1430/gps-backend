@@ -131,9 +131,15 @@ async function materialiseRuns(prisma, { days = 3, now = new Date(), logger } = 
 async function warnSchoolsAboutCrewlessRuns(prisma, crewlessRuns, logger) {
   try {
     const since = startOfLocalDay(new Date());
+
+    // 1. Gather all unique schoolIds involved and prepare alert messages
+    const schoolIds = new Set();
+    const alertData = [];
+
     for (const { run, firstDate } of crewlessRuns.values()) {
       const schoolId = run.route?.schoolId;
       if (!schoolId) continue;
+      schoolIds.add(schoolId);
 
       const title = `Run has no bus or driver`;
       const message =
@@ -141,22 +147,59 @@ async function warnSchoolsAboutCrewlessRuns(prisma, crewlessRuns, logger) {
         `${!run.busId && !run.driverId ? "no bus and no driver are" : !run.busId ? "no bus is" : "no driver is"} assigned. ` +
         `No trip will be created until one is.`;
 
-      const admins = await prisma.user.findMany({
-        where: { schoolId, role: { in: ["SCHOOL_ADMIN", "SUPER_ADMIN"] } },
-        select: { id: true },
-      });
-      if (admins.length === 0) continue;
+      alertData.push({ run, schoolId, title, message });
+    }
 
-      const already = await prisma.notification.findFirst({
-        where: { userId: { in: admins.map((a) => a.id) }, message, createdAt: { gte: since } },
-        select: { id: true },
-      });
-      if (already) continue;
+    if (schoolIds.size === 0) return;
 
-      await prisma.notification.createMany({
-        data: admins.map((a) => ({ userId: a.id, title, message, type: "SYSTEM" })),
-      });
-      logger?.info({ runId: run.id, schoolId, admins: admins.length }, "Warned school about a crewless run");
+    // 2. Fetch all admins for these schools in one query
+    const allAdmins = await prisma.user.findMany({
+      where: { schoolId: { in: Array.from(schoolIds) }, role: { in: ["SCHOOL_ADMIN", "SUPER_ADMIN"] } },
+      select: { id: true, schoolId: true },
+    });
+
+    // Group admins by schoolId
+    const adminsBySchool = new Map();
+    for (const admin of allAdmins) {
+      if (!adminsBySchool.has(admin.schoolId)) adminsBySchool.set(admin.schoolId, []);
+      adminsBySchool.get(admin.schoolId).push(admin.id);
+    }
+
+    if (adminsBySchool.size === 0) return;
+
+    // 3. Fetch all existing notifications sent today for these users
+    const allAdminIds = allAdmins.map(a => a.id);
+    const existingNotifications = await prisma.notification.findMany({
+      where: { userId: { in: allAdminIds }, createdAt: { gte: since } },
+      select: { userId: true, message: true }
+    });
+
+    // Fast lookup for existing notifications: Map<"userId::message", true>
+    const alreadySent = new Set(existingNotifications.map(n => `${n.userId}::${n.message}`));
+
+    // 4. Build batch creations
+    const notificationsToCreate = [];
+
+    for (const { run, schoolId, title, message } of alertData) {
+      const adminIds = adminsBySchool.get(schoolId);
+      if (!adminIds || adminIds.length === 0) continue;
+
+      let sentToAny = false;
+      for (const adminId of adminIds) {
+        if (!alreadySent.has(`${adminId}::${message}`)) {
+          notificationsToCreate.push({ userId: adminId, title, message, type: "SYSTEM" });
+          sentToAny = true;
+          // Optimistically mark as sent in case there are duplicates in alertData
+          alreadySent.add(`${adminId}::${message}`);
+        }
+      }
+      if (sentToAny) {
+        logger?.info({ runId: run.id, schoolId, admins: adminIds.length }, "Warned school about a crewless run");
+      }
+    }
+
+    if (notificationsToCreate.length > 0) {
+      await prisma.notification.createMany({ data: notificationsToCreate });
     }
   } catch (err) {
     // Never let the alert path fail the materialisation it is reporting on.

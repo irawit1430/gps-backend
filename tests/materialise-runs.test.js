@@ -19,8 +19,8 @@ const mockPrisma = (runs, exceptions = [], closures = []) => ({
   runException: { findMany: jest.fn().mockResolvedValue(exceptions) },
   calendarDay: { findMany: jest.fn().mockResolvedValue(closures) },
   trip: { createMany: jest.fn().mockResolvedValue({ count: 0 }) },
-  user: { findMany: jest.fn().mockResolvedValue([{ id: 'admin-1' }]) },
-  notification: { findFirst: jest.fn().mockResolvedValue(null), createMany: jest.fn().mockResolvedValue({ count: 1 }) },
+  user: { findMany: jest.fn().mockResolvedValue([{ id: 'admin-1', schoolId: 'school-1' }]) },
+  notification: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue(null), createMany: jest.fn().mockResolvedValue({ count: 1 }) },
 });
 
 describe('materialiseRuns', () => {
